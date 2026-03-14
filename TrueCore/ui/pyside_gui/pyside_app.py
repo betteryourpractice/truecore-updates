@@ -4,7 +4,7 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from TrueCore.utils.runtime_info import resource_path
-from .main_window import MainWindow
+from TrueCore.ui.pyside_gui.main_window import MainWindow
 
 
 def launch_gui():
