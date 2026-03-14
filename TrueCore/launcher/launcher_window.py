@@ -43,7 +43,7 @@ def find_engine():
     # BUILT MODE
     base_dir = os.path.dirname(sys.executable)
 
-    engine_path = os.path.join(base_dir, "dist", "TrueCoreEngine.exe")
+    engine_path = os.path.join(base_dir, "engine", "TrueCoreEngine.exe")
 
     if os.path.exists(engine_path):
         return engine_path
