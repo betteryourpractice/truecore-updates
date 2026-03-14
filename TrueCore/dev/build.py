@@ -302,7 +302,7 @@ launcher_cmd = (
     f'--onefile '
     f'--windowed '
     f'--name TrueCoreLauncher '
-    f'--icon "{os.path.join(ASSETS_DIR, "truecore_logo.ico")}" '
+    f'--icon "{os.path.join(ASSETS_DIR, "truecore_icon.ico")}" '
     f'--add-data "{ASSETS_DIR};launcher/assets" '
     f'--add-data "{CORE_DIR}/launcher/assets;launcher/assets"  '
     f'"{LAUNCHER_APP}"'
