@@ -250,3 +250,57 @@ DATE: 2026-03-14
 CHANGES
 - Relocation decay and Ammoralization 
 
+
+
+VERSION: 1.15
+DATE: 2026-03-14
+
+CHANGES
+
+* Automation of local vs server updates
+
+
+
+VERSION: 1.16
+DATE: 2026-03-14
+
+CHANGES
+
+* Tranfer appropriation fix
+
+
+
+VERSION: 1.17
+DATE: 2026-03-14
+
+CHANGES
+
+* Build Fix for Dist
+
+
+
+VERSION: 1.18
+DATE: 2026-03-14
+
+CHANGES
+
+* Build Fix with Zip
+
+
+
+VERSION: 1.19
+DATE: 2026-03-14
+
+CHANGES
+
+* Internal
+
+
+
+VERSION: 1.19a
+DATE: 2026-03-14
+
+CHANGES
+
+* Asset modeling
+

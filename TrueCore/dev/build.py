@@ -304,6 +304,7 @@ launcher_cmd = (
     f'--name TrueCoreLauncher '
     f'--icon "{os.path.join(ASSETS_DIR, "truecore_logo.ico")}" '
     f'--add-data "{ASSETS_DIR};launcher/assets" '
+    f'--add-data "{CORE_DIR}/launcher/assets;launcher/assets"  '
     f'"{LAUNCHER_APP}"'
 )
 
@@ -329,55 +330,82 @@ shutil.move(engine_src, os.path.join(engine_dest_dir, "TrueCoreEngine.exe"))
 post_build_clean()
 
 # -------------------------------------------------
-# CREATE RELEASE ZIP
+# CREATE RELEASE ZIP (ENGINE ONLY)
 # -------------------------------------------------
 
 print("\nCreating release package...\n")
 
 release_dir = os.path.join(ROOT_DIR, "release")
-release_build_dir = os.path.join(release_dir, f"TrueCore_v{new_version}")
+os.makedirs(release_dir, exist_ok=True)
 
-# remove old release folder if it exists
-if os.path.exists(release_build_dir):
-    shutil.rmtree(release_build_dir)
+engine_src = os.path.join(ROOT_DIR, "dist", "dist", "TrueCoreEngine.exe")
 
-os.makedirs(release_build_dir, exist_ok=True)
+zip_path = os.path.join(release_dir, f"TrueCore_v{new_version}.zip")
 
-# -------------------------------------------------
-# COPY LAUNCHER
-# -------------------------------------------------
+import zipfile
 
-launcher_src = os.path.join(ROOT_DIR, "dist", "TrueCoreLauncher.exe")
-launcher_dest = os.path.join(release_build_dir, "TrueCoreLauncher.exe")
-
-shutil.copy(launcher_src, launcher_dest)
-
-# -------------------------------------------------
-# COPY ENGINE FOLDER
-# -------------------------------------------------
-
-engine_src_dir = os.path.join(ROOT_DIR, "dist", "dist")
-engine_dest_dir = os.path.join(release_build_dir, "dist")
-
-if os.path.exists(engine_dest_dir):
-    shutil.rmtree(engine_dest_dir)
-
-shutil.copytree(engine_src_dir, engine_dest_dir)
-
-# -------------------------------------------------
-# CREATE ZIP FILE
-# -------------------------------------------------
-
-zip_base_path = os.path.join(release_dir, f"TrueCore_v{new_version}")
-
-shutil.make_archive(
-    zip_base_path,
-    "zip",
-    release_build_dir
-)
+with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+    z.write(engine_src, "TrueCoreEngine.exe")
 
 print("\nRelease ZIP created:")
-print(f"{zip_base_path}.zip\n")
+print(zip_path)
+
+
+# -------------------------------------------------
+# FINAL ENGINE STARTUP VERIFICATION
+# -------------------------------------------------
+
+print("\nRunning final engine verification...\n")
+
+try:
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "TrueCore.ui.pyside_gui.pyside_app"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+    time.sleep(3)
+
+    proc.terminate()
+
+    print("Engine startup verification passed.\n")
+
+except Exception as e:
+
+    print("\nERROR: Engine failed to start.")
+    print(e)
+    sys.exit(1)
+
+
+# -------------------------------------------------
+# UPDATE VERSION.JSON FOR UPDATE SERVER
+# -------------------------------------------------
+
+print("\nUpdating version.json...\n")
+
+import json
+
+version_json_path = os.path.join(ROOT_DIR, "version.json")
+
+download_url = f"https://github.com/betteryourpractice/truecore-updates/releases/download/v{new_version}/TrueCore_v{new_version}.zip"
+
+version_data = {
+    "version": new_version,
+    "download": download_url
+}
+
+with open(version_json_path, "w") as f:
+    json.dump(version_data, f, indent=4)
+
+print("version.json updated.")
+
+# commit + push update server changes
+subprocess.call("git add version.json", shell=True)
+subprocess.call(f'git commit -m "Update version.json for v{new_version}"', shell=True)
+subprocess.call("git push", shell=True)
+
+print("version.json pushed to GitHub.\n")
 
 # -------------------------------------------------
 # BUILD COMPLETE

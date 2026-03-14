@@ -320,7 +320,11 @@ class LauncherWindow(QWidget):
             self.news_box.append("Download failed.")
             return
 
-        success = install_update(zip_data)
+        # ----------------------------------------------
+        # INSTALL UPDATE (PASS SERVER VERSION)
+        # ----------------------------------------------
+
+        success = install_update(zip_data, server_version)
 
         if success:
             self.news_box.append("Update installed successfully.")

@@ -10,6 +10,9 @@ from TrueCore.launcher.launcher_window import LauncherWindow
 # -------------------------------------------------
 
 def resource_path(relative_path):
+    """
+    Get absolute path to resource for development or PyInstaller.
+    """
 
     if hasattr(sys, "_MEIPASS"):
         base_path = os.path.join(sys._MEIPASS, "launcher")
@@ -17,17 +20,11 @@ def resource_path(relative_path):
         base_path = os.path.abspath(os.path.dirname(__file__))
 
     return os.path.join(base_path, relative_path)
-    """
-    Get absolute path to resource for development or PyInstaller.
-    """
 
-    if hasattr(sys, "_MEIPASS"):
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.abspath(os.path.dirname(__file__))
 
-    return os.path.join(base_path, relative_path)
-
+# -------------------------------------------------
+# START LAUNCHER
+# -------------------------------------------------
 
 def start_launcher():
 
@@ -41,9 +38,7 @@ def start_launcher():
 
     try:
 
-        style_path = resource_path(
-            "assets/launcher_style.qss"
-        )
+        style_path = resource_path("assets/launcher_style.qss")
 
         with open(style_path, "r", encoding="utf-8") as f:
             app.setStyleSheet(f.read())
@@ -62,6 +57,7 @@ def start_launcher():
     sys.exit(app.exec())
 
 
-if __name__ == "__main__":
+# -------------------------------------------------
 
+if __name__ == "__main__":
     start_launcher()

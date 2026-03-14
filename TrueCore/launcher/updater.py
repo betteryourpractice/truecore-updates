@@ -7,7 +7,7 @@ import sys
 from TrueCore.launcher.launcher_logging import log
 
 
-UPDATE_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/refs/heads/main/version.json"
+UPDATE_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version.json"
 
 ENGINE_DIR = "engine"
 VERSION_FILE = "version.txt"
@@ -128,19 +128,19 @@ def install_update(zip_data, version=None):
         os.makedirs(engine_path, exist_ok=True)
 
         # -------------------------------------------------
-        # REMOVE OLD ENGINE EXECUTABLES
+        # REMOVE OLD ENGINE INSTALL
         # -------------------------------------------------
 
-        for file in os.listdir(engine_path):
+        import shutil
 
-            if file.lower().startswith("truecore") and file.lower().endswith(".exe"):
-
-                try:
-                    os.remove(os.path.join(engine_path, file))
-                    log(f"Removed old engine: {file}")
-
-                except Exception as e:
-                    log(f"Failed removing {file}: {e}")
+        if os.path.exists(engine_path):
+            try:
+                shutil.rmtree(engine_path)
+                log("Removed old engine install")
+            except Exception as e:
+                log(f"Failed removing old engine: {e}")
+                
+        os.makedirs(engine_path, exist_ok=True)
 
         # -------------------------------------------------
         # EXTRACT UPDATE
