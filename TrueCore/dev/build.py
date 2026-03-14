@@ -45,7 +45,7 @@ CORE_DIR = os.path.join(ROOT_DIR, "TrueCore")
 VERSION_PATH = os.path.join(CORE_DIR, "VERSION.txt")
 CHANGELOG_PATH = os.path.join(CORE_DIR, "CHANGELOG.txt")
 
-ASSETS_DIR = os.path.join(CORE_DIR, "assets")
+ASSETS_DIR = os.path.join(CORE_DIR, "launcher","assets")
 DEV_SYSTEM_DIR = os.path.join(CORE_DIR, "dev_system")
 LOGS_DIR = os.path.join(CORE_DIR, "logs")
 
