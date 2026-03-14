@@ -1,4 +1,5 @@
 from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QIcon
 import sys
 import os
 
@@ -31,6 +32,8 @@ def start_launcher():
     app = QApplication(sys.argv)
 
     app.setApplicationName("TrueCore Launcher")
+
+    app.setWindowIcon(QIcon(resource_path("assets/truecore_icon.ico")))
 
     # --------------------------------
     # LOAD STYLESHEET

@@ -340,3 +340,12 @@ CHANGES
 
 * Fix asset path for launcher icon (use launcher/assets)
 
+
+
+VERSION: 1.19f
+DATE: 2026-03-14
+
+CHANGES
+
+* Update build, launcher, asset
+

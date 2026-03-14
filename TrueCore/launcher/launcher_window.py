@@ -66,7 +66,7 @@ class LauncherWindow(QWidget):
         self.resize(300,375)
         self.move(500, 220)
 
-        self.setWindowIcon(QIcon(resource_path("launcher/assets/truecore_icon.ico")))
+        self.setWindowIcon(QIcon(resource_path("assets/truecore_icon.ico")))
 
         # -------------------------------------------------
         # LOAD BACKGROUND IMAGE
@@ -142,7 +142,7 @@ class LauncherWindow(QWidget):
         version_layout = QVBoxLayout()
         version_layout.setAlignment(Qt.AlignRight)
 
-        self.server_version = QLabel("Server v?")
+        self.server_version = QLabel("Server v-")
         self.launcher_version = QLabel("Launcher v1.0")
 
         version_layout.addWidget(self.server_version)
