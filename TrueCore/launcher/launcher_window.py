@@ -66,7 +66,7 @@ class LauncherWindow(QWidget):
         self.resize(300,375)
         self.move(500, 220)
 
-        self.setWindowIcon(QIcon(resource_path("assets/truecore_icon.ico")))
+        self.setWindowIcon(QIcon(resource_path("launcher/assets/truecore_icon.ico")))
 
         # -------------------------------------------------
         # LOAD BACKGROUND IMAGE

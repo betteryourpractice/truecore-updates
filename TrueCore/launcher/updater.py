@@ -58,7 +58,7 @@ def check_updates():
 
         log("Checking update server...")
 
-        r = requests.get(UPDATE_URL, timeout=5)
+        r = requests.get(UPDATE_URL, timeout=10)
 
         if r.status_code != 200:
             log(f"Update server returned status {r.status_code}")

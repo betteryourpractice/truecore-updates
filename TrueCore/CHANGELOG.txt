@@ -313,3 +313,30 @@ CHANGES
 
 * Fix engine path for launcher
 
+
+
+VERSION: 1.19c
+DATE: 2026-03-14
+
+CHANGES
+
+* Fixed relative to absolute import for engine to launcher
+
+
+
+VERSION: 1.19d
+DATE: 2026-03-14
+
+CHANGES
+
+* ICo fix
+
+
+
+VERSION: 1.19e
+DATE: 2026-03-14
+
+CHANGES
+
+* Fix asset path for launcher icon (use launcher/assets)
+
