@@ -1,0 +1,299 @@
+/* =====================================================
+   GLOBAL
+===================================================== */
+
+QMainWindow {
+
+    background-color: #0C1016;
+
+    background-image:
+        qlineargradient(
+            x1:0 y1:0 x2:1 y2:1,
+            stop:0 rgba(255,255,255,0.06),
+            stop:0.15 rgba(255,255,255,0.02),
+            stop:0.35 rgba(255,255,255,0.05),
+            stop:0.5 rgba(255,255,255,0.015),
+            stop:0.65 rgba(255,255,255,0.05),
+            stop:0.85 rgba(255,255,255,0.02),
+            stop:1 rgba(255,255,255,0.06)
+        );
+}
+
+QWidget {
+
+    color: #E5E7EB;
+
+    font-size: 13px;
+
+    font-family: "Segoe UI";
+}
+
+/* =====================================================
+   SILVER SHEEN OVERLAY
+===================================================== */
+
+QWidget {
+    background-image: qlineargradient(
+        x1:0 y1:0 x2:1 y2:1,
+        stop:0 rgba(255,255,255,0.035),
+        stop:0.35 rgba(255,255,255,0.015),
+        stop:0.5 rgba(255,255,255,0.06),
+        stop:0.65 rgba(255,255,255,0.015),
+        stop:1 rgba(255,255,255,0.03)
+    );
+}
+
+/* =====================================================
+   HEADER PANEL
+===================================================== */
+
+QFrame#headerPanel {
+    background-color: qlineargradient(
+        x1:0 y1:0 x2:1 y2:1,
+        stop:0 #151B26,
+        stop:1 #0E131A
+    );
+    border: 1px solid #273243;
+    border-radius: 12px;
+    padding: 12px;
+
+    /* glow highlight */
+    outline: 1px solid rgba(255,255,255,0.03);
+}
+
+/* subtle glow divider under header */
+
+QFrame#headerPanel {
+    border-bottom: 2px solid #2F80ED;
+}
+
+QLabel#appTitle {
+    font-size: 36px;
+    font-weight: 700;
+    color: #57B6FF;
+}
+
+QLabel#appSubtitle {
+    color: #9CA3AF;
+    font-size: 26px;
+}
+
+
+/* =====================================================
+   BUTTONS
+===================================================== */
+
+QPushButton {
+    background-color: qlineargradient(
+        x1:0 y1:0 x2:0 y2:1,
+        stop:0 #202838,
+        stop:1 #151B26
+    );
+
+    border: 1px solid #2F3A4D;
+    border-radius: 8px;
+
+    padding: 10px 18px;
+
+    font-weight: 600;
+    color: #E5E7EB;
+    font-size: 22px;
+
+    /* soft highlight */
+    outline: 1px solid rgba(255,255,255,0.04);
+}
+
+QPushButton:hover {
+    border: 1px solid #56CCF2;
+    background-color: #1F2633;
+}
+
+QPushButton:pressed {
+    background-color: #111722;
+}
+
+QPushButton#primaryButton {
+    background-color: #3A7BD5;
+    border: none;
+    color: white;
+}
+
+QPushButton#primaryButton:hover {
+    background-color: #4A8BE6;
+}
+
+
+/* =====================================================
+   CLOSE BUTTON
+===================================================== */
+
+QPushButton#closeButton {
+
+    background-color: #202838;
+
+    border: 1px solid #2F3A4D;
+    border-radius: 8px;
+
+    padding: 8px 14px;
+
+    font-size: 22px;
+    font-weight: bold;
+
+    color: #E5E7EB;
+
+    outline: 1px solid rgba(255,255,255,0.04);
+}
+
+QPushButton#closeButton:hover {
+
+    background-color: #8B1E1E;
+    border: 1px solid #E74C3C;
+}
+
+QPushButton#closeButton:pressed {
+
+    background-color: #5E1414;
+}
+
+
+/* =====================================================
+   PANELS
+===================================================== */
+
+QFrame#panel {
+
+    background-color: qlineargradient(
+        x1:0 y1:0 x2:1 y2:1,
+        stop:0 #1B2431,
+        stop:0.45 #141B26,
+        stop:0.55 #1C2633,
+        stop:1 #0E131A
+    );
+
+    border: 1px solid #2F3A4D;
+    border-radius: 12px;
+
+    padding: 14px;
+
+    outline: 1px solid rgba(255,255,255,0.05);
+}
+
+
+/* =====================================================
+   PANEL TITLES
+===================================================== */
+
+QLabel#sectionTitle {
+
+    font-size: 22px;
+    font-weight: 600;
+
+    color: #57B6FF;
+
+    padding-bottom: 6px;
+}
+
+
+/* =====================================================
+   TABLE
+===================================================== */
+
+QTableWidget {
+
+    background-color: #11161E;
+
+    border: 1px solid #2F3A4D;
+    border-radius: 8px;
+
+    alternate-background-color: #0D1218;
+
+    selection-background-color: #3A7BD5;
+
+    gridline-color: #1B2330;
+
+    font-size: 18px;
+
+    outline: 1px solid rgba(255,255,255,0.03);
+}
+
+QHeaderView::section {
+
+    background-color: qlineargradient(
+        x1:0 y1:0 x2:0 y2:1,
+        stop:0 #252F41,
+        stop:1 #1A2230
+    );
+
+    border: none;
+    border-bottom: 1px solid #374151;
+
+    padding: 12px 10px;
+
+    font-weight: 600;
+    color: #9CA3AF;
+
+    font-size: 20px;
+
+    qproperty-alignment: AlignLeft;
+}
+
+QTableWidget::item {
+
+    padding: 10px;
+}
+
+QTableWidget::item:hover {
+
+    background-color: #1A2230;
+}
+
+
+/* =====================================================
+   CONSOLE
+===================================================== */
+
+QTextEdit {
+
+    background-color: #090D13;
+
+    border: 1px solid #2C374A;
+    border-radius: 8px;
+
+    padding: 10px;
+
+    font-family: Consolas;
+
+    font-size: 18px;
+
+    outline: 1px solid rgba(255,255,255,0.03);
+}
+
+
+/* =====================================================
+   SCROLLBARS
+===================================================== */
+
+QScrollBar:vertical {
+
+    background: #0C1117;
+
+    width: 10px;
+}
+
+QScrollBar::handle:vertical {
+
+    background: #2B3547;
+
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical:hover {
+
+    background: #3E4C64;
+}
+
+QScrollBar::add-line,
+QScrollBar::sub-line {
+
+    height: 0px;
+}

@@ -1,0 +1,252 @@
+TrueCore Development Changelog
+==============================
+
+VERSION: 1.5
+DATE: 2026-03-09
+
+CHANGES
+- Automatic VA Form Detection
+- Packet Completeness Scoring
+- Auto Repair Suggestions
+- Clinical ICD Extraction Improvements
+- Batch Packet Auditing
+- Build system bug fix
+
+VERSION: 1.5
+DATE: 2026-03-09
+
+CHANGES
+- Major feature update: VA form detection, packet completeness scoring, repair suggestions, clinical ICD detection improvements, batch packet auditing, GUI enhancements, version banner and automatic changelog system.
+
+
+
+VERSION: 1.5a
+DATE: 2026-03-09
+
+CHANGES
+- UI Changes in conjunction with UPD v.1.5
+
+
+
+VERSION: 1.6
+DATE: 2026-03-09
+
+CHANGES
+- Major system update including performance improvements, secure audit logging,
+
+
+
+VERSION: 1.6a
+DATE: 2026-03-09
+
+CHANGES
+- Bug fixes across system wide services
+
+
+
+VERSION: 1.6b
+DATE: 2026-03-09
+
+CHANGES
+- Interface logging error fix, build code modified
+
+
+
+VERSION: 1.6c
+DATE: 2026-03-09
+
+CHANGES
+- Fixed executable runtime file paths so Admin Panel data loads correctly outside VS Code. Added automatic runtime folder initialization and improved resource path handling for packaged builds.
+
+
+
+VERSION: 1.6d
+DATE: 2026-03-09
+
+CHANGES
+- Launcher Debugger
+
+
+
+VERSION: 1.6e
+DATE: 2026-03-10
+
+CHANGES
+- Enhanced document intelligence with improved table, checkbox, signature, and semantic field detection for more accurate packet analysis.
+
+
+
+VERSION: 1.6f
+DATE: 2026-03-10
+
+CHANGES
+- Internal Architecture & Build System Update
+
+
+
+VERSION: 1.7
+DATE: 2026-03-10
+
+CHANGES
+- Stability, Infrastructure, and Transparency Focus: System reliability, Build traceability, and debugging visibility
+
+
+
+VERSION: 1.7a
+DATE: 2026-03-10
+
+CHANGES
+- GUARD Fixters
+
+
+
+VERSION: 1.7b
+DATE: 2026-03-10
+
+CHANGES
+- Configurations within Powershell
+
+
+
+VERSION: 1.7c
+DATE: 2026-03-10
+
+CHANGES
+- Architecture Design for Export Logic and exterior workbook collaboration
+
+
+
+VERSION: 1.8
+DATE: 2026-03-11
+
+CHANGES
+- GUI build label fix; export, triage added
+
+
+
+VERSION: 1.8b
+DATE: 2026-03-11
+
+CHANGES
+- Intelligence upgrades
+
+
+
+VERSION: 1.8c
+DATE: 2026-03-11
+
+CHANGES
+- System Validation Protection, Build Warning Protections
+
+
+
+VERSION: 1.8d
+DATE: 2026-03-11
+
+CHANGES
+- Duplicate threshing, Audit Trail Export
+
+
+
+VERSION: 1.8e
+DATE: 2026-03-11
+
+CHANGES
+- TrueBrain Intelligence Expansion Upgrade
+
+
+
+VERSION: 1.9
+DATE: 2026-03-12
+
+CHANGES
+- Entire GUI Overall with QSS Remodel & New System
+
+
+
+VERSION: 1.9a
+DATE: 2026-03-12
+
+CHANGES
+- EXE Launcher Bug Fix
+
+
+
+VERSION: 1.9b
+DATE: 2026-03-13
+
+CHANGES
+- Begin Audit New Sys
+
+
+
+VERSION: 1.9c
+DATE: 2026-03-13
+
+CHANGES
+- Middling Fix New Sys
+
+
+
+VERSION: 1.9d
+DATE: 2026-03-13
+
+CHANGES
+- Complete System Audit + Pre & Post Update Build + Read Only Attributes
+
+
+
+VERSION: 1.9e
+DATE: 2026-03-13
+
+CHANGES
+- Start Launcher Initiation
+
+
+
+VERSION: 1.10
+DATE: 2026-03-13
+
+CHANGES
+- Launcher update system added
+
+
+
+VERSION: 1.11
+DATE: 2026-03-14
+
+CHANGES
+- TrueCore Launcher Alpha Launch
+
+
+
+VERSION: 1.12
+DATE: 2026-03-14
+
+CHANGES
+- TrueCore Engine System Launch
+
+
+
+VERSION: 1.12a
+DATE: 2026-03-14
+
+CHANGES
+- Bug Fix 
+
+
+
+VERSION: 1.13
+DATE: 2026-03-14
+
+CHANGES
+- Bug fixes, engine disallowance
+
+
+
+VERSION: 1.14
+DATE: 2026-03-14
+
+CHANGES
+- Relocation decay and Ammoralization 
+

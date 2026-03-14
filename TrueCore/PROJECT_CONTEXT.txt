@@ -1,0 +1,55 @@
+PROJECT: TrueCore Packet Assistant
+
+Purpose:
+Desktop Python tool that audits VA medical packet submissions.
+
+Main Architecture:
+GUI -> packet_processor -> parser -> extractor
+
+Files:
+truecore_app.py
+    Tkinter GUI, drag-and-drop interface, displays packet audit results.
+
+packet_processor.py
+    Main audit engine. Handles packet scoring, issue detection, and suggestions.
+
+parser.py
+    Extracts text from PDFs, DOCX, images, etc.
+
+extractor.py
+    Pulls structured fields from parsed text.
+
+icd_lookup.py
+    Loads ICD codes from assets.
+
+build.py
+    Handles version bumping and PyInstaller build process.
+
+VERSION.txt
+    Stores current version number.
+
+DEV_NOTES.txt
+    Development rules and architecture notes.
+
+Build System:
+Run build_truecore.bat
+This launches build.py which:
+- increments version
+- cleans old builds
+- runs PyInstaller
+
+Output:
+dist/TrueCore_vX.X.exe
+
+UI Colors:
+Blue = packet header
+Green = detected fields/forms
+Red = missing fields/issues
+Yellow = suggested fixes
+White footer = TrueCore Engine banner
+
+Rules for code updates:
+• Always return full file replacements.
+• Never return partial snippets.
+• Do not change architecture without asking.
+• Assume current code works unless told otherwise.

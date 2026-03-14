@@ -1,0 +1,13 @@
+TrueCore Development Notes
+
+Architecture:
+GUI -> packet_processor -> parser -> extractor
+
+Build:
+build_truecore.bat uses PyInstaller.
+
+Versioning:
+VERSION.txt stores current version.
+
+Rules:
+Return full file replacements only.

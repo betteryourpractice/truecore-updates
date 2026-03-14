@@ -1,0 +1,65 @@
+TRUECORE PROJECT STATE
+======================
+
+PROJECT
+-------
+TrueCore Packet Auditor
+VA Community Care packet analysis engine.
+
+ARCHITECTURE
+------------
+truecore_app.py
+    GUI interface (Tkinter + TkinterDnD)
+
+packet_processor.py
+    Packet analysis controller
+
+parser.py
+    Document text extraction
+
+extractor.py
+    Field extraction
+
+icd_lookup.py
+    ICD detection and normalization
+
+validator.py
+    Packet completeness scoring
+
+suggestions.py
+    Repair guidance engine
+
+form_detector.py
+    Document fingerprint detection
+
+
+CURRENT FEATURES
+----------------
+- Drag & drop packet auditing
+- Multi-file packet analysis
+- Folder batch auditing
+- Automatic VA form detection
+- ICD detection from clinical text
+- Packet completeness scoring
+- Repair suggestions
+
+
+SUPPORTED DOCUMENT TYPES
+------------------------
+PDF
+DOCX
+PNG
+JPG
+JPEG
+TIFF
+BMP
+TXT
+
+
+ROADMAP IDEAS
+-------------
+- Packet cross-document validation
+- Progress bars for batch processing
+- Radiology-specific NLP extraction
+- Automatic LOMN generation
+- VA packet template generation

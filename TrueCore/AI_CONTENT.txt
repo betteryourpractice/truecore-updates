@@ -1,0 +1,551 @@
+========================================
+TRUECORE AI ENGINEERING CONTEXT
+========================================
+
+Project: TrueCore Packet Assistant
+Owner: TrueBrain™, LLC
+Purpose: AI-assisted maintenance and development of the TrueCore system.
+
+TrueCore is a packet auditing system used to analyze medical packet submissions
+for VA Community Care requests. It performs document parsing, field extraction,
+form detection, validation scoring, and packet diagnostics.
+
+The system includes:
+
+• GUI application
+• packet analysis engine
+• OCR parsing
+• ICD detection
+• form detection
+• packet validation scoring
+• packet suggestions engine
+• administrative monitoring panel
+• logging and audit system
+• executable build system
+
+AI may assist with maintenance, debugging, and controlled upgrades.
+
+----------------------------------------
+CRITICAL RULES (NON-NEGOTIABLE)
+----------------------------------------
+
+AI MUST NOT:
+
+1. Remove any functions
+2. Remove any classes
+3. Remove any modules
+4. Change function signatures
+5. Rename functions
+6. Rename variables used across modules
+7. Change return data structures
+8. Change control flow logic
+9. Merge or delete code blocks
+10. Rewrite entire files
+
+AI MAY ONLY:
+
+• improve formatting
+• add comments
+• fix syntax errors
+• repair bugs explicitly reported
+• add new features when requested
+
+If unsure, AI MUST ask before modifying behavior.
+
+----------------------------------------
+DIFF-FIRST WORKFLOW
+----------------------------------------
+
+Before modifying any file:
+
+1. Read the entire file.
+2. Identify the exact change required.
+3. Show a DIFF of the proposed change.
+4. Explain what the change does.
+5. Wait for approval.
+6. Only then output the updated file.
+
+AI MUST NOT output full file replacements without approval.
+
+----------------------------------------
+MINIMAL CHANGE POLICY
+----------------------------------------
+
+AI must apply the smallest change possible.
+
+If a modification affects more than 5 lines of code,
+AI must pause and request confirmation.
+
+Never regenerate code from memory.
+
+Always edit the existing code.
+
+----------------------------------------
+PROTECTED FUNCTIONS (FROZEN API)
+----------------------------------------
+
+The following functions must NEVER be modified
+unless the user explicitly authorizes it.
+
+process_packet()
+process_file()
+process_folder()
+
+parse_document()
+
+extract_fields()
+
+detect_document_features()
+
+validate_packet()
+
+generate_suggestions()
+
+detect_icd_codes()
+
+log_event()
+
+These functions define the core system behavior.
+
+----------------------------------------
+IMMUTABLE FILES
+----------------------------------------
+
+The following files must not be modified unless the
+user explicitly states permission:
+
+truecore_app.py
+packet_processor.py
+build.py
+
+These files contain core runtime behavior and build logic.
+
+----------------------------------------
+POST-CHANGE VERIFICATION
+----------------------------------------
+
+After any modification AI must verify:
+
+• All imports still resolve
+• No functions were removed
+• Function signatures are unchanged
+• Modules still import correctly
+• No file dependencies were broken
+
+If verification fails, AI must stop and report the issue.
+
+----------------------------------------
+FILE STRUCTURE
+----------------------------------------
+
+TrueCore Project Layout
+
+truecore_app.py
+packet_processor.py
+packet_classifier.py
+parser.py
+extractor.py
+text_normalizer.py
+section_parser.py
+document_intelligence.py
+form_detector.py
+validator.py
+suggestions.py
+icd_lookup.py
+logging_system.py
+updater.py
+build.py
+
+dev_system/
+    dev_tracker.py
+
+assets/
+    icons
+    ICD database
+    logos
+
+logs/
+    activity.log
+    
+----------------------------------------
+SYSTEM ARCHITECTURE MAP
+----------------------------------------
+
+TrueCore follows a layered architecture.
+
+The dependency flow is:
+
+GUI LAYER
+truecore_app.py
+
+↓
+
+PROCESSING LAYER
+packet_processor.py
+
+↓
+
+DOCUMENT ANALYSIS LAYER
+parser.py
+text_normalizer.py
+extractor.py
+form_detector.py
+section_parser.py
+document_intelligence.py
+icd_lookup.py
+
+↓
+
+VALIDATION LAYER
+validator.py
+suggestions.py
+
+↓
+
+SUPPORT SYSTEMS
+logging_system.py
+dev_system/dev_tracker.py
+updater.py
+
+↓
+
+BUILD SYSTEM
+build.py
+
+----------------------------------------
+DEPENDENCY RELATIONSHIPS
+----------------------------------------
+
+truecore_app.py
+    imports packet_processor
+    imports icd_lookup
+
+packet_processor.py
+    imports parser
+    imports extractor
+    imports form_detector
+    imports validator
+    imports suggestions
+    imports icd_lookup
+    imports logging_system
+
+parser.py
+    used by packet_processor
+
+extractor.py
+    used by packet_processor
+
+form_detector.py
+    used by packet_processor
+
+validator.py
+    used by packet_processor
+
+suggestions.py
+    used by packet_processor
+
+icd_lookup.py
+    used by packet_processor and truecore_app
+
+logging_system.py
+    used by multiple modules
+
+----------------------------------------
+CORE EXECUTION PATH
+----------------------------------------
+
+truecore_app.py
+    ↓
+process_packet()
+    ↓
+parse_document()
+    ↓
+normalize_text()
+    ↓
+extract_fields()
+    ↓
+detect_icd_codes()
+    ↓
+detect_document_features()
+    ↓
+validate_packet()
+    ↓
+generate_suggestions()
+    ↓
+return packet result to GUI
+
+----------------------------------------
+LOGGING SYSTEM
+----------------------------------------
+
+The system logging module is:
+
+logging_system.py
+
+Function used across project:
+
+log_event(action, details="")
+
+This must not be changed because it is used by multiple modules.
+
+----------------------------------------
+THREADING SYSTEM
+----------------------------------------
+
+Packet analysis uses:
+
+ThreadPoolExecutor
+
+Threaded execution is used for packet analysis
+to prevent GUI blocking.
+
+AI must not modify threading behavior unless requested.
+
+----------------------------------------
+PACKET ANALYSIS PIPELINE
+----------------------------------------
+
+TrueCore packet processing flow:
+
+1. Document Parsing
+   parser.py
+
+2. Text Normalization
+   text_normalizer.py
+
+3. Field Extraction
+   extractor.py
+
+4. ICD Detection
+   icd_lookup.py
+
+5. Form Detection
+   form_detector.py
+
+6. Section Parsing
+   section_parser.py
+
+7. Document Intelligence
+   document_intelligence.py
+
+8. Packet Validation
+   validator.py
+
+9. Suggestion Engine
+   suggestions.py
+
+10. Packet Result Returned
+    packet_processor.py
+
+AI must not alter this pipeline order.
+
+----------------------------------------
+BUILD SYSTEM
+----------------------------------------
+
+Executable builds use:
+
+build.py
+
+Build system performs:
+
+• version bump
+• changelog update
+• syntax validation
+• PyInstaller packaging
+
+Executable output:
+
+dist/TrueCore_vX.X.exe
+
+AI must not alter build commands unless requested.
+
+----------------------------------------
+ADMIN PANEL
+----------------------------------------
+
+The GUI includes an internal admin panel displaying:
+
+• development tracker
+• version changelog
+• system activity logs
+
+Admin password:
+
+athena
+
+AI must not modify admin authentication unless requested.
+
+----------------------------------------
+FINAL RULE
+----------------------------------------
+
+TrueCore is a production system.
+
+AI must prioritize:
+
+• stability
+• compatibility
+• minimal change
+
+Never refactor or restructure the system
+unless the user explicitly asks for it.
+
+----------------------------------------
+TRUECORE PROCESSING PIPELINE DETAILS
+----------------------------------------
+
+TrueCore processes packets through a deterministic multi-stage pipeline.
+
+The stages are executed in the following order:
+
+1. Document Parsing
+   Module: parser.py
+
+   Responsibilities:
+   • Detect document type
+   • Extract text from PDF, DOCX, images, or TXT
+   • Apply OCR preprocessing for scanned documents
+
+2. Text Normalization
+   Module: text_normalizer.py
+
+   Responsibilities:
+   • Normalize whitespace
+   • Repair OCR header splits
+   • Standardize line structure
+
+3. Field Extraction
+   Module: extractor.py
+
+   Responsibilities:
+   • Extract structured fields including:
+     - patient_name
+     - dob
+     - authorization_number
+     - icd_codes
+     - ordering_doctor
+     - referring_doctor
+
+4. ICD Detection
+   Module: icd_lookup.py
+
+   Responsibilities:
+   • Detect diagnosis codes using:
+     - regex scanning
+     - contextual detection
+     - clinical inference
+
+5. Form Detection
+   Module: form_detector.py
+
+   Responsibilities:
+   • Detect packet forms using keyword fingerprints
+   • Apply probability scoring for form likelihood
+
+6. Section Parsing
+   Module: section_parser.py
+
+   Responsibilities:
+   • Split documents into logical form sections
+   • Detect clinical segments such as:
+     - diagnosis
+     - procedure
+     - provider
+     - authorization
+
+7. Document Intelligence
+   Module: document_intelligence.py
+
+   Responsibilities:
+   • Detect tables
+   • Detect checkboxes
+   • Detect provider signatures
+   • Identify structured clinical sections
+   • Extract semantic clinical narratives
+
+8. Packet Validation
+   Module: validator.py
+
+   Responsibilities:
+   • Validate extracted packet fields
+   • Verify required forms exist
+   • Generate validation issues
+   • Calculate packet score
+
+9. Suggestion Engine
+   Module: suggestions.py
+
+   Responsibilities:
+   • Convert issues into correction instructions
+   • Generate remediation guidance
+   • Provide TrueBrain diagnostic summaries
+
+10. Packet Result Return
+    Module: packet_processor.py
+
+    Responsibilities:
+    • Combine extracted data
+    • Attach validation results
+    • Return structured packet audit result to GUI
+
+----------------------------------------
+PACKET SCORING MODEL
+----------------------------------------
+
+TrueCore scoring begins at 100 and deducts points for validation failures.
+
+Example deductions:
+
+Missing patient name        → -20
+Missing authorization       → -20
+Missing DOB                 → -15
+Missing ICD codes           → -15
+Missing ordering provider   → -10
+Missing referring provider  → -10
+Missing SEOC                → -5
+Missing LOMN                → -5
+Missing consultation form   → -5
+
+Score ranges determine packet confidence:
+
+90-100 → HIGH
+70-89  → MEDIUM
+0-69   → LOW
+
+----------------------------------------
+WORKFLOW AUTOMATION
+----------------------------------------
+
+During packet processing TrueCore may perform automated tasks:
+
+• Packet triage into Approved / Review / Rejected folders
+• Workbook export for approved packets
+• Activity logging
+• Packet scoring dashboard updates
+
+Automation modules include:
+
+packet_triage.py
+workbook_export.py
+logging_system.py
+
+----------------------------------------
+FIELD NORMALIZATION RULES
+----------------------------------------
+
+Extracted fields are normalized before validation.
+
+Examples:
+
+Patient Name
+• Must contain first + last name
+
+DOB
+• Accepts multiple date formats
+
+Authorization Number
+• Extracted from multiple header patterns
+
+ICD Codes
+• Normalized to ICD-10 decimal format

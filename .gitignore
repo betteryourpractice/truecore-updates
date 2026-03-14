@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Logs
+*.log
+logs/
+
+# Dev system runtime files
+TrueCore/dev_system/*.json
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+.env/
+
+# Excel temporary files
+~$*.xlsx

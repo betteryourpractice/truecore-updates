@@ -1,0 +1,154 @@
+========================================
+TRUECORE AI GUARD SYSTEM
+========================================
+
+Purpose:
+This file protects the TrueCore codebase from destructive
+AI edits.
+
+AI must perform these checks BEFORE modifying any code.
+
+----------------------------------------
+GUARD CHECK 1 — FILE PROTECTION
+----------------------------------------
+
+The following files are protected.
+
+AI must not modify them unless explicitly authorized:
+
+truecore_app.py
+packet_processor.py
+build.py
+
+If a modification affects these files, AI must stop
+and request confirmation.
+
+----------------------------------------
+GUARD CHECK 2 — PROTECTED FUNCTIONS
+----------------------------------------
+
+The following functions define the TrueCore system.
+
+They must exist after any modification.
+
+process_packet
+process_file
+process_folder
+parse_document
+extract_fields
+detect_document_features
+validate_packet
+generate_suggestions
+detect_icd_codes
+log_event
+
+If any of these functions are missing or altered,
+AI must stop and report the issue.
+
+----------------------------------------
+GUARD CHECK 3 — IMPORT VALIDATION
+----------------------------------------
+
+After any code change the following imports must succeed:
+
+parser
+extractor
+form_detector
+validator
+suggestions
+icd_lookup
+logging_system
+packet_processor
+
+If any import fails, the AI must stop and report.
+
+----------------------------------------
+GUARD CHECK 4 — PIPELINE ORDER
+----------------------------------------
+
+The packet analysis pipeline must remain:
+
+parser
+text_normalizer
+extractor
+icd_lookup
+form_detector
+section_parser
+document_intelligence
+validator
+suggestions
+packet_processor
+
+AI must not reorder these steps.
+
+----------------------------------------
+GUARD CHECK 5 — FUNCTION SIGNATURES
+----------------------------------------
+
+The following function signatures must not change:
+
+process_packet(path, approved_icd_codes=None)
+
+parse_document(path)
+
+extract_fields(text)
+
+validate_packet(fields, detected_forms)
+
+generate_suggestions(issues, fields, detected_forms, text=None)
+
+detect_icd_codes(text, approved_codes=None)
+
+log_event(action, details="")
+
+----------------------------------------
+GUARD CHECK 6 — NO FULL FILE REWRITES
+----------------------------------------
+
+AI must never regenerate entire files.
+
+Only minimal edits are allowed.
+
+If more than 5 lines change,
+AI must show a diff and request approval.
+
+----------------------------------------
+GUARD CHECK 7 — SYSTEM STABILITY
+----------------------------------------
+
+TrueCore is a production system.
+
+AI must prioritize:
+
+• compatibility
+• stability
+• minimal change
+
+Refactoring is forbidden unless explicitly requested.
+
+----------------------------------------
+GUARD CHECK 8 — IMPORT GRAPH PROTECTION
+----------------------------------------
+
+TrueCore modules depend on each other.
+
+Before modifying any code, AI must verify the dependency graph.
+
+AI must confirm:
+
+1. The module being edited is not imported in a way that will break.
+2. All existing imports will still resolve.
+3. Functions imported by other modules still exist.
+4. Function signatures used by other modules are unchanged.
+5. No modules are renamed or removed.
+6. If dependency breakage is detected, AI must stop and report the issue instead of editing code.
+
+AI must preserve the project import structure.
+
+----------------------------------------
+FAIL CONDITION
+----------------------------------------
+
+If any guard rule is violated,
+AI must stop and explain the issue
+instead of producing code.
