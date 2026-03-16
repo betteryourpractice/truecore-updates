@@ -3,6 +3,7 @@ import zipfile
 import os
 import io
 import sys
+import time
 
 from TrueCore.launcher.launcher_logging import log
 
@@ -37,15 +38,46 @@ def get_local_version():
         version_path = os.path.join(base_dir, ENGINE_DIR, VERSION_FILE)
 
         if not os.path.exists(version_path):
+            log("Local version file not found.")
             return None
 
         with open(version_path, "r") as f:
-            return f.read().strip()
+            version = f.read().strip()
+
+        log(f"Local engine version: {version}")
+
+        return version
 
     except Exception as e:
 
         log(f"Failed reading local version: {e}")
         return None
+
+
+# -------------------------------------------------
+# SAFE REQUEST WITH RETRY
+# -------------------------------------------------
+
+def safe_request(url, timeout=10, retries=3):
+
+    for attempt in range(retries):
+
+        try:
+
+            log(f"Requesting: {url} (attempt {attempt+1})")
+
+            r = requests.get(url, timeout=timeout)
+
+            return r
+
+        except Exception as e:
+
+            log(f"Request attempt {attempt+1} failed: {e}")
+
+            if attempt < retries - 1:
+                time.sleep(2)
+
+    return None
 
 
 # -------------------------------------------------
@@ -58,7 +90,11 @@ def check_updates():
 
         log("Checking update server...")
 
-        r = requests.get(UPDATE_URL, timeout=10)
+        r = safe_request(UPDATE_URL, timeout=10, retries=3)
+
+        if r is None:
+            log("Update server request failed after retries.")
+            return None
 
         if r.status_code != 200:
             log(f"Update server returned status {r.status_code}")
@@ -68,14 +104,20 @@ def check_updates():
 
         server_version = data.get("version")
 
+        if not server_version:
+            log("Invalid version.json: missing version field.")
+            return None
+
         local_version = get_local_version()
 
-        log(f"Local version: {local_version}")
         log(f"Server version: {server_version}")
+        log(f"Local version: {local_version}")
 
         if local_version == server_version:
-            log("Launcher already up to date.")
+            log("Engine already up to date.")
             return None
+
+        log("Update available.")
 
         return data
 
@@ -95,13 +137,17 @@ def download_update(download_url):
 
         log("Downloading update...")
 
-        r = requests.get(download_url, timeout=30)
+        r = safe_request(download_url, timeout=30, retries=3)
+
+        if r is None:
+            log("Download request failed after retries.")
+            return None
 
         if r.status_code != 200:
             log(f"Download returned status {r.status_code}")
             return None
 
-        log("Download completed")
+        log("Download completed.")
 
         return io.BytesIO(r.content)
 
@@ -134,12 +180,17 @@ def install_update(zip_data, version=None):
         import shutil
 
         if os.path.exists(engine_path):
+
             try:
+
                 shutil.rmtree(engine_path)
+
                 log("Removed old engine install")
+
             except Exception as e:
+
                 log(f"Failed removing old engine: {e}")
-                
+
         os.makedirs(engine_path, exist_ok=True)
 
         # -------------------------------------------------

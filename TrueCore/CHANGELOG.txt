@@ -349,3 +349,12 @@ CHANGES
 
 * Update build, launcher, asset
 
+
+
+VERSION: 1.19g
+DATE: 2026-03-14
+
+CHANGES
+
+* Fix launcher icon, app icon, and resource paths
+

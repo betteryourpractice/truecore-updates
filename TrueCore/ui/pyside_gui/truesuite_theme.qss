@@ -32,8 +32,8 @@ QWidget {
    SILVER SHEEN OVERLAY
 ===================================================== */
 
-QWidget {
-    background-image: qlineargradient(
+QFrame {
+    background-image: qradialgradient(
         x1:0 y1:0 x2:1 y2:1,
         stop:0 rgba(255,255,255,0.035),
         stop:0.35 rgba(255,255,255,0.015),

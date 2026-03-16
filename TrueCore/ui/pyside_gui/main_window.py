@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from PySide6.QtGui import QIcon, QColor, QPixmap
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 
 import os
 import csv
@@ -82,31 +82,27 @@ class MainWindow(QMainWindow):
         # ---------------------------------
 
         self.bg_logo = QLabel(root)
+        self.bg_logo.setAlignment(Qt.AlignCenter)
+        self.bg_logo.setGeometry(self.rect())
 
-        logo_path = resource_path("ui/pyside_gui/assets/truecore_logo.png")
+        logo_path = resource_path("ui/pyside_gui/assets/launcher_background.png")
 
-        pix = QPixmap(logo_path)
+        self.bg_pix = QPixmap(logo_path)
+        self.bg_logo.setPixmap(self.bg_pix)
 
-        if not pix.isNull():
-
-            self.bg_logo.setPixmap(
-                pix.scaled(
-                    self.size(),
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
-            )
-
-            opacity = QGraphicsOpacityEffect()
-            opacity.setOpacity(0.04)
-            self.bg_logo.setGraphicsEffect(opacity)
-
-        else:
-
+        if self.bg_pix.isNull():
             print("Watermark logo failed to load:", logo_path)
+
+        opacity = QGraphicsOpacityEffect()
+        opacity.setOpacity(0.08)
+        self.bg_logo.setGraphicsEffect(opacity)
 
         self.bg_logo.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.bg_logo.lower()
+
+        # DeLay background scaling until window finishes rendering
+        QTimer.singleShot(0, self.update_background)
+
 
         # -------------------------------------------------
         # HEADER
@@ -306,14 +302,35 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------
 
     def resizeEvent(self, event):
-        
+
         super().resizeEvent(event)
-        
+
         if hasattr(self, "bg_logo"):
-            
+
             self.bg_logo.setGeometry(self.centralWidget().rect())
+
+        if hasattr(self, "update_background"):
+
+            self.update_background()
     
-    
+    # ----------------------------------------------
+    # BACKGROUND UPDATE
+    # ----------------------------------------------
+
+    def update_background(self):
+
+        if hasattr(self, "bg_logo") and hasattr(self, "bg_pix"):
+
+            if not self.bg_pix.isNull():
+
+                scaled = self.bg_pix.scaled(
+                    self.bg_logo.size(),
+                    Qt.KeepAspectRatioByExpanding,
+                    Qt.SmoothTransformation
+                )
+
+                self.bg_logo.setPixmap(scaled)
+
     # -------------------------------------------------
     # UTILITIES
     # -------------------------------------------------
