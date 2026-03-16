@@ -197,28 +197,29 @@ print("2 - SMALL fix\n")
 
 choice = input("Choose 1 or 2: ").strip()
 
-match = re.match(r"(\d+).(\d+)([a-z]?)", version)
+match = re.match(r"(\d+)(?:\.(\d+))?",version)
 
 if not match:
     print("\nERROR: VERSION.txt format invalid.")
     sys.exit()
 
-major = match.group(1)
+major = int(match.group(1))
 minor = match.group(2)
-letter = match.group(3)
+
+if minor is None:
+    minor = 0
+else:
+    minor = int(minor)
 
 if choice == "1":
-
-    minor = str(int(minor) + 1)
-    new_version = f"{major}.{minor}"
+    # BIG update
+    major += 1
+    new_version = f"{major}"
 
 else:
-
-    if letter:
-        new_letter = chr(ord(letter) + 1)
-        new_version = f"{major}.{minor}{new_letter}"
-    else:
-        new_version = f"{major}.{minor}a"
+    # SMALL update
+    minor += 1
+    new_version = f"{major}.{minor}"
 
 print(f"\nNew Version: v{new_version}")
 

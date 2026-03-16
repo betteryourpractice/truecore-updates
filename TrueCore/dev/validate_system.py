@@ -122,7 +122,7 @@ def check_version_format():
     with open(version_path, "r") as f:
         version = f.read().strip()
 
-    if not re.match(r"^\d+\.\d+[a-z]?$", version):
+    if not re.match(r"^\d+(\.\d+)?$", version):
         print("ERROR: VERSION.txt format invalid:", version)
         return False
 

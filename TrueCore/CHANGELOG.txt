@@ -367,3 +367,21 @@ CHANGES
 
 * "Update GUI background scaling, launcher fixes, updater improvements"
 
+
+
+VERSION: 1.19i
+DATE: 2026-03-15
+
+CHANGES
+
+* Remove old TKINTER & GITIGNORE update
+
+
+
+VERSION: 2
+DATE: 2026-03-15
+
+CHANGES
+
+* Validator and Update Format change
+
