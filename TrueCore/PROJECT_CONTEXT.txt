@@ -3,53 +3,201 @@ PROJECT: TrueCore Packet Assistant
 Purpose:
 Desktop Python tool that audits VA medical packet submissions.
 
-Main Architecture:
-GUI -> packet_processor -> parser -> extractor
+System Overview:
+TrueCore analyzes medical packet submissions from provider offices and determines whether the packet meets VA documentation requirements.
+It detects forms, extracts fields, validates ICD codes, scores packet completeness, and produces structured results for review.
 
-Files:
+Main Architecture:
+Launcher → Engine → GUI → Packet Processing Pipeline
+
+Core Processing Flow:
+GUI → packet_processor → parser → extractor → validation
+
+Primary Components:
+
+Launcher System
+PySide6 launcher responsible for update checks, engine download, and starting the TrueCore engine.
+
+Engine
+Main executable containing the TrueCore processing system and GUI.
+
+GUI System (PySide6)
+Modern PySide6 interface used for packet auditing, file selection, results display, and export tools.
+
+Processing Pipeline
+Packet analysis engine that parses documents, extracts fields, validates data, and scores packet completeness.
+
+---
+
+Core Files:
+
 truecore_app.py
-    Tkinter GUI, drag-and-drop interface, displays packet audit results.
+Engine entrypoint. Initializes runtime environment and launches the PySide6 GUI.
+
+pyside_app.py
+Starts the PySide6 application and loads the main GUI window.
+
+main_window.py
+Main GUI interface displaying packet audit results, console logs, packet details, and administrative tools.
+
+launcher_app.py
+Entry point for the TrueCore launcher system.
+
+launcher_window.py
+PySide6 interface for the launcher including login area, update status, and engine launch control.
+
+updater.py
+Handles update checks, downloads engine releases, and installs updates.
+
+---
+
+Processing Engine Files:
 
 packet_processor.py
-    Main audit engine. Handles packet scoring, issue detection, and suggestions.
+Main audit engine. Handles packet scoring, issue detection, form identification, and suggestion generation.
 
 parser.py
-    Extracts text from PDFs, DOCX, images, etc.
+Extracts raw text from supported document types including PDF, DOCX, and images.
 
 extractor.py
-    Pulls structured fields from parsed text.
+Pulls structured fields and patient data from parsed document text.
+
+packet_classifier.py
+Classifies packet types and determines document roles within a submission.
+
+packet_triage.py
+Handles packet routing logic and determines audit outcomes.
+
+form_detector.py
+Detects specific medical forms within packet documents.
+
+validator.py
+Validates extracted fields and checks packet completeness.
+
+suggestions.py
+Generates suggested fixes for missing or incomplete packet information.
+
+---
+
+Medical Support Modules:
 
 icd_lookup.py
-    Loads ICD codes from assets.
+Loads and validates ICD codes from asset datasets.
 
-build.py
-    Handles version bumping and PyInstaller build process.
+---
 
-VERSION.txt
-    Stores current version number.
+Export System:
 
-DEV_NOTES.txt
-    Development rules and architecture notes.
+workbook_export.py
+Generates Excel reports for approved packets.
+
+---
+
+Utilities:
+
+runtime_info.py
+Provides runtime environment utilities, resource loading, and version detection.
+
+logging_system.py
+Centralized logging system used for audit logging and runtime diagnostics.
+
+---
 
 Build System:
-Run build_truecore.bat
-This launches build.py which:
-- increments version
-- cleans old builds
-- runs PyInstaller
 
-Output:
-dist/TrueCore_vX.X.exe
+build_truecore.bat
+Launches the automated build pipeline.
 
-UI Colors:
-Blue = packet header
-Green = detected fields/forms
-Red = missing fields/issues
-Yellow = suggested fixes
-White footer = TrueCore Engine banner
+build.py
+Handles the full build process including:
+• version bumping
+• changelog update
+• syntax validation
+• GUI startup test
+• PyInstaller packaging
+• release package creation
+• update server version synchronization
 
-Rules for code updates:
-• Always return full file replacements.
-• Never return partial snippets.
-• Do not change architecture without asking.
+Output Artifacts:
+
+Launcher Build:
+dist/TrueCoreLauncher.exe
+
+Engine Build:
+dist/dist/TrueCoreEngine.exe
+
+Release Package:
+release/TrueCore_vX.X.zip
+
+---
+
+Versioning:
+
+VERSION.txt
+Stores the current engine version number.
+
+build_info.txt
+Stores build ID and build timestamp metadata.
+
+CHANGELOG.txt
+Contains version history and development notes.
+
+---
+
+Update System:
+
+version.json
+Hosted on the update server repository and used by the launcher to determine the latest engine version.
+
+Launcher Update Flow:
+Launcher → version.json → GitHub release → download engine → install → launch
+
+---
+
+UI Color System:
+
+Blue
+Packet header / system titles
+
+Green
+Detected fields or successful form recognition
+
+Red
+Missing fields or validation failures
+
+Yellow
+Suggested fixes or warnings
+
+White footer
+TrueCore Engine version banner
+
+---
+
+Project Documentation Files:
+
+AI_CONTENT.txt
+Contains development context used for AI-assisted modifications.
+
+AI_GUARD.txt
+Defines guardrails for automated code changes.
+
+PROJECT_CONTEXT.txt
+Overview of project architecture and components.
+
+PROJECT_STATE.txt
+Tracks system status and current capabilities.
+
+DEV_NOTES.txt
+Development guidelines and architectural notes.
+
+---
+
+Rules for Code Updates:
+
+• Always return full file replacements when modifying source code.
+• Never return partial snippets unless explicitly requested.
+• Do not change architecture without confirmation.
 • Assume current code works unless told otherwise.
+• Preserve launcher → engine → GUI architecture.
+• Avoid duplicating logic across modules.
+• Maintain separation between GUI, processing, and validation systems.

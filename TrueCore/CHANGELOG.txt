@@ -358,3 +358,12 @@ CHANGES
 
 * Fix launcher icon, app icon, and resource paths
 
+
+
+VERSION: 1.19h
+DATE: 2026-03-15
+
+CHANGES
+
+* "Update GUI background scaling, launcher fixes, updater improvements"
+
