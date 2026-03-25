@@ -1,0 +1,31 @@
+from TrueCoreIntel.intake.pdf_ingestion import (
+    SUPPORTED_PACKET_EXTENSIONS,
+    extract_document_pages,
+    extract_document_pages_with_fallback,
+    extract_docx_pages,
+    extract_image_pages_with_windows_ocr,
+    extract_pdf_pages,
+    extract_pdf_pages_with_fallback,
+    extract_pdf_pages_with_windows_ocr,
+    extract_text_pages,
+    get_powershell_command,
+    has_filled_consent_signals,
+    merge_page_texts,
+    normalize_pdf_text,
+)
+
+__all__ = [
+    "SUPPORTED_PACKET_EXTENSIONS",
+    "extract_document_pages",
+    "extract_document_pages_with_fallback",
+    "extract_docx_pages",
+    "extract_image_pages_with_windows_ocr",
+    "extract_pdf_pages",
+    "extract_pdf_pages_with_fallback",
+    "extract_pdf_pages_with_windows_ocr",
+    "extract_text_pages",
+    "get_powershell_command",
+    "has_filled_consent_signals",
+    "merge_page_texts",
+    "normalize_pdf_text",
+]

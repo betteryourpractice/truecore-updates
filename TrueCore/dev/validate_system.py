@@ -11,6 +11,11 @@ import sys
 import time
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, ".."))
+INTEL_ROOT = os.path.join(REPO_ROOT, "TrueCoreIntel")
+
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 # -------------------------------------------------
 # REQUIRED FILES
@@ -242,11 +247,36 @@ def compile_project():
 
     success = compileall.compile_dir(PROJECT_ROOT, quiet=1)
 
+    if success and os.path.isdir(INTEL_ROOT):
+        success = compileall.compile_dir(INTEL_ROOT, quiet=1)
+
     if not success:
         print("ERROR: Syntax errors detected.")
         return False
 
     return True
+
+
+# -------------------------------------------------
+# INTEL IMPORT TEST
+# -------------------------------------------------
+
+def test_intel_import():
+
+    if not os.path.isdir(INTEL_ROOT):
+        return True
+
+    print("Testing TrueCoreIntel import...")
+
+    try:
+
+        __import__("TrueCoreIntel.intel_engine")
+        return True
+
+    except Exception as e:
+
+        print("ERROR: TrueCoreIntel import failed:", e)
+        return False
 
 
 # -------------------------------------------------
@@ -293,6 +323,7 @@ def run_validation():
         check_protected_functions,
         check_pipeline_order,
         compile_project,
+        test_intel_import,
         test_gui_startup
     ]
 

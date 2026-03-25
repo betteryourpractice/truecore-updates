@@ -23,6 +23,7 @@ from PySide6.QtCore import Qt, QSize, QTimer
 
 import os
 import csv
+import html
 from datetime import datetime
 
 from TrueCore.utils.logging_system import log_event
@@ -353,6 +354,183 @@ class MainWindow(QMainWindow):
 
         return name.replace("_"," ").title()
 
+    def format_detail_value(self, value):
+
+        if value in (None, "", [], {}):
+            return "Missing"
+
+        if isinstance(value, bool):
+            return "True" if value else "False"
+
+        if isinstance(value, (list, tuple, set)):
+            return ", ".join(str(item) for item in value)
+
+        return str(value)
+
+    def build_detail_card(self, title, body_html, accent_color="#2F80ED", margin_top=12):
+
+        return (
+            f"<div style=\"margin-top:{margin_top}px; padding:12px 14px; "
+            f"background-color:#10161E; border:1px solid #253243; "
+            f"border-left:3px solid {accent_color}; border-radius:8px;\">"
+            f"<div style=\"color:#FFFFFF; font-weight:700; margin-bottom:8px;\">"
+            f"{html.escape(title)}</div>{body_html}</div>"
+        )
+
+    def build_detail_table(self, rows, value_color="#DCE6F2", show_missing=True):
+
+        rendered_rows = []
+
+        for label, value in rows:
+            if not show_missing and value in (None, "", [], {}):
+                continue
+
+            display_value = self.format_detail_value(value)
+            row_color = "#EB5757" if display_value == "Missing" else value_color
+
+            rendered_rows.append(
+                "<tr>"
+                f"<td valign=\"top\" style=\"color:#FFFFFF; font-weight:600; padding:3px 12px 3px 0; width:38%;\">"
+                f"{html.escape(str(label))}</td>"
+                f"<td valign=\"top\" style=\"color:{row_color}; padding:3px 0;\">"
+                f"{html.escape(display_value)}</td>"
+                "</tr>"
+            )
+
+        if not rendered_rows:
+            return "<div style=\"color:#9CA3AF;\">No data</div>"
+
+        return (
+            "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;\">"
+            + "".join(rendered_rows) +
+            "</table>"
+        )
+
+    def build_bullet_section(self, title, items, color, accent_color=None, bullet="•"):
+
+        if not items:
+            return ""
+
+        accent = accent_color or color
+        lines = []
+
+        for item in items:
+            lines.append(
+                f"<div style=\"color:{color}; margin:0 0 4px 0;\">"
+                f"{html.escape(bullet)} {html.escape(self.format_detail_value(item))}</div>"
+            )
+
+        return self.build_detail_card(title, "".join(lines), accent_color=accent)
+
+    def build_packet_details_html(self, file, result):
+
+        score = result.get("score", 0)
+        forms = result.get("forms", [])
+        fields = result.get("fields", {})
+        issues = result.get("issues", [])
+        fixes = result.get("fixes", [])
+        intel_display = result.get("intel", {}).get("display", {})
+
+        score_color = "#27AE60" if score >= 90 else "#F2C94C" if score >= 70 else "#EB5757"
+
+        sections = [
+            self.build_detail_card(
+                "Packet Summary",
+                self.build_detail_table(
+                    [
+                        ("Packet", os.path.basename(file)),
+                        ("Score", score),
+                    ],
+                    value_color=score_color,
+                ),
+                accent_color=score_color,
+                margin_top=0,
+            ),
+            self.build_bullet_section(
+                "Forms Detected",
+                forms,
+                color="#6FCF97",
+                accent_color="#27AE60",
+                bullet="✓",
+            ),
+            self.build_detail_card(
+                "Fields",
+                self.build_detail_table(
+                    [(self.format_field(key), value) for key, value in fields.items()],
+                    value_color="#DCE6F2",
+                ),
+                accent_color="#5B8DEF",
+            ),
+            self.build_bullet_section(
+                "Issues",
+                issues,
+                color="#EB5757",
+                accent_color="#EB5757",
+                bullet="⚠",
+            ),
+            self.build_bullet_section(
+                "Suggested Fixes",
+                fixes,
+                color="#F2C94C",
+                accent_color="#F2C94C",
+            ),
+        ]
+
+        if intel_display:
+            intel_summary_rows = [
+                ("Packet Confidence", intel_display.get("packet_confidence")),
+                ("Approval Probability", intel_display.get("approval_probability")),
+                ("Packet Strength", intel_display.get("packet_strength")),
+                ("Submission Readiness", intel_display.get("submission_readiness")),
+                ("Workflow Queue", intel_display.get("workflow_queue")),
+                ("Next Action", intel_display.get("next_action")),
+                ("Denial Risk", intel_display.get("denial_risk")),
+                ("Review Priority", intel_display.get("review_priority")),
+            ]
+
+            sections.append(
+                self.build_detail_card(
+                    "Intel Analysis",
+                    self.build_detail_table(intel_summary_rows, value_color="#57B6FF", show_missing=False),
+                    accent_color="#57B6FF",
+                )
+            )
+
+            intel_sections = [
+                ("Review Flags", [self.format_field(flag) for flag in intel_display.get("review_flags", [])], "#F2C94C", "#F2C94C"),
+                ("Missing Items", intel_display.get("missing_items", []), "#EB5757", "#EB5757"),
+                ("Why Weak", intel_display.get("why_weak", []), "#57B6FF", "#57B6FF"),
+                ("Conflict Summary", intel_display.get("conflict_items", []), "#F2994A", "#F2994A"),
+                ("Priority Fixes", intel_display.get("priority_fixes", []), "#6FCF97", "#27AE60"),
+                ("Approval Rationale", intel_display.get("approval_rationale", []), "#57B6FF", "#57B6FF"),
+            ]
+
+            for title, items, color, accent in intel_sections:
+                section_html = self.build_bullet_section(title, items, color=color, accent_color=accent)
+                if section_html:
+                    sections.append(section_html)
+
+        rendered_sections = "".join(section for section in sections if section)
+
+        return (
+            "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+            "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+            f"{rendered_sections}</body></html>"
+        )
+
+    def stringify_export_value(self, value):
+
+        if value in (None, "", [], {}):
+            return ""
+
+        if isinstance(value, bool):
+            return "True" if value else "False"
+
+        if isinstance(value, (list, tuple, set)):
+            return " | ".join(str(item) for item in value)
+
+        return str(value)
+
     # -------------------------------------------------
     # SELECT FILES
     # -------------------------------------------------
@@ -441,43 +619,7 @@ class MainWindow(QMainWindow):
         if not result:
             return
 
-        self.details.clear()
-
-        score=result.get("score",0)
-        forms=result.get("forms",[])
-        fields=result.get("fields",{})
-        issues=result.get("issues",[])
-        fixes=result.get("fixes",[])
-
-        self.details.append(f"<b>PACKET:</b> {os.path.basename(file)}")
-
-        self.details.append(f"<b>Score:</b> {score}")
-
-        self.details.append("<br><b>Forms Detected</b>")
-
-        for f in forms:
-            self.details.append(f"✓ {f}")
-
-        self.details.append("<br><b>Fields</b>")
-
-        for k,v in fields.items():
-
-            field=self.format_field(k)
-
-            if not v:
-                self.details.append(f'<span style="color:#EB5757">{field}: Missing</span>')
-            else:
-                self.details.append(f"{field}: {v}")
-
-        if issues:
-            self.details.append("<br><b>Issues</b>")
-            for i in issues:
-                self.details.append(f'<span style="color:#EB5757">⚠ {i}</span>')
-
-        if fixes:
-            self.details.append("<br><b>Suggested Fixes</b>")
-            for f in fixes:
-                self.details.append(f'<span style="color:#F2C94C">• {f}</span>')
+        self.details.setHtml(self.build_packet_details_html(file, result))
 
     # -------------------------------------------------
     # ANALYZE FOLDER
@@ -517,14 +659,53 @@ class MainWindow(QMainWindow):
         with open(path,"w",newline="",encoding="utf-8") as f:
 
             writer=csv.writer(f)
-            writer.writerow(["File","Score","Issues"])
+            writer.writerow([
+                "File",
+                "Score",
+                "Issues",
+                "Forms Detected",
+                "Issue Details",
+                "Suggested Fixes",
+                "Packet Confidence",
+                "Approval Probability",
+                "Packet Strength",
+                "Submission Readiness",
+                "Workflow Queue",
+                "Next Action",
+                "Denial Risk",
+                "Review Priority",
+                "Review Flags",
+                "Missing Items",
+                "Why Weak",
+                "Conflict Summary",
+                "Priority Fixes",
+                "Approval Rationale",
+            ])
 
             for file,result in self.results.items():
+                intel_display=result.get("intel",{}).get("display",{})
 
                 writer.writerow([
                     os.path.basename(file),
                     result.get("score",0),
-                    len(result.get("issues",[]))
+                    len(result.get("issues",[])),
+                    self.stringify_export_value(result.get("forms",[])),
+                    self.stringify_export_value(result.get("issues",[])),
+                    self.stringify_export_value(result.get("fixes",[])),
+                    self.stringify_export_value(intel_display.get("packet_confidence")),
+                    self.stringify_export_value(intel_display.get("approval_probability")),
+                    self.stringify_export_value(intel_display.get("packet_strength")),
+                    self.stringify_export_value(intel_display.get("submission_readiness")),
+                    self.stringify_export_value(intel_display.get("workflow_queue")),
+                    self.stringify_export_value(intel_display.get("next_action")),
+                    self.stringify_export_value(intel_display.get("denial_risk")),
+                    self.stringify_export_value(intel_display.get("review_priority")),
+                    self.stringify_export_value(intel_display.get("review_flags",[])),
+                    self.stringify_export_value(intel_display.get("missing_items",[])),
+                    self.stringify_export_value(intel_display.get("why_weak",[])),
+                    self.stringify_export_value(intel_display.get("conflict_items",[])),
+                    self.stringify_export_value(intel_display.get("priority_fixes",[])),
+                    self.stringify_export_value(intel_display.get("approval_rationale",[])),
                 ])
 
         self.log("Report exported.")

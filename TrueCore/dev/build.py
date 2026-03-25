@@ -41,6 +41,7 @@ print("Validation successful.\n")
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 CORE_DIR = os.path.join(ROOT_DIR, "TrueCore")
+INTEL_DIR = os.path.join(ROOT_DIR, "TrueCoreIntel")
 
 VERSION_PATH = os.path.join(CORE_DIR, "VERSION.txt")
 CHANGELOG_PATH = os.path.join(CORE_DIR, "CHANGELOG.txt")
@@ -145,6 +146,9 @@ def syntax_check():
     print("\nCompiling entire project...\n")
 
     success = compileall.compile_dir(CORE_DIR, quiet=1)
+
+    if success and os.path.isdir(INTEL_DIR):
+        success = compileall.compile_dir(INTEL_DIR, quiet=1)
 
     if not success:
         print("ERROR: Syntax errors detected.")
@@ -277,6 +281,7 @@ engine_cmd = (
     f'--onefile '
     f'--windowed '
     f'--name TrueCoreEngine '
+    f'--paths "{ROOT_DIR}" '
     f'--add-data "{GUI_DIR};ui/pyside_gui" '
     f'--hidden-import=PySide6.QtCore '
     f'--hidden-import=PySide6.QtGui '
@@ -303,6 +308,7 @@ launcher_cmd = (
     f'--onefile '
     f'--windowed '
     f'--name TrueCoreLauncher '
+    f'--paths "{ROOT_DIR}" '
     f'--icon "{os.path.join(ASSETS_DIR, "truecore_icon.ico")}" '
     f'--add-data "{ASSETS_DIR};launcher/assets" '
     f'--add-data "{CORE_DIR}/launcher/assets;launcher/assets"  '

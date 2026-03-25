@@ -14,6 +14,7 @@ __pycache__/
 build/
 dist/
 *.spec
+**/*.spec
 
 # PyInstaller temporary files
 *.toc
@@ -33,6 +34,8 @@ TrueCore/logs/
 # ===============================
 
 engine/
+engine/**
+**/engine/
 Outputs/
 
 # ===============================

@@ -14,6 +14,7 @@ from TrueCore.detection.form_detector import detect_document_features
 from TrueCore.validation.validator import validate_packet
 from TrueCore.validation.suggestions import generate_suggestions
 from TrueCore.medical.icd_lookup import detect_icd_codes
+from TrueCore.core.intel_bridge import build_intel_result
 from TrueCore.utils.logging_system import log_event
 
 
@@ -100,6 +101,15 @@ def process_file(file_path, approved_icd_codes=None):
         "issues": issues,
         "fixes": suggestions,
     }
+
+    intel_result = build_intel_result(
+        file_path,
+        approved_icd_codes=approved_icd_codes,
+        legacy_result=result,
+    )
+
+    if intel_result:
+        return intel_result
 
     return result
 
