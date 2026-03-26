@@ -9,6 +9,19 @@ from openpyxl import load_workbook, Workbook
 
 WORKBOOK_PATH = os.path.join(os.getcwd(), "TrueCore", "Outputs", "TrueValour Operations.xlsx")
 
+INTEL_HEADERS = [
+    "Packet Confidence",
+    "Approval Probability",
+    "Submission Readiness",
+    "Workflow Queue",
+    "Next Action",
+    "Denial Risk",
+    "Evidence Sufficiency",
+    "Clinical Coherence",
+    "Trust Score",
+    "Policy Confidence",
+]
+
 
 # -------------------------------------------------
 # CREATE WORKBOOK IF MISSING
@@ -52,11 +65,34 @@ def create_workbook_if_missing(path):
         print("Failed to create workbook:", e)
 
 
+def ensure_workbook_headers(ws):
+
+    expected_headers = {
+        "A1": "ICN",
+        "B1": "Patient Name",
+        "C1": "DOB",
+        "D1": "Authorization",
+        "E1": "Ordering Doctor",
+        "G1": "Treatment",
+        "H1": "ICD Codes",
+        "L1": "Packet Link",
+    }
+
+    for cell_ref, header in expected_headers.items():
+        if ws[cell_ref].value in (None, ""):
+            ws[cell_ref] = header
+
+    start_column = 13  # M
+
+    for offset, header in enumerate(INTEL_HEADERS):
+        ws.cell(row=1, column=start_column + offset).value = header
+
+
 # -------------------------------------------------
 # EXPORT PATIENT
 # -------------------------------------------------
 
-def export_patient(fields, packet_path):
+def export_patient(fields, packet_path, intel_summary=None):
 
     # Ensure workbook exists
     create_workbook_if_missing(WORKBOOK_PATH)
@@ -68,8 +104,9 @@ def export_patient(fields, packet_path):
 
         wb = load_workbook(WORKBOOK_PATH)
         ws = wb["Patients"]
+        ensure_workbook_headers(ws)
 
-        icn = fields.get("icn")
+        icn = fields.get("va_icn") or fields.get("icn")
         auth = fields.get("authorization_number")
 
         # Duplicate protection
@@ -98,6 +135,23 @@ def export_patient(fields, packet_path):
         cell.value = "Open Packet"
         cell.hyperlink = os.path.abspath(packet_path)
         cell.style = "Hyperlink"
+
+        intel_summary = dict(intel_summary or {})
+        intel_values = [
+            intel_summary.get("packet_confidence"),
+            intel_summary.get("approval_probability"),
+            intel_summary.get("submission_readiness"),
+            intel_summary.get("workflow_queue"),
+            intel_summary.get("next_action"),
+            intel_summary.get("denial_risk"),
+            intel_summary.get("evidence_sufficiency"),
+            intel_summary.get("clinical_coherence"),
+            intel_summary.get("trust_score"),
+            intel_summary.get("policy_confidence"),
+        ]
+
+        for offset, value in enumerate(intel_values, start=13):
+            ws.cell(row=row, column=offset).value = value
 
         for attempt in range(3):
 

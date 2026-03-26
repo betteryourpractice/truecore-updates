@@ -1,6 +1,8 @@
 from datetime import datetime
 import re
 
+from TrueCoreIntel.validation.validation_intelligence import ValidationIntelligenceAnalyzer
+
 
 class ValidatorEngine:
 
@@ -76,7 +78,12 @@ class ValidatorEngine:
         ],
     }
 
+    def __init__(self):
+        self.validation_intelligence_analyzer = ValidationIntelligenceAnalyzer()
+
     def validate(self, packet):
+        packet.validation_intelligence = {}
+        packet.deep_verification_score = None
         self.check_missing_fields(packet)
         self.check_required_documents(packet)
         self.check_document_field_gaps(packet)
@@ -90,6 +97,7 @@ class ValidatorEngine:
         self.check_duplicate_pages(packet)
         self.check_icd_consistency(packet)
         self.check_general_field_conflicts(packet)
+        packet = self.validation_intelligence_analyzer.analyze(packet, validator=self)
         return packet
 
     def infer_packet_type(self, packet):

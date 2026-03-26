@@ -69,6 +69,9 @@ def build_structured_result(
         "automation": {
             "used_ocr_fallback": used_ocr_fallback,
             "ocr_retry_reasons": list(ocr_retry_reasons),
+            "ocr_provider": getattr(packet, "ocr_provider", None),
+            "intake_diagnostics": dict(getattr(packet, "intake_diagnostics", {}) or {}),
+            "benchmark_scores": dict(getattr(packet, "benchmark_scores", {}) or {}),
         },
         "core": {
             "packet_score": packet.packet_score,
@@ -99,6 +102,7 @@ class TrueCoreIntelEngine:
         source_type: str | None = None,
         files: Iterable[str] | None = None,
         page_sources: Iterable[str] | None = None,
+        page_metadata: Iterable[dict] | None = None,
     ) -> Packet:
         packet = Packet()
         packet.pages = list(pages)
@@ -107,6 +111,14 @@ class TrueCoreIntelEngine:
             packet.files = list(files)
         if page_sources is not None:
             packet.page_sources = list(page_sources)
+        if page_metadata is not None:
+            packet.page_metadata = list(page_metadata)
+            providers = [
+                metadata.get("ocr_provider")
+                for metadata in packet.page_metadata
+                if isinstance(metadata, dict) and metadata.get("ocr_provider")
+            ]
+            packet.ocr_provider = providers[0] if providers else None
         return self.process_packet(packet)
 
     def process_path(self, path: str | Path, log_fn=None) -> dict:
@@ -118,8 +130,26 @@ class TrueCoreIntelEngine:
         packet = Packet()
         packet.source_type = source_path.suffix.lower().lstrip(".") or None
         packet.files = [str(source_path)]
-        packet.pages = extract_document_pages(source_path, log_fn=log_fn)
+        packet.pages, packet.page_metadata = extract_document_pages(source_path, log_fn=log_fn, return_metadata=True)
         packet.page_sources = [str(source_path)] * len(packet.pages)
+        providers = [
+            metadata.get("ocr_provider")
+            for metadata in packet.page_metadata
+            if isinstance(metadata, dict) and metadata.get("ocr_provider")
+        ]
+        ocr_confidences = [
+            float(metadata.get("ocr_confidence") or 0.0)
+            for metadata in packet.page_metadata
+            if isinstance(metadata, dict) and metadata.get("ocr_confidence") is not None
+        ]
+        packet.ocr_provider = providers[0] if providers else None
+        packet.intake_diagnostics = {
+            "page_count": len(packet.pages),
+            "pages_with_ocr": sum(1 for metadata in packet.page_metadata if metadata.get("ocr_text")),
+            "pages_with_field_zones": sum(1 for metadata in packet.page_metadata if metadata.get("field_zones")),
+            "pages_with_split_segments": sum(1 for metadata in packet.page_metadata if len(metadata.get("ocr_segments", []) or []) > 1),
+            "average_ocr_confidence": round(sum(ocr_confidences) / max(len(ocr_confidences), 1), 2) if ocr_confidences else 0.0,
+        }
 
         if log_fn:
             log_fn(f"[DEBUG] Packet pages loaded: {len(packet.pages)}")
@@ -131,7 +161,7 @@ class TrueCoreIntelEngine:
         if retry_reasons:
             if log_fn:
                 log_fn(f"[DEBUG] Retrying with OCR fallback: {', '.join(retry_reasons)}")
-            fallback_pages = extract_document_pages_with_fallback(source_path, log_fn=log_fn)
+            fallback_pages, fallback_metadata = extract_document_pages_with_fallback(source_path, log_fn=log_fn, return_metadata=True)
 
             if fallback_pages != packet.pages:
                 used_ocr_fallback = True
@@ -139,7 +169,27 @@ class TrueCoreIntelEngine:
                 packet.source_type = source_path.suffix.lower().lstrip(".") or None
                 packet.files = [str(source_path)]
                 packet.pages = fallback_pages
+                packet.page_metadata = list(fallback_metadata or [])
                 packet.page_sources = [str(source_path)] * len(packet.pages)
+                providers = [
+                    metadata.get("ocr_provider")
+                    for metadata in packet.page_metadata
+                    if isinstance(metadata, dict) and metadata.get("ocr_provider")
+                ]
+                ocr_confidences = [
+                    float(metadata.get("ocr_confidence") or 0.0)
+                    for metadata in packet.page_metadata
+                    if isinstance(metadata, dict) and metadata.get("ocr_confidence") is not None
+                ]
+                packet.ocr_provider = providers[0] if providers else None
+                packet.intake_diagnostics = {
+                    "page_count": len(packet.pages),
+                    "pages_with_ocr": sum(1 for metadata in packet.page_metadata if metadata.get("ocr_text")),
+                    "pages_with_field_zones": sum(1 for metadata in packet.page_metadata if metadata.get("field_zones")),
+                    "pages_with_split_segments": sum(1 for metadata in packet.page_metadata if len(metadata.get("ocr_segments", []) or []) > 1),
+                    "average_ocr_confidence": round(sum(ocr_confidences) / max(len(ocr_confidences), 1), 2) if ocr_confidences else 0.0,
+                    "fallback_applied": True,
+                }
                 if log_fn:
                     log_fn(f"[DEBUG] Packet pages reloaded with OCR fallback: {len(packet.pages)}")
                 result = self.process_packet(packet)
@@ -165,6 +215,7 @@ def process_pages(
     source_type: str | None = None,
     files: Iterable[str] | None = None,
     page_sources: Iterable[str] | None = None,
+    page_metadata: Iterable[dict] | None = None,
     pipeline: TrueCorePipeline | None = None,
 ) -> Packet:
     return TrueCoreIntelEngine(pipeline=pipeline).process_pages(
@@ -172,6 +223,7 @@ def process_pages(
         source_type=source_type,
         files=files,
         page_sources=page_sources,
+        page_metadata=page_metadata,
     )
 
 

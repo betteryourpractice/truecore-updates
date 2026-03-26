@@ -191,34 +191,43 @@ class ExtractorEngine:
     def extract(self, packet):
         for idx, page in enumerate(packet.pages):
             doc_type = packet.document_types.get(idx, "unknown")
+            page_metadata = packet.page_metadata[idx] if idx < len(getattr(packet, "page_metadata", []) or []) else {}
+            field_context = {}
 
-            data = self.extract_template_fields(page, doc_type)
-            data.update(self.route_extraction(page, doc_type))
+            data = self.extract_template_fields(page, doc_type, page_metadata=page_metadata, field_context=field_context)
+            data.update(self.route_extraction(page, doc_type, page_metadata=page_metadata, field_context=field_context))
             text = str(page)
             data = self.apply_document_context_boost(data, doc_type, text)
 
-            identity_data = self.extract_identity_fields(page)
+            identity_data = self.extract_identity_fields(page, page_metadata=page_metadata, field_context=field_context)
             data.update(identity_data)
 
-            labeled_data = self.extract_labeled_fields(page)
+            labeled_data = self.extract_labeled_fields(page, page_metadata=page_metadata, field_context=field_context)
             data.update(labeled_data)
 
             inferred_data = self.extract_inferred_medical_fields(page)
             data = self.merge_extraction_data(data, inferred_data)
 
-            self.store_results(packet, data, page, idx, doc_type)
+            self.store_results(packet, data, page, idx, doc_type, page_metadata=page_metadata, field_context=field_context)
 
         return packet
 
-    def extract_template_fields(self, page, doc_type):
+    def extract_template_fields(self, page, doc_type, page_metadata=None, field_context=None):
         text = str(page)
         data = {}
         template = FORM_TEMPLATES.get(doc_type, {})
 
         for field_name in template.get("expected_fields", []):
             if field_name == "signature_present":
-                if self.detect_signature_presence(text):
+                if self.detect_signature_presence(text) or ((page_metadata or {}).get("layout", {}) or {}).get("signature_regions"):
                     data["signature_present"] = True
+                    self.capture_field_context(field_context, "signature_present", value=True, page_metadata=page_metadata, strategy="layout_signature")
+                continue
+
+            zone_match = self.extract_from_field_zones(page_metadata, field_name)
+            if zone_match:
+                data[field_name] = zone_match["value"]
+                self.capture_field_context(field_context, field_name, value=zone_match["value"], page_metadata=page_metadata, zone=zone_match, strategy="field_zone")
                 continue
 
             patterns = self.IDENTITY_PATTERNS.get(field_name) or self.FIELD_PATTERNS.get(field_name)
@@ -231,21 +240,21 @@ class ExtractorEngine:
 
         return data
 
-    def route_extraction(self, page, doc_type):
+    def route_extraction(self, page, doc_type, page_metadata=None, field_context=None):
         data = {}
 
         if doc_type in {"authorization", "rfs", "seoc"}:
-            data.update(self.extract_authorization(page))
+            data.update(self.extract_authorization(page, page_metadata=page_metadata, field_context=field_context))
 
         if doc_type == "consult_request":
-            data.update(self.extract_authorization(page))
-            data.update(self.extract_referral(page))
+            data.update(self.extract_authorization(page, page_metadata=page_metadata, field_context=field_context))
+            data.update(self.extract_referral(page, page_metadata=page_metadata, field_context=field_context))
 
         elif doc_type in {"clinical_notes", "lomn"}:
-            data.update(self.extract_clinical(page))
+            data.update(self.extract_clinical(page, page_metadata=page_metadata, field_context=field_context))
 
         elif doc_type in {"referral", "seoc"}:
-            data.update(self.extract_referral(page))
+            data.update(self.extract_referral(page, page_metadata=page_metadata, field_context=field_context))
 
         return data
     
@@ -291,10 +300,15 @@ class ExtractorEngine:
 
         return data
 
-    def extract_authorization(self, page):
+    def extract_authorization(self, page, page_metadata=None, field_context=None):
         text = str(page)
         lower_text = text.lower()
         data = {}
+
+        zone_match = self.extract_from_field_zones(page_metadata, "authorization_number")
+        if zone_match:
+            data["authorization_number"] = zone_match["value"]
+            self.capture_field_context(field_context, "authorization_number", value=zone_match["value"], page_metadata=page_metadata, zone=zone_match, strategy="field_zone")
 
         if any(term in lower_text for term in [
             "auth",
@@ -435,7 +449,7 @@ class ExtractorEngine:
 
         return data
 
-    def extract_clinical(self, page):
+    def extract_clinical(self, page, page_metadata=None, field_context=None):
         text = str(page)
         data = {}
 
@@ -451,11 +465,16 @@ class ExtractorEngine:
         if merged_icds:
             data["icd_codes"] = merged_icds
 
-        diagnosis = self.extract_first_labeled_match(
-            text,
-            self.FIELD_PATTERNS["diagnosis"],
-            "diagnosis",
-        )
+        diagnosis_zone = self.extract_from_field_zones(page_metadata, "diagnosis")
+        if diagnosis_zone:
+            diagnosis = diagnosis_zone["value"]
+            self.capture_field_context(field_context, "diagnosis", value=diagnosis, page_metadata=page_metadata, zone=diagnosis_zone, strategy="field_zone")
+        else:
+            diagnosis = self.extract_first_labeled_match(
+                text,
+                self.FIELD_PATTERNS["diagnosis"],
+                "diagnosis",
+            )
         if diagnosis:
             data["diagnosis"] = diagnosis
         else:
@@ -471,25 +490,35 @@ class ExtractorEngine:
         if procedure:
             data["procedure"] = procedure
 
-        reason_for_request = self.extract_first_labeled_match(
-            text,
-            self.FIELD_PATTERNS["reason_for_request"],
-            "reason_for_request",
-        )
+        reason_zone = self.extract_from_field_zones(page_metadata, "reason_for_request")
+        if reason_zone:
+            reason_for_request = reason_zone["value"]
+            self.capture_field_context(field_context, "reason_for_request", value=reason_for_request, page_metadata=page_metadata, zone=reason_zone, strategy="field_zone")
+        else:
+            reason_for_request = self.extract_first_labeled_match(
+                text,
+                self.FIELD_PATTERNS["reason_for_request"],
+                "reason_for_request",
+            )
         if reason_for_request:
             data["reason_for_request"] = reason_for_request
 
-        facility = self.extract_first_labeled_match(
-            text,
-            self.FIELD_PATTERNS["facility"],
-            "facility",
-        )
+        facility_zone = self.extract_from_field_zones(page_metadata, "facility")
+        if facility_zone:
+            facility = facility_zone["value"]
+            self.capture_field_context(field_context, "facility", value=facility, page_metadata=page_metadata, zone=facility_zone, strategy="field_zone")
+        else:
+            facility = self.extract_first_labeled_match(
+                text,
+                self.FIELD_PATTERNS["facility"],
+                "facility",
+            )
         if facility:
             data["facility"] = facility
 
         return data
 
-    def extract_referral(self, page):
+    def extract_referral(self, page, page_metadata=None, field_context=None):
         text = str(page)
         lower_text = text.lower()
         data = {}
@@ -497,27 +526,42 @@ class ExtractorEngine:
         if "referral" in lower_text:
             data["referral_detected"] = True
 
-        reason_for_request = self.extract_first_labeled_match(
-            text,
-            self.FIELD_PATTERNS["reason_for_request"],
-            "reason_for_request",
-        )
+        reason_zone = self.extract_from_field_zones(page_metadata, "reason_for_request")
+        if reason_zone:
+            reason_for_request = reason_zone["value"]
+            self.capture_field_context(field_context, "reason_for_request", value=reason_for_request, page_metadata=page_metadata, zone=reason_zone, strategy="field_zone")
+        else:
+            reason_for_request = self.extract_first_labeled_match(
+                text,
+                self.FIELD_PATTERNS["reason_for_request"],
+                "reason_for_request",
+            )
         if reason_for_request:
             data["reason_for_request"] = reason_for_request
 
-        facility = self.extract_first_labeled_match(
-            text,
-            self.FIELD_PATTERNS["facility"],
-            "facility",
-        )
+        facility_zone = self.extract_from_field_zones(page_metadata, "facility")
+        if facility_zone:
+            facility = facility_zone["value"]
+            self.capture_field_context(field_context, "facility", value=facility, page_metadata=page_metadata, zone=facility_zone, strategy="field_zone")
+        else:
+            facility = self.extract_first_labeled_match(
+                text,
+                self.FIELD_PATTERNS["facility"],
+                "facility",
+            )
         if facility:
             data["facility"] = facility
 
-        diagnosis = self.extract_first_labeled_match(
-            text,
-            self.FIELD_PATTERNS["diagnosis"],
-            "diagnosis",
-        )
+        diagnosis_zone = self.extract_from_field_zones(page_metadata, "diagnosis")
+        if diagnosis_zone:
+            diagnosis = diagnosis_zone["value"]
+            self.capture_field_context(field_context, "diagnosis", value=diagnosis, page_metadata=page_metadata, zone=diagnosis_zone, strategy="field_zone")
+        else:
+            diagnosis = self.extract_first_labeled_match(
+                text,
+                self.FIELD_PATTERNS["diagnosis"],
+                "diagnosis",
+            )
         if diagnosis:
             data["diagnosis"] = diagnosis
 
@@ -619,11 +663,86 @@ class ExtractorEngine:
 
         return deduped
 
-    def extract_identity_fields(self, page):
+    def get_page_metadata(self, packet, page_index):
+        page_metadata = list(getattr(packet, "page_metadata", []) or [])
+        if page_index < len(page_metadata):
+            return page_metadata[page_index]
+        return {}
+
+    def get_field_zone_hints(self, field_name):
+        hints = list(self.get_field_label_hints().get(field_name, []))
+        if field_name == "authorization_number":
+            hints.extend(["authorization", "referral", "member id", "box 4", "4 authorization"])
+        return list(dict.fromkeys(hints))
+
+    def extract_from_field_zones(self, page_metadata, field_name):
+        page_metadata = dict(page_metadata or {})
+        field_zones = list(page_metadata.get("field_zones", []) or [])
+        if not field_zones:
+            return None
+
+        hints = [hint.lower() for hint in self.get_field_zone_hints(field_name)]
+        candidates = []
+        for zone in field_zones:
+            label = str(zone.get("normalized_label") or zone.get("label") or "").lower()
+            raw_label = str(zone.get("label") or "").lower()
+            if not label and not raw_label:
+                continue
+
+            if hints and not any(hint in label or hint in raw_label for hint in hints):
+                continue
+
+            value = self.clean_labeled_value(zone.get("value"), field_name)
+            if not value:
+                continue
+
+            candidate = dict(zone)
+            candidate["value"] = value
+            candidates.append(candidate)
+
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda zone: (
+                float(zone.get("confidence") or 0.0),
+                1 if zone.get("zone_name") == "native_text" else 0,
+                len(str(zone.get("value") or "")),
+            ),
+            reverse=True,
+        )
+        return candidates[0]
+
+    def capture_field_context(self, field_context, field_name, value, page_metadata=None, zone=None, strategy=None):
+        if field_context is None:
+            return
+
+        page_metadata = dict(page_metadata or {})
+        context = {
+            "value": value,
+            "strategy": strategy,
+            "ocr_confidence": page_metadata.get("ocr_confidence"),
+            "ocr_provider": page_metadata.get("ocr_provider"),
+        }
+        if zone:
+            context.update({
+                "zone_name": zone.get("zone_name"),
+                "zone_bbox": zone.get("bbox"),
+                "anchor_label": zone.get("anchor_label") or zone.get("label"),
+                "zone_confidence": zone.get("confidence"),
+            })
+        field_context[field_name] = context
+
+    def extract_identity_fields(self, page, page_metadata=None, field_context=None):
         text = str(page)
         data = {}
 
         for field_name, patterns in self.IDENTITY_PATTERNS.items():
+            zone_match = self.extract_from_field_zones(page_metadata, field_name)
+            if zone_match:
+                data[field_name] = zone_match["value"]
+                self.capture_field_context(field_context, field_name, value=zone_match["value"], page_metadata=page_metadata, zone=zone_match, strategy="field_zone")
+                continue
             value = self.extract_first_labeled_match(text, patterns, field_name)
             if value:
                 data[field_name] = value
@@ -643,11 +762,16 @@ class ExtractorEngine:
 
         return data
 
-    def extract_labeled_fields(self, page):
+    def extract_labeled_fields(self, page, page_metadata=None, field_context=None):
         text = str(page)
         data = {}
 
         for field_name, patterns in self.FIELD_PATTERNS.items():
+            zone_match = self.extract_from_field_zones(page_metadata, field_name)
+            if zone_match:
+                data[field_name] = zone_match["value"]
+                self.capture_field_context(field_context, field_name, value=zone_match["value"], page_metadata=page_metadata, zone=zone_match, strategy="field_zone")
+                continue
             value = self.extract_first_labeled_match(text, patterns, field_name)
             if value:
                 data[field_name] = value
@@ -1617,8 +1741,12 @@ class ExtractorEngine:
         excerpt = re.sub(r"\s+", " ", text[start:end]).strip()
         return excerpt[:240]
 
-    def build_field_mapping(self, packet, key, value, page, page_index, doc_type, confidence):
+    def build_field_mapping(self, packet, key, value, page, page_index, doc_type, confidence, page_metadata=None, field_context=None):
         text = str(page)
+        page_metadata = dict(page_metadata or {})
+        mapping_context = dict((field_context or {}).get(key, {}) or {})
+        if mapping_context.get("value") not in (None, value):
+            mapping_context = {}
         matched_text = None
         snippet = None
         match_start = None
@@ -1656,6 +1784,7 @@ class ExtractorEngine:
             snippet_start = 0
             snippet_end = min(len(text), 60)
 
+        layout = dict(page_metadata.get("layout", {}) or {})
         return {
             "field": key,
             "value": value,
@@ -1669,16 +1798,31 @@ class ExtractorEngine:
             "snippet": snippet,
             "snippet_start": snippet_start,
             "snippet_end": snippet_end,
+            "page_zone": mapping_context.get("zone_name"),
+            "zone_bbox": mapping_context.get("zone_bbox"),
+            "anchor_label": mapping_context.get("anchor_label"),
+            "ocr_confidence": mapping_context.get("zone_confidence") or mapping_context.get("ocr_confidence") or page_metadata.get("ocr_confidence"),
+            "ocr_provider": mapping_context.get("ocr_provider") or page_metadata.get("ocr_provider"),
+            "extraction_strategy": mapping_context.get("strategy") or "text_match",
+            "layout_header": layout.get("header_text"),
             "source_file": (
                 packet.page_sources[page_index]
                 if page_index < len(packet.page_sources)
                 else (packet.files[0] if packet.files else None)
             ),
+            "traceback": {
+                "page_number": page_index + 1,
+                "document_type": doc_type,
+                "page_zone": mapping_context.get("zone_name"),
+                "anchor_label": mapping_context.get("anchor_label"),
+                "ocr_confidence": mapping_context.get("zone_confidence") or mapping_context.get("ocr_confidence") or page_metadata.get("ocr_confidence"),
+                "extraction_strategy": mapping_context.get("strategy") or "text_match",
+            },
         }
 
-    def store_results(self, packet, data, page, page_index, doc_type):
+    def store_results(self, packet, data, page, page_index, doc_type, page_metadata=None, field_context=None):
         for key, value in data.items():
-            new_conf = self.estimate_confidence(key, value, page)
+            new_conf = self.estimate_confidence(key, value, page, page_metadata=page_metadata, field_context=(field_context or {}).get(key))
             existing_conf = packet.field_confidence.get(key, 0)
             existing_value = packet.fields.get(key)
 
@@ -1696,6 +1840,8 @@ class ExtractorEngine:
                     page_index,
                     doc_type,
                     new_conf,
+                    page_metadata=page_metadata,
+                    field_context=field_context,
                 )
                 packet.field_confidence[key] = new_conf
 
@@ -1732,9 +1878,27 @@ class ExtractorEngine:
 
         return score(candidate_value) > score(existing_value)
 
-    def estimate_confidence(self, key, value, page):
+    def estimate_confidence(self, key, value, page, page_metadata=None, field_context=None):
         text = str(page).lower()
         label_map = self.get_field_label_hints()
+        page_metadata = dict(page_metadata or {})
+        field_context = dict(field_context or {})
+
+        if field_context.get("strategy") == "field_zone":
+            base = 0.93
+            if key == "authorization_number":
+                base = 0.99
+            elif key in {"ordering_provider", "referring_provider", "provider"}:
+                base = 0.97
+            elif key in {"name", "dob", "va_icn"}:
+                base = 0.98
+
+            ocr_confidence = float(field_context.get("zone_confidence") or page_metadata.get("ocr_confidence") or 0.0)
+            if ocr_confidence >= 80:
+                base += 0.02
+            elif 0 < ocr_confidence < 55:
+                base -= 0.05
+            return round(max(0.75, min(base, 0.99)), 2)
 
         if key == "authorization_number":
             normalized_value = str(value).upper().strip()
@@ -1749,5 +1913,8 @@ class ExtractorEngine:
 
         if key in {"symptom", "procedure"}:
             return 0.8
+
+        if page_metadata.get("ocr_confidence", 0.0):
+            return round(max(0.7, min(0.95, 0.72 + (float(page_metadata.get("ocr_confidence") or 0.0) / 500))), 2)
 
         return 0.75

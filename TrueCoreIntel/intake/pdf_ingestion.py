@@ -10,6 +10,10 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 import PyPDF2
+try:
+    import pdfplumber
+except Exception:  # pragma: no cover - optional dependency fallback
+    pdfplumber = None
 
 try:
     from PIL import Image, ImageFilter, ImageOps, ImageStat
@@ -18,6 +22,14 @@ except Exception:  # pragma: no cover - optional dependency fallback
     ImageFilter = None
     ImageOps = None
     ImageStat = None
+
+from TrueCoreIntel.intake.ocr_layout import (
+    build_hybrid_page_metadata,
+    normalize_label,
+    ocr_image_with_layout,
+    preprocess_image_object_for_ocr,
+    render_pdf_pages_as_images,
+)
 
 
 SUPPORTED_PACKET_EXTENSIONS = {
@@ -270,7 +282,192 @@ def normalize_ocr_pages_payload(payload):
     return [str(payload)]
 
 
-def extract_docx_pages(docx_path, log_fn=None):
+def merge_field_zones(primary_zones, secondary_zones):
+    merged = []
+    seen = set()
+
+    for zone in list(primary_zones or []) + list(secondary_zones or []):
+        label = normalize_label(zone.get("normalized_label") or zone.get("label") or "")
+        value = normalize_pdf_text(zone.get("value"))
+        zone_name = zone.get("zone_name")
+        key = (label, value.lower(), zone_name)
+        if not label or not value or key in seen:
+            continue
+        seen.add(key)
+        candidate = dict(zone)
+        candidate["normalized_label"] = label
+        candidate["value"] = value
+        merged.append(candidate)
+
+    return merged
+
+
+def merge_layout_maps(primary_layout, secondary_layout):
+    merged = dict(primary_layout or {})
+    secondary_layout = dict(secondary_layout or {})
+
+    for key in ("header_text", "footer_text", "left_column_text", "right_column_text"):
+        primary_value = normalize_pdf_text(merged.get(key))
+        secondary_value = normalize_pdf_text(secondary_layout.get(key))
+        if not secondary_value:
+            continue
+        if not primary_value:
+            merged[key] = secondary_value
+            continue
+        if secondary_value.lower() not in primary_value.lower():
+            merged[key] = normalize_pdf_text(f"{primary_value}\n{secondary_value}")
+
+    for key in ("table_regions", "signature_regions", "handwritten_regions"):
+        existing = list(merged.get(key, []) or [])
+        existing.extend(list(secondary_layout.get(key, []) or []))
+        merged[key] = existing
+
+    for key in ("field_zone_count", "structured_line_count"):
+        merged[key] = max(int(merged.get(key, 0) or 0), int(secondary_layout.get(key, 0) or 0))
+
+    return merged
+
+
+def build_zone_text(field_zones):
+    lines = []
+    seen = set()
+    for zone in field_zones or []:
+        label = normalize_pdf_text(zone.get("label") or zone.get("normalized_label"))
+        value = normalize_pdf_text(zone.get("value"))
+        if not label or not value:
+            continue
+        candidate = f"{label}: {value}"
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(candidate)
+    return normalize_pdf_text("\n".join(lines))
+
+
+def finalize_page_text_from_metadata(metadata):
+    metadata = dict(metadata or {})
+    native_text = normalize_pdf_text(metadata.get("native_text"))
+    ocr_text = normalize_pdf_text(metadata.get("ocr_text"))
+    form_text = normalize_pdf_text("\n".join(metadata.get("form_lines", []) or []))
+    zone_text = build_zone_text(metadata.get("field_zones"))
+    header_text = normalize_pdf_text((metadata.get("layout", {}) or {}).get("header_text"))
+
+    merged = native_text
+    if form_text:
+        merged = normalize_pdf_text(f"{merged}\n{form_text}") if merged else form_text
+    if ocr_text:
+        merged = merge_page_texts(merged, ocr_text) if merged else ocr_text
+    if zone_text:
+        merged = merge_page_texts(merged, zone_text) if merged else zone_text
+    if header_text and header_text.lower() not in str(merged).lower():
+        merged = normalize_pdf_text(f"{header_text}\n{merged}") if merged else header_text
+
+    metadata["merged_text"] = merged
+    return merged, metadata
+
+
+def merge_page_metadata(primary_metadata, secondary_metadata):
+    merged = dict(primary_metadata or {})
+    secondary_metadata = dict(secondary_metadata or {})
+
+    if secondary_metadata.get("native_text") and not merged.get("native_text"):
+        merged["native_text"] = secondary_metadata.get("native_text")
+
+    secondary_ocr_text = normalize_pdf_text(secondary_metadata.get("ocr_text"))
+    if secondary_ocr_text:
+        merged["ocr_text"] = secondary_ocr_text
+
+    merged["ocr_confidence"] = max(
+        float(merged.get("ocr_confidence") or 0.0),
+        float(secondary_metadata.get("ocr_confidence") or 0.0),
+    )
+    merged["ocr_provider"] = secondary_metadata.get("ocr_provider") or merged.get("ocr_provider")
+    merged["field_zones"] = merge_field_zones(merged.get("field_zones"), secondary_metadata.get("field_zones"))
+    merged["layout"] = merge_layout_maps(merged.get("layout"), secondary_metadata.get("layout"))
+    merged["ocr_segments"] = list(merged.get("ocr_segments", []) or []) + list(secondary_metadata.get("ocr_segments", []) or [])
+
+    return merged
+
+
+def build_basic_page_metadata(page_number, source_type, text, source_file):
+    metadata = build_hybrid_page_metadata(
+        page_number=page_number,
+        source_type=source_type,
+        native_text=text,
+        source_file=source_file,
+    )
+    _, metadata = finalize_page_text_from_metadata(metadata)
+    return metadata
+
+
+def extract_pdf_native_text(page, plumber_page=None):
+    candidates = []
+
+    try:
+        candidates.append(normalize_pdf_text(page.extract_text() or ""))
+    except Exception:
+        candidates.append("")
+
+    if plumber_page is not None:
+        try:
+            candidates.append(
+                normalize_pdf_text(
+                    plumber_page.extract_text(
+                        x_tolerance=2,
+                        y_tolerance=3,
+                    ) or ""
+                )
+            )
+        except Exception:
+            candidates.append("")
+
+        try:
+            tables = plumber_page.extract_tables() or []
+        except Exception:
+            tables = []
+
+        table_lines = []
+        for table in tables:
+            for row in table or []:
+                if not row:
+                    continue
+                cleaned = [normalize_pdf_text(cell) for cell in row if normalize_pdf_text(cell)]
+                if cleaned:
+                    table_lines.append(" | ".join(cleaned))
+
+        if table_lines:
+            candidates.append(normalize_pdf_text("\n".join(table_lines)))
+
+    best = ""
+    for candidate in candidates:
+        if candidate and len(candidate) > len(best):
+            best = candidate
+
+    return best
+
+
+def extract_pdf_page_ocr_metadata(pdf_path, log_fn=None):
+    page_images = render_pdf_pages_as_images(pdf_path, log_fn=log_fn)
+    metadata = []
+    if not page_images:
+        return metadata
+
+    for index, image in enumerate(page_images, start=1):
+        page_results = ocr_image_with_layout(image, log_fn=log_fn) or []
+        metadata.append(
+            build_hybrid_page_metadata(
+                page_number=index,
+                source_type="pdf",
+                ocr_results=page_results,
+                source_file=str(pdf_path),
+            )
+        )
+
+    return metadata
+
+
+def extract_docx_pages(docx_path, log_fn=None, return_metadata=False):
     docx_path = Path(docx_path).expanduser().resolve()
     emit(log_fn, f"[DEBUG] Opening DOCX: {docx_path}")
 
@@ -301,18 +498,32 @@ def extract_docx_pages(docx_path, log_fn=None):
 
     text = normalize_pdf_text("\n".join(paragraphs))
     emit(log_fn, f"[DEBUG] Extracted DOCX pseudo-page: {len(text)} chars")
-    return [text] if text else []
+    pages = [text] if text else []
+    if not return_metadata:
+        return pages
+
+    metadata = [
+        build_basic_page_metadata(1, "docx", text, str(docx_path))
+    ] if text else []
+    return pages, metadata
 
 
-def extract_text_pages(text_path, log_fn=None):
+def extract_text_pages(text_path, log_fn=None, return_metadata=False):
     text_path = Path(text_path).expanduser().resolve()
     emit(log_fn, f"[DEBUG] Opening text file: {text_path}")
     text = normalize_pdf_text(text_path.read_text(encoding="utf-8", errors="replace"))
     emit(log_fn, f"[DEBUG] Extracted text pseudo-page: {len(text)} chars")
-    return [text] if text else []
+    pages = [text] if text else []
+    if not return_metadata:
+        return pages
+
+    metadata = [
+        build_basic_page_metadata(1, "txt", text, str(text_path))
+    ] if text else []
+    return pages, metadata
 
 
-def extract_image_pages_with_windows_ocr(image_path, log_fn=None):
+def extract_image_pages_with_windows_ocr(image_path, log_fn=None, return_metadata=False):
     def run_image_ocr(candidate_path):
         env = os.environ.copy()
         env["TRUECORE_IMAGE_PATH"] = str(candidate_path)
@@ -372,6 +583,30 @@ $json = $texts | ConvertTo-Json -Compress
 [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
 """
 
+    rich_pages = []
+    if Image is not None:
+        try:
+            with Image.open(image_path) as source_image:
+                rich_pages = ocr_image_with_layout(source_image, log_fn=log_fn) or []
+        except Exception as exc:
+            emit(log_fn, f"[DEBUG] Rich image OCR failed: {exc}")
+
+    if rich_pages:
+        metadata = []
+        pages = []
+        for index, page_result in enumerate(rich_pages, start=1):
+            page_metadata = build_hybrid_page_metadata(
+                page_number=index,
+                source_type=image_path.suffix.lower().lstrip("."),
+                ocr_results=[page_result],
+                source_file=str(image_path),
+            )
+            page_text, page_metadata = finalize_page_text_from_metadata(page_metadata)
+            pages.append(page_text)
+            metadata.append(page_metadata)
+
+        return (pages, metadata) if return_metadata else pages
+
     raw_pages = run_image_ocr(image_path)
     temp_paths = []
     merged_pages = raw_pages
@@ -392,9 +627,17 @@ $json = $texts | ConvertTo-Json -Compress
         cleanup_temporary_image_paths(temp_paths, log_fn=log_fn)
 
     if merged_pages is None:
-        return None
+        return ([], []) if return_metadata else None
 
-    return [normalize_pdf_text(page) for page in merged_pages]
+    pages = [normalize_pdf_text(page) for page in merged_pages]
+    if not return_metadata:
+        return pages
+
+    metadata = [
+        build_basic_page_metadata(index, image_path.suffix.lower().lstrip("."), text, str(image_path))
+        for index, text in enumerate(pages, start=1)
+    ]
+    return pages, metadata
 
 
 def preprocess_image_for_ocr(image_path, log_fn=None):
@@ -406,34 +649,12 @@ def preprocess_image_for_ocr(image_path, log_fn=None):
 
     try:
         with Image.open(image_path) as source_image:
-            image = ImageOps.exif_transpose(source_image)
-            image = image.convert("L")
-
-            min_dimension = min(image.size)
-            if min_dimension and min_dimension < 1600:
-                scale = 1600 / float(min_dimension)
-                resampling = getattr(Image, "Resampling", Image).LANCZOS
-                image = image.resize(
-                    (int(image.width * scale), int(image.height * scale)),
-                    resampling,
-                )
-
-            image = ImageOps.autocontrast(image)
-            image = image.filter(ImageFilter.MedianFilter(size=3))
-
-            threshold = 170
-            if ImageStat is not None:
-                stats = ImageStat.Stat(image)
-                mean_value = stats.mean[0] if stats.mean else threshold
-                threshold = max(130, min(190, int(mean_value)))
-
-            image = image.point(lambda value: 255 if value >= threshold else 0)
-            image = ImageOps.expand(image, border=12, fill=255)
+            image, preprocessing = preprocess_image_object_for_ocr(source_image, log_fn=log_fn)
 
             temp_dir = Path(tempfile.mkdtemp(prefix="truecoreintel_img_ocr_"))
             output_path = temp_dir / f"{image_path.stem}_ocr_preprocessed.png"
             image.save(output_path, format="PNG", optimize=True)
-            emit(log_fn, f"[DEBUG] Preprocessed image for OCR: {output_path}")
+            emit(log_fn, f"[DEBUG] Preprocessed image for OCR: {output_path} ({', '.join(preprocessing.get('steps', []))})")
             return output_path
     except Exception as exc:
         emit(log_fn, f"[DEBUG] Image preprocessing failed: {exc}")
@@ -809,78 +1030,132 @@ def finalize_merged_page_text(primary_text, ocr_text, structured_lines, merged_p
     return normalize_pdf_text("\n".join(merged_parts))
 
 
-def extract_pdf_pages(pdf_path, log_fn=None):
+def extract_pdf_pages(pdf_path, log_fn=None, return_metadata=False):
     emit(log_fn, f"[DEBUG] Opening PDF: {pdf_path}")
 
     pages = []
+    metadata = []
+    plumber_document = None
 
-    with open(pdf_path, "rb") as handle:
-        reader = PyPDF2.PdfReader(handle)
-        emit(log_fn, f"[DEBUG] PDF loaded. Pages found: {len(reader.pages)}")
+    try:
+        if pdfplumber is not None:
+            plumber_document = pdfplumber.open(str(pdf_path))
 
-        for index, page in enumerate(reader.pages, start=1):
-            text = page.extract_text() or ""
-            text = normalize_pdf_text(text)
-            form_lines = extract_pdf_page_form_lines(page)
+        with open(pdf_path, "rb") as handle:
+            reader = PyPDF2.PdfReader(handle)
+            emit(log_fn, f"[DEBUG] PDF loaded. Pages found: {len(reader.pages)}")
 
-            if form_lines:
-                form_text = normalize_pdf_text("\n".join(form_lines))
-                if form_text:
-                    text = normalize_pdf_text(f"{text}\n{form_text}") if text else form_text
-                emit(log_fn, f"[DEBUG] Extracted page {index} form fields: {len(form_lines)}")
+            for index, page in enumerate(reader.pages, start=1):
+                plumber_page = plumber_document.pages[index - 1] if plumber_document and index - 1 < len(plumber_document.pages) else None
+                text = extract_pdf_native_text(page, plumber_page=plumber_page)
+                form_lines = extract_pdf_page_form_lines(page)
 
-            pages.append(text)
-            emit(log_fn, f"[DEBUG] Extracted page {index}: {len(text)} chars")
+                page_metadata = build_hybrid_page_metadata(
+                    page_number=index,
+                    source_type="pdf",
+                    native_text=text,
+                    form_lines=form_lines,
+                    source_file=str(pdf_path),
+                )
+                merged_text, page_metadata = finalize_page_text_from_metadata(page_metadata)
 
-    return pages
+                if form_lines:
+                    emit(log_fn, f"[DEBUG] Extracted page {index} form fields: {len(form_lines)}")
+
+                pages.append(merged_text)
+                metadata.append(page_metadata)
+                emit(log_fn, f"[DEBUG] Extracted page {index}: {len(merged_text)} chars")
+    finally:
+        if plumber_document is not None:
+            try:
+                plumber_document.close()
+            except Exception:
+                pass
+
+    return (pages, metadata) if return_metadata else pages
 
 
-def extract_pdf_pages_with_fallback(pdf_path, log_fn=None):
-    pages = extract_pdf_pages(pdf_path, log_fn=log_fn)
-    ocr_pages = extract_pdf_pages_with_windows_ocr(pdf_path, log_fn=log_fn)
+def extract_pdf_pages_with_fallback(pdf_path, log_fn=None, return_metadata=False):
+    pages, metadata = extract_pdf_pages(pdf_path, log_fn=log_fn, return_metadata=True)
+    ocr_metadata = extract_pdf_page_ocr_metadata(pdf_path, log_fn=log_fn)
 
-    if not ocr_pages:
-        return pages
+    if not ocr_metadata:
+        ocr_pages = extract_pdf_pages_with_windows_ocr(pdf_path, log_fn=log_fn)
+        if ocr_pages:
+            ocr_metadata = [
+                build_hybrid_page_metadata(
+                    page_number=index,
+                    source_type="pdf",
+                    ocr_results=[{
+                        "provider": "windows_ocr",
+                        "text": normalize_pdf_text(text),
+                        "confidence": 62.0,
+                        "field_zones": [],
+                        "layout": {},
+                        "segment_index": 0,
+                        "segment_reason": "full_page",
+                        "segment_bbox": None,
+                        "preprocessing": {},
+                        "region_runs": [],
+                    }],
+                    source_file=str(pdf_path),
+                )
+                for index, text in enumerate(ocr_pages, start=1)
+            ]
+
+    if not ocr_metadata:
+        return (pages, metadata) if return_metadata else pages
 
     merged_pages = []
+    merged_metadata = []
     changed_pages = 0
+    total_pages = max(len(metadata), len(ocr_metadata))
 
-    for index, primary_text in enumerate(pages):
-        ocr_text = ocr_pages[index] if index < len(ocr_pages) else ""
-        merged_text = merge_page_texts(primary_text, ocr_text)
-        if merged_text != primary_text:
+    for index in range(total_pages):
+        primary_metadata = metadata[index] if index < len(metadata) else build_hybrid_page_metadata(
+            page_number=index + 1,
+            source_type="pdf",
+            source_file=str(pdf_path),
+        )
+        secondary_metadata = ocr_metadata[index] if index < len(ocr_metadata) else {}
+        merged_page_metadata = merge_page_metadata(primary_metadata, secondary_metadata)
+        merged_text, merged_page_metadata = finalize_page_text_from_metadata(merged_page_metadata)
+        if index < len(pages) and merged_text != pages[index]:
             changed_pages += 1
         merged_pages.append(merged_text)
+        merged_metadata.append(merged_page_metadata)
 
     emit(log_fn, f"[DEBUG] OCR fallback merged into {changed_pages} page(s)")
-    return merged_pages
+    return (merged_pages, merged_metadata) if return_metadata else merged_pages
 
 
-def extract_document_pages(file_path, log_fn=None):
+def extract_document_pages(file_path, log_fn=None, return_metadata=False):
     file_path = Path(file_path).expanduser().resolve()
     suffix = file_path.suffix.lower()
 
     if suffix == ".pdf":
-        return extract_pdf_pages(file_path, log_fn=log_fn)
+        return extract_pdf_pages(file_path, log_fn=log_fn, return_metadata=return_metadata)
     if suffix == ".docx":
-        return extract_docx_pages(file_path, log_fn=log_fn)
+        return extract_docx_pages(file_path, log_fn=log_fn, return_metadata=return_metadata)
     if suffix in TEXT_EXTENSIONS:
-        return extract_text_pages(file_path, log_fn=log_fn)
+        return extract_text_pages(file_path, log_fn=log_fn, return_metadata=return_metadata)
     if suffix in IMAGE_EXTENSIONS:
-        pages = extract_image_pages_with_windows_ocr(file_path, log_fn=log_fn)
+        pages = extract_image_pages_with_windows_ocr(file_path, log_fn=log_fn, return_metadata=return_metadata)
+        if return_metadata:
+            return pages or ([], [])
         return pages or []
 
     raise RuntimeError(f"Unsupported packet file type: {file_path.suffix or '<none>'}")
 
 
-def extract_document_pages_with_fallback(file_path, log_fn=None):
+def extract_document_pages_with_fallback(file_path, log_fn=None, return_metadata=False):
     file_path = Path(file_path).expanduser().resolve()
     suffix = file_path.suffix.lower()
 
     if suffix == ".pdf":
-        return extract_pdf_pages_with_fallback(file_path, log_fn=log_fn)
+        return extract_pdf_pages_with_fallback(file_path, log_fn=log_fn, return_metadata=return_metadata)
 
-    return extract_document_pages(file_path, log_fn=log_fn)
+    return extract_document_pages(file_path, log_fn=log_fn, return_metadata=return_metadata)
 
 
 __all__ = [

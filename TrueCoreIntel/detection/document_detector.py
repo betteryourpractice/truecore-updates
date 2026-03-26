@@ -2,6 +2,7 @@ import hashlib
 import re
 from difflib import SequenceMatcher
 
+from TrueCoreIntel.detection.document_intelligence import DocumentIntelligenceAnalyzer
 from TrueCoreIntel.detection.form_templates import FORM_TEMPLATES
 
 
@@ -116,6 +117,15 @@ class DocumentDetector:
         "procedure": ["requested procedure", "procedure", "cpt"],
     }
 
+    def __init__(self):
+        self.document_intelligence_analyzer = DocumentIntelligenceAnalyzer()
+
+    def get_page_metadata(self, packet, page_index):
+        page_metadata = list(getattr(packet, "page_metadata", []) or [])
+        if page_index < len(page_metadata):
+            return page_metadata[page_index]
+        return {}
+
     def count_filled_consent_signals(self, text):
         filled_patterns = [
             r"full name[^\n\r:]{0,40}:\s*(?!date of birth\b|state\b|street address\b|home phone\b|email address\b|email\b|city\b|mobile phone\b|ssn\b|phone\b|zip\b|work phone\b)([A-Za-z][A-Za-z'\-]+(?:\s+[A-Za-z][A-Za-z'\-]+){1,3})",
@@ -137,9 +147,14 @@ class DocumentDetector:
         packet.page_confidence = {}
         packet.duplicate_pages = []
         packet.unfilled_documents = set()
+        packet.document_intelligence = {}
+        packet.document_confidence_map = {}
+        packet.source_reliability_ranking = []
+        packet.document_spans = []
 
         for idx, page in enumerate(packet.pages):
-            doc_type, confidence = self.classify_page_with_confidence(page)
+            page_metadata = self.get_page_metadata(packet, idx)
+            doc_type, confidence = self.classify_page_with_confidence(page, page_metadata=page_metadata)
             packet.document_types[idx] = doc_type
             packet.page_confidence[idx] = confidence
 
@@ -148,18 +163,19 @@ class DocumentDetector:
 
         self.supplement_detected_documents(packet)
         self.detect_duplicate_pages(packet)
+        packet = self.document_intelligence_analyzer.analyze(packet)
 
         return packet
 
     def classify_page(self, page):
         return self.classify_page_with_confidence(page)[0]
 
-    def classify_page_with_confidence(self, page):
+    def classify_page_with_confidence(self, page, page_metadata=None):
         raw_text = str(page) if page is not None else ""
-        text = self.normalize_page_text(page)
+        text = self.normalize_page_text(page, page_metadata=page_metadata)
 
         if not text or len(text) < 40:
-            return "unknown", 0.15
+            return "unknown", self.estimate_unknown_confidence(text, page_metadata=page_metadata)
 
         # 1) Exact / strong match first
         strong_hits = {}
@@ -179,6 +195,7 @@ class DocumentDetector:
                     max_hits = max(strong_hits.values())
                     confidence = min(0.99, 0.84 + (0.04 * max_hits))
                     confidence = self.adjust_confidence_for_field_hints(doc_type, text, confidence)
+                    confidence = self.adjust_confidence_for_layout(doc_type, confidence, page_metadata)
                     return doc_type, confidence
 
         # 2) Fallback weighted keyword scoring
@@ -193,13 +210,14 @@ class DocumentDetector:
                 scores[doc_type] = score
 
         if not scores:
-            return "unknown", self.estimate_unknown_confidence(text)
+            return "unknown", self.estimate_unknown_confidence(text, page_metadata=page_metadata)
 
         # Guardrails against fake positives
         scores = self.apply_guardrails(raw_text, text, scores)
+        scores = self.apply_layout_signal_boosts(scores, page_metadata, text)
 
         if not scores:
-            return "unknown", self.estimate_unknown_confidence(text)
+            return "unknown", self.estimate_unknown_confidence(text, page_metadata=page_metadata)
 
         best_doc_type, best_score = max(scores.items(), key=lambda item: item[1])
 
@@ -215,12 +233,13 @@ class DocumentDetector:
         }
 
         if best_score < thresholds.get(best_doc_type, 7):
-            return "unknown", self.estimate_unknown_confidence(text)
+            return "unknown", self.estimate_unknown_confidence(text, page_metadata=page_metadata)
 
         threshold = thresholds.get(best_doc_type, 7)
         margin = max(best_score - threshold, 0)
         confidence = min(0.95, 0.58 + (0.04 * margin))
         confidence = self.adjust_confidence_for_field_hints(best_doc_type, text, confidence)
+        confidence = self.adjust_confidence_for_layout(best_doc_type, confidence, page_metadata)
         return best_doc_type, confidence
 
     def get_template_field_hints(self, doc_type):
@@ -248,14 +267,81 @@ class DocumentDetector:
             return min(0.97, base_confidence + 0.02)
         return max(0.4, base_confidence - 0.03)
 
-    def estimate_unknown_confidence(self, text):
+    def estimate_unknown_confidence(self, text, page_metadata=None):
         if not text:
             return 0.1
 
-        if len(text) < 120:
-            return 0.2
+        page_metadata = dict(page_metadata or {})
+        layout = dict(page_metadata.get("layout", {}) or {})
+        field_zone_count = len(page_metadata.get("field_zones", []) or [])
 
-        return 0.35
+        if len(text) < 120:
+            confidence = 0.2
+        else:
+            confidence = 0.35
+
+        if field_zone_count >= 4:
+            confidence += 0.08
+        if layout.get("header_text"):
+            confidence += 0.04
+        if layout.get("table_regions"):
+            confidence += 0.04
+
+        return min(0.55, round(confidence, 2))
+
+    def adjust_confidence_for_layout(self, doc_type, confidence, page_metadata):
+        page_metadata = dict(page_metadata or {})
+        layout = dict(page_metadata.get("layout", {}) or {})
+        field_zones = list(page_metadata.get("field_zones", []) or [])
+        zone_labels = {str(zone.get("normalized_label") or "").lower() for zone in field_zones}
+
+        if layout.get("header_text"):
+            confidence += 0.02
+
+        if doc_type in {"rfs", "consult_request", "seoc", "cover_sheet"} and len(field_zones) >= 4:
+            confidence += 0.05
+
+        if doc_type == "clinical_notes" and layout.get("signature_regions"):
+            confidence += 0.03
+
+        if doc_type == "rfs" and any("authorization" in label or "box 4" in label for label in zone_labels):
+            confidence += 0.06
+
+        if doc_type == "consent" and page_metadata.get("ocr_confidence", 0.0) < 55:
+            confidence -= 0.03
+
+        return min(0.99, max(0.15, round(confidence, 2)))
+
+    def apply_layout_signal_boosts(self, scores, page_metadata, normalized_text):
+        if not scores:
+            return scores
+
+        page_metadata = dict(page_metadata or {})
+        layout = dict(page_metadata.get("layout", {}) or {})
+        field_zones = list(page_metadata.get("field_zones", []) or [])
+        zone_labels = [str(zone.get("normalized_label") or "").lower() for zone in field_zones]
+        header_text = str(layout.get("header_text") or "").lower()
+
+        boosted = dict(scores)
+
+        if any("authorization" in label or "box 4" in label for label in zone_labels):
+            boosted["rfs"] = boosted.get("rfs", 0) + 3
+
+        if any("reason for request" in label or "requested service" in label for label in zone_labels):
+            boosted["consult_request"] = boosted.get("consult_request", 0) + 2
+
+        if layout.get("table_regions") and len(field_zones) >= 5:
+            boosted["rfs"] = boosted.get("rfs", 0) + 2
+            boosted["cover_sheet"] = boosted.get("cover_sheet", 0) + 1
+
+        if layout.get("signature_regions") and any(term in normalized_text for term in ["assessment", "plan", "history of present illness"]):
+            boosted["clinical_notes"] = boosted.get("clinical_notes", 0) + 1
+            boosted["lomn"] = boosted.get("lomn", 0) + 1
+
+        if "10-10172" in header_text or "request for service" in header_text:
+            boosted["rfs"] = boosted.get("rfs", 0) + 3
+
+        return boosted
 
     def apply_guardrails(self, raw_text, text, scores):
         filtered = dict(scores)
@@ -339,8 +425,28 @@ class DocumentDetector:
 
         return filtered
 
-    def normalize_page_text(self, page):
+    def normalize_page_text(self, page, page_metadata=None):
         text = str(page) if page is not None else ""
+        page_metadata = dict(page_metadata or {})
+
+        layout = dict(page_metadata.get("layout", {}) or {})
+        field_zone_lines = []
+        for zone in page_metadata.get("field_zones", []) or []:
+            label = str(zone.get("label") or zone.get("normalized_label") or "").strip()
+            value = str(zone.get("value") or "").strip()
+            if label and value:
+                field_zone_lines.append(f"{label}: {value}")
+
+        extra_parts = [
+            layout.get("header_text"),
+            layout.get("left_column_text"),
+            layout.get("right_column_text"),
+            "\n".join(field_zone_lines),
+            page_metadata.get("ocr_text"),
+        ]
+        extra_text = "\n".join(part for part in extra_parts if part)
+        if extra_text:
+            text = f"{text}\n{extra_text}" if text else extra_text
 
         if not text:
             return ""
@@ -356,8 +462,9 @@ class DocumentDetector:
     def supplement_detected_documents(self, packet):
         for idx, page in enumerate(packet.pages):
             current_doc_type = packet.document_types.get(idx, "unknown")
+            page_metadata = self.get_page_metadata(packet, idx)
 
-            header = self.extract_page_header(page)
+            header = self.extract_page_header(page, page_metadata=page_metadata)
             if header:
                 hinted_doc = self.find_packet_level_document_hint(header)
                 if hinted_doc:
@@ -371,21 +478,26 @@ class DocumentDetector:
                             packet.page_confidence[idx] = max(packet.page_confidence.get(idx, 0.0), 0.88)
                             current_doc_type = hinted_doc
 
-            if self.looks_like_clinical_notes(page):
+            if self.looks_like_clinical_notes(page, page_metadata=page_metadata):
                 packet.detected_documents.add("clinical_notes")
 
                 if current_doc_type == "unknown":
                     packet.document_types[idx] = "clinical_notes"
                     packet.page_confidence[idx] = max(packet.page_confidence.get(idx, 0.0), 0.78)
 
-            if self.looks_like_rfs_form(page):
+            if self.looks_like_rfs_form(page, page_metadata=page_metadata):
                 packet.detected_documents.add("rfs")
 
                 if current_doc_type == "unknown":
                     packet.document_types[idx] = "rfs"
                     packet.page_confidence[idx] = max(packet.page_confidence.get(idx, 0.0), 0.8)
 
-    def extract_page_header(self, page):
+    def extract_page_header(self, page, page_metadata=None):
+        page_metadata = dict(page_metadata or {})
+        header_text = str((page_metadata.get("layout", {}) or {}).get("header_text") or "").strip()
+        if header_text:
+            return header_text[:500].lower().strip()
+
         text = str(page) if page is not None else ""
         if not text:
             return ""
@@ -423,8 +535,8 @@ class DocumentDetector:
     def should_apply_header_hint(self, current_doc_type, hinted_doc_type):
         return self.HEADER_HINT_PRIORITY.get(hinted_doc_type, 0) > self.HEADER_HINT_PRIORITY.get(current_doc_type, 0)
 
-    def looks_like_clinical_notes(self, page):
-        text = self.normalize_page_text(page)
+    def looks_like_clinical_notes(self, page, page_metadata=None):
+        text = self.normalize_page_text(page, page_metadata=page_metadata)
 
         if not text or len(text) < 120:
             return False
@@ -458,8 +570,8 @@ class DocumentDetector:
 
         return anchor_hits >= 2 or (anchor_hits >= 1 and support_hits >= 3)
 
-    def looks_like_rfs_form(self, page):
-        text = self.normalize_page_text(page)
+    def looks_like_rfs_form(self, page, page_metadata=None):
+        text = self.normalize_page_text(page, page_metadata=page_metadata)
 
         if not text or len(text) < 120:
             return False

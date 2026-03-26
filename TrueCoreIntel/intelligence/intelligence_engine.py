@@ -1,5 +1,8 @@
 import re
 
+from TrueCoreIntel.intelligence.clinical_intelligence import ClinicalIntelligenceAnalyzer
+from TrueCoreIntel.intelligence.evidence_intelligence import EvidenceIntelligenceAnalyzer
+
 
 class IntelligenceEngine:
 
@@ -22,10 +25,18 @@ class IntelligenceEngine:
         "neck pain": {"M54.2"},
     }
 
+    def __init__(self):
+        self.clinical_intelligence_analyzer = ClinicalIntelligenceAnalyzer()
+        self.evidence_intelligence_analyzer = EvidenceIntelligenceAnalyzer()
+
     def evaluate(self, packet):
+        packet.evidence_intelligence = {}
+        packet.clinical_intelligence = {}
         self.link_medical_evidence(packet)
         self.evaluate_medical_necessity(packet)
         self.evaluate_packet_integrity(packet)
+        packet = self.evidence_intelligence_analyzer.analyze(packet)
+        packet = self.clinical_intelligence_analyzer.analyze(packet)
 
         packet.packet_score = self.calculate_score(packet)
         packet.packet_confidence = self.calculate_packet_confidence(packet)

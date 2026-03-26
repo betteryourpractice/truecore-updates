@@ -62,6 +62,8 @@ class MainWindow(QMainWindow):
 
         self.files = []
         self.results = {}
+        self.scan_diagnostics_dialog = None
+        self.scan_diagnostics_view = None
 
         load_icd_codes()
 
@@ -132,10 +134,16 @@ class MainWindow(QMainWindow):
             QIcon(icon_base + "settings.svg"),
             "Admin"
         )
+        self.btn_scan_diagnostics = QPushButton(
+            QIcon(icon_base + "search.svg"),
+            "Scan Diagnostics"
+        )
+        self.btn_scan_diagnostics.setEnabled(False)
 
         self.btn_close = QPushButton("Exit")
         self.btn_close.setObjectName("closeButton")
 
+        header_layout.addWidget(self.btn_scan_diagnostics)
         header_layout.addWidget(self.btn_admin)
         header_layout.addWidget(self.btn_close)
 
@@ -181,6 +189,7 @@ class MainWindow(QMainWindow):
             self.btn_folder,
             self.btn_export,
             self.btn_clear,
+            self.btn_scan_diagnostics,
             self.btn_admin
         ]:
             btn.setIconSize(QSize(18,18))
@@ -294,6 +303,7 @@ class MainWindow(QMainWindow):
         self.btn_folder.clicked.connect(self.analyze_folder)
         self.btn_export.clicked.connect(self.export_report)
         self.btn_clear.clicked.connect(self.clear_results)
+        self.btn_scan_diagnostics.clicked.connect(self.open_scan_diagnostics)
         self.btn_admin.clicked.connect(self.open_admin_panel)
         self.btn_close.clicked.connect(self.close)
 
@@ -422,6 +432,400 @@ class MainWindow(QMainWindow):
 
         return self.build_detail_card(title, "".join(lines), accent_color=accent)
 
+    def intel_payload(self, result):
+
+        return result.get("intel", {}) if isinstance(result, dict) else {}
+
+    def get_nested_value(self, data, *keys, default=None):
+
+        current = data
+
+        for key in keys:
+            if not isinstance(current, dict):
+                return default
+
+            current = current.get(key)
+
+            if current is None:
+                return default
+
+        return current
+
+    def build_advanced_intel_sections(self, result):
+
+        intel = self.intel_payload(result)
+
+        evidence = intel.get("evidence_intelligence", {}) or {}
+        clinical = intel.get("clinical_intelligence", {}) or {}
+        denial = intel.get("denial_intelligence", {}) or {}
+        human_loop = intel.get("human_in_the_loop_intelligence", {}) or {}
+        orchestration = intel.get("orchestration_intelligence", {}) or {}
+        architecture = intel.get("architecture_intelligence", {}) or {}
+        recovery = intel.get("recovery_intelligence", {}) or {}
+        policy = intel.get("policy_intelligence", {}) or {}
+        deployment = intel.get("deployment_intelligence", {}) or {}
+
+        sections = []
+
+        evidence_rows = [
+            ("Sufficiency", self.get_nested_value(evidence, "evidence_sufficiency_modeling", "status")),
+            ("Support Level", self.get_nested_value(evidence, "evidence_sufficiency_modeling", "support_level")),
+            ("Freshness", self.get_nested_value(evidence, "evidence_freshness_validation", "status")),
+            ("Escalation", self.get_nested_value(evidence, "evidence_escalation_recommendation", "level")),
+            ("Evidence Score", self.get_nested_value(evidence, "evidence_sufficiency_modeling", "score")),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in evidence_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Evidence Intelligence",
+                    self.build_detail_table(evidence_rows, value_color="#57B6FF", show_missing=False),
+                    accent_color="#57B6FF",
+                )
+            )
+
+        evidence_actions = self.get_nested_value(evidence, "evidence_escalation_recommendation", "recommendations", default=[])
+        if evidence_actions:
+            sections.append(
+                self.build_bullet_section(
+                    "Evidence Actions",
+                    evidence_actions[:5],
+                    color="#57B6FF",
+                    accent_color="#57B6FF",
+                )
+            )
+
+        clinical_rows = [
+            ("Coherence Score", self.get_nested_value(clinical, "clinical_coherence_scoring", "score")),
+            ("Coherence Band", self.get_nested_value(clinical, "clinical_coherence_scoring", "band")),
+            ("Consistency", self.get_nested_value(clinical, "clinical_consistency_analysis", "status")),
+            ("Severity", self.get_nested_value(clinical, "severity_inference_engine", "level")),
+            ("Conservative Care", self.get_nested_value(clinical, "conservative_care_verification", "status")),
+            ("Specialty Alignment", self.get_nested_value(clinical, "specialty_alignment_validation", "status")),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in clinical_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Clinical Intelligence",
+                    self.build_detail_table(clinical_rows, value_color="#57B6FF", show_missing=False),
+                    accent_color="#57B6FF",
+                )
+            )
+
+        clinical_gaps = self.get_nested_value(clinical, "clinical_gap_detection", "gaps", default=[])
+        if clinical_gaps:
+            sections.append(
+                self.build_bullet_section(
+                    "Clinical Gaps",
+                    clinical_gaps[:5],
+                    color="#EB5757",
+                    accent_color="#EB5757",
+                )
+            )
+
+        denial_rows = [
+            ("Primary Category", self.get_nested_value(denial, "denial_taxonomy_engine", "primary_category")),
+            ("Appeal Disposition", self.get_nested_value(denial, "appeal_opportunity_detection", "disposition")),
+            ("Recovery Score", self.get_nested_value(denial, "failure_recovery_scoring", "score")),
+            ("Recovery Band", self.get_nested_value(denial, "failure_recovery_scoring", "band")),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in denial_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Denial Intelligence",
+                    self.build_detail_table(denial_rows, value_color="#F2994A", show_missing=False),
+                    accent_color="#F2994A",
+                )
+            )
+
+        denial_actions = self.get_nested_value(denial, "countermeasure_recommendation_engine", "recommended_actions", default=[])
+        if denial_actions:
+            sections.append(
+                self.build_bullet_section(
+                    "Denial Countermeasures",
+                    denial_actions[:5],
+                    color="#F2994A",
+                    accent_color="#F2994A",
+                )
+            )
+
+        human_rows = [
+            ("Trust Score", self.get_nested_value(human_loop, "trust_score_modeling", "trust_score")),
+            ("Trust Band", self.get_nested_value(human_loop, "trust_score_modeling", "band")),
+            ("Threshold", self.get_nested_value(human_loop, "review_threshold_engine", "status")),
+            ("Gate Open", self.get_nested_value(human_loop, "confidence_gated_automation", "gate_open")),
+            ("Checkpoint Required", self.get_nested_value(human_loop, "approval_checkpoint_layer", "checkpoint_required")),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in human_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Human-In-The-Loop",
+                    self.build_detail_table(human_rows, value_color="#F2C94C", show_missing=False),
+                    accent_color="#F2C94C",
+                )
+            )
+
+        human_points = self.get_nested_value(human_loop, "reviewer_attention_guidance", "attention_points", default=[])
+        if human_points:
+            sections.append(
+                self.build_bullet_section(
+                    "Reviewer Attention Guidance",
+                    human_points[:5],
+                    color="#F2C94C",
+                    accent_color="#F2C94C",
+                )
+            )
+
+        system_rows = [
+            ("Pipeline State", self.get_nested_value(orchestration, "pipeline_health_state_machine", "state")),
+            ("Coordination Score", self.get_nested_value(orchestration, "end_to_end_coordination_scoring", "score")),
+            ("Coordination Band", self.get_nested_value(orchestration, "end_to_end_coordination_scoring", "band")),
+            ("Maintainability", self.get_nested_value(architecture, "maintainability_scoring", "band")),
+            ("Reliability", self.get_nested_value(recovery, "reliability_scoring", "band")),
+            ("Recovery Strategy", self.get_nested_value(recovery, "intelligent_retry_engine", "strategy")),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in system_rows):
+            sections.append(
+                self.build_detail_card(
+                    "System Intelligence",
+                    self.build_detail_table(system_rows, value_color="#6FCF97", show_missing=False),
+                    accent_color="#6FCF97",
+                )
+            )
+
+        policy_rows = [
+            ("Policy Confidence", self.get_nested_value(policy, "policy_compliance_confidence", "band")),
+            ("Policy Score", self.get_nested_value(policy, "policy_compliance_confidence", "score")),
+            ("Forecast Status", self.get_nested_value(policy, "missing_requirement_forecasting", "forecast_status")),
+            ("Deployment Confidence", self.get_nested_value(deployment, "deployment_confidence_scoring", "band")),
+            ("Deployment Score", self.get_nested_value(deployment, "deployment_confidence_scoring", "score")),
+            ("Update Compatibility", self.get_nested_value(deployment, "update_compatibility_analysis", "status")),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in policy_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Policy & Deployment",
+                    self.build_detail_table(policy_rows, value_color="#57B6FF", show_missing=False),
+                    accent_color="#57B6FF",
+                )
+            )
+
+        return sections
+
+    def build_export_summary(self, result):
+
+        intel = self.intel_payload(result)
+        evidence = intel.get("evidence_intelligence", {}) or {}
+        clinical = intel.get("clinical_intelligence", {}) or {}
+        denial = intel.get("denial_intelligence", {}) or {}
+        human_loop = intel.get("human_in_the_loop_intelligence", {}) or {}
+        orchestration = intel.get("orchestration_intelligence", {}) or {}
+        recovery = intel.get("recovery_intelligence", {}) or {}
+        policy = intel.get("policy_intelligence", {}) or {}
+        deployment = intel.get("deployment_intelligence", {}) or {}
+
+        return {
+            "evidence_sufficiency": self.get_nested_value(evidence, "evidence_sufficiency_modeling", "status"),
+            "evidence_freshness": self.get_nested_value(evidence, "evidence_freshness_validation", "status"),
+            "evidence_escalation": self.get_nested_value(evidence, "evidence_escalation_recommendation", "level"),
+            "clinical_coherence": self.get_nested_value(clinical, "clinical_coherence_scoring", "band"),
+            "clinical_severity": self.get_nested_value(clinical, "severity_inference_engine", "level"),
+            "conservative_care": self.get_nested_value(clinical, "conservative_care_verification", "status"),
+            "denial_category": self.get_nested_value(denial, "denial_taxonomy_engine", "primary_category"),
+            "denial_recovery_score": self.get_nested_value(denial, "failure_recovery_scoring", "score"),
+            "trust_score": self.get_nested_value(human_loop, "trust_score_modeling", "trust_score"),
+            "checkpoint_required": self.get_nested_value(human_loop, "approval_checkpoint_layer", "checkpoint_required"),
+            "coordination_score": self.get_nested_value(orchestration, "end_to_end_coordination_scoring", "score"),
+            "reliability_score": self.get_nested_value(recovery, "reliability_scoring", "score"),
+            "policy_confidence": self.get_nested_value(policy, "policy_compliance_confidence", "band"),
+            "deployment_confidence": self.get_nested_value(deployment, "deployment_confidence_scoring", "band"),
+        }
+
+    def current_selected_file(self):
+
+        selected = self.table.currentRow()
+
+        if selected < 0 or selected >= len(self.files):
+            return None
+
+        return self.files[selected]
+
+    def current_selected_result(self):
+
+        file_path = self.current_selected_file()
+
+        if not file_path:
+            return None, None
+
+        return file_path, self.results.get(file_path)
+
+    def update_scan_diagnostics_button(self):
+
+        _, result = self.current_selected_result()
+        diagnostics = ((result or {}).get("intel", {}) or {}).get("scan_diagnostics", {})
+        self.btn_scan_diagnostics.setEnabled(bool(diagnostics))
+
+    def build_scan_diagnostics_html(self, file_path, result):
+
+        intel = self.intel_payload(result)
+        diagnostics = intel.get("scan_diagnostics", {}) or {}
+        summary = diagnostics.get("summary", {}) or {}
+        pages = diagnostics.get("pages", []) or []
+        ranking = diagnostics.get("source_reliability_ranking", []) or []
+
+        if not diagnostics:
+            return (
+                "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+                "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+                "<div style=\"color:#9CA3AF;\">No scan diagnostics available for this packet.</div>"
+                "</body></html>"
+            )
+
+        sections = [
+            self.build_detail_card(
+                "Packet Scan Summary",
+                self.build_detail_table(
+                    [
+                        ("Packet", os.path.basename(file_path)),
+                        ("OCR Provider", summary.get("ocr_provider")),
+                        ("Pages", summary.get("page_count")),
+                        ("Pages With OCR", summary.get("pages_with_ocr")),
+                        ("Pages With Field Zones", summary.get("pages_with_field_zones")),
+                        ("Pages With Split Segments", summary.get("pages_with_split_segments")),
+                        ("Average OCR Confidence", summary.get("average_ocr_confidence")),
+                        ("Scan Quality", summary.get("scan_quality_band")),
+                        ("Scan Quality Score", summary.get("scan_quality_score")),
+                        ("Handwriting Risk", summary.get("handwriting_risk_level")),
+                        ("Handwriting Risk Score", summary.get("handwriting_risk_score")),
+                        ("Pages With Table Regions", summary.get("pages_with_table_regions")),
+                        ("Pages With Signature Regions", summary.get("pages_with_signature_regions")),
+                        ("Pages With Handwritten Regions", summary.get("pages_with_handwritten_regions")),
+                    ],
+                    value_color="#57B6FF",
+                    show_missing=False,
+                ),
+                accent_color="#57B6FF",
+                margin_top=0,
+            )
+        ]
+
+        if ranking:
+            ranking_items = [
+                f"{item.get('rank')}. {self.format_field(item.get('document_type', 'unknown'))} | "
+                f"Reliability {item.get('reliability_score')} ({item.get('reliability_band')}) | "
+                f"Confidence {item.get('average_confidence')}"
+                for item in ranking
+            ]
+            sections.append(
+                self.build_bullet_section(
+                    "Most Reliable Sources",
+                    ranking_items,
+                    color="#6FCF97",
+                    accent_color="#27AE60",
+                )
+            )
+
+        if pages:
+            page_rows = []
+            for page in pages:
+                page_rows.append(
+                    "<tr>"
+                    f"<td style=\"color:#FFFFFF; padding:4px 8px;\">{html.escape(str(page.get('page')))}</td>"
+                    f"<td style=\"color:#DCE6F2; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('document_type')))}</td>"
+                    f"<td style=\"color:#57B6FF; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('ocr_confidence')))}</td>"
+                    f"<td style=\"color:#DCE6F2; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('scan_quality')))}</td>"
+                    f"<td style=\"color:#F2C94C; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('handwriting_risk')))}</td>"
+                    f"<td style=\"color:#6FCF97; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('field_zone_count')))}</td>"
+                    f"<td style=\"color:#DCE6F2; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('split_segment_count')))}</td>"
+                    "</tr>"
+                )
+
+            page_table = (
+                "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;\">"
+                "<tr>"
+                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Page</td>"
+                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Document</td>"
+                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">OCR</td>"
+                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Scan Quality</td>"
+                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Handwriting</td>"
+                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Field Zones</td>"
+                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Segments</td>"
+                "</tr>"
+                + "".join(page_rows) +
+                "</table>"
+            )
+
+            sections.append(
+                self.build_detail_card(
+                    "Page Diagnostics",
+                    page_table,
+                    accent_color="#57B6FF",
+                )
+            )
+
+        rendered_sections = "".join(section for section in sections if section)
+
+        return (
+            "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+            "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+            f"{rendered_sections}</body></html>"
+        )
+
+    def refresh_scan_diagnostics_dialog(self):
+
+        if not self.scan_diagnostics_dialog or not self.scan_diagnostics_view:
+            return
+
+        file_path, result = self.current_selected_result()
+
+        if not file_path or not result:
+            self.scan_diagnostics_view.setHtml(
+                "<html><body style=\"background-color:#11161E; color:#E5E7EB; font-family:'Segoe UI'; "
+                "font-size:13px; line-height:1.45;\"><div style=\"color:#9CA3AF;\">Select a packet result to view scan diagnostics.</div></body></html>"
+            )
+            return
+
+        self.scan_diagnostics_dialog.setWindowTitle(
+            f"Scan Diagnostics - {os.path.basename(file_path)}"
+        )
+        self.scan_diagnostics_view.setHtml(
+            self.build_scan_diagnostics_html(file_path, result)
+        )
+
+    def open_scan_diagnostics(self):
+
+        file_path, result = self.current_selected_result()
+
+        if not file_path or not result:
+            QMessageBox.information(self, "Scan Diagnostics", "Select a packet result first.")
+            return
+
+        if self.scan_diagnostics_dialog is None:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Scan Diagnostics")
+            dialog.resize(980, 720)
+
+            layout = QVBoxLayout()
+
+            view = QTextEdit()
+            view.setReadOnly(True)
+
+            layout.addWidget(view)
+            dialog.setLayout(layout)
+
+            self.scan_diagnostics_dialog = dialog
+            self.scan_diagnostics_view = view
+
+        self.refresh_scan_diagnostics_dialog()
+        self.scan_diagnostics_dialog.show()
+        self.scan_diagnostics_dialog.raise_()
+        self.scan_diagnostics_dialog.activateWindow()
+
     def build_packet_details_html(self, file, result):
 
         score = result.get("score", 0)
@@ -510,6 +914,8 @@ class MainWindow(QMainWindow):
                 if section_html:
                     sections.append(section_html)
 
+            sections.extend(self.build_advanced_intel_sections(result))
+
         rendered_sections = "".join(section for section in sections if section)
 
         return (
@@ -543,6 +949,7 @@ class MainWindow(QMainWindow):
             return
 
         self.files=files
+        self.update_scan_diagnostics_button()
         self.log(f"Loaded {len(files)} files.")
         log_event("files_loaded", f"{len(files)} files")
 
@@ -560,6 +967,16 @@ class MainWindow(QMainWindow):
             result=process_packet(file)
 
             score=result.get("score",0)
+            intel_display=result.get("intel",{}).get("display",{})
+            workbook_summary=self.build_export_summary(result)
+            workbook_summary.update({
+                "packet_confidence": intel_display.get("packet_confidence"),
+                "approval_probability": intel_display.get("approval_probability"),
+                "submission_readiness": intel_display.get("submission_readiness"),
+                "workflow_queue": intel_display.get("workflow_queue"),
+                "next_action": intel_display.get("next_action"),
+                "denial_risk": intel_display.get("denial_risk"),
+            })
 
             self.results[file]=result
 
@@ -580,7 +997,7 @@ class MainWindow(QMainWindow):
                 status.setText("Approved")
                 status.setIcon(QIcon(icon_base+"check.svg"))
                 status.setForeground(QColor("#27AE60"))
-                export_patient(result.get("fields",{}),file)
+                export_patient(result.get("fields",{}), file, workbook_summary)
                 self.log(
                     f"Approved packet exported → {os.path.basename(file)}",
                     action="packet_processed"
@@ -600,6 +1017,10 @@ class MainWindow(QMainWindow):
 
             triage_packet(file,score)
 
+        if self.table.rowCount() > 0:
+            self.table.selectRow(0)
+
+        self.update_scan_diagnostics_button()
         self.log("Packet analysis complete.")
 
     # -------------------------------------------------
@@ -617,9 +1038,14 @@ class MainWindow(QMainWindow):
         result=self.results.get(file)
 
         if not result:
+            self.update_scan_diagnostics_button()
             return
 
         self.details.setHtml(self.build_packet_details_html(file, result))
+        self.update_scan_diagnostics_button()
+
+        if self.scan_diagnostics_dialog and self.scan_diagnostics_dialog.isVisible():
+            self.refresh_scan_diagnostics_dialog()
 
     # -------------------------------------------------
     # ANALYZE FOLDER
@@ -639,6 +1065,7 @@ class MainWindow(QMainWindow):
                 files.append(os.path.join(root,f))
 
         self.files=files
+        self.update_scan_diagnostics_button()
         self.log(f"Loaded {len(files)} files.")
         log_event("files_loaded", f"{len(files)} files")
 
@@ -680,10 +1107,25 @@ class MainWindow(QMainWindow):
                 "Conflict Summary",
                 "Priority Fixes",
                 "Approval Rationale",
+                "Evidence Sufficiency",
+                "Evidence Freshness",
+                "Evidence Escalation",
+                "Clinical Coherence",
+                "Clinical Severity",
+                "Conservative Care",
+                "Denial Category",
+                "Denial Recovery Score",
+                "Trust Score",
+                "Checkpoint Required",
+                "Coordination Score",
+                "Reliability Score",
+                "Policy Confidence",
+                "Deployment Confidence",
             ])
 
             for file,result in self.results.items():
                 intel_display=result.get("intel",{}).get("display",{})
+                intel_export=self.build_export_summary(result)
 
                 writer.writerow([
                     os.path.basename(file),
@@ -706,6 +1148,20 @@ class MainWindow(QMainWindow):
                     self.stringify_export_value(intel_display.get("conflict_items",[])),
                     self.stringify_export_value(intel_display.get("priority_fixes",[])),
                     self.stringify_export_value(intel_display.get("approval_rationale",[])),
+                    self.stringify_export_value(intel_export.get("evidence_sufficiency")),
+                    self.stringify_export_value(intel_export.get("evidence_freshness")),
+                    self.stringify_export_value(intel_export.get("evidence_escalation")),
+                    self.stringify_export_value(intel_export.get("clinical_coherence")),
+                    self.stringify_export_value(intel_export.get("clinical_severity")),
+                    self.stringify_export_value(intel_export.get("conservative_care")),
+                    self.stringify_export_value(intel_export.get("denial_category")),
+                    self.stringify_export_value(intel_export.get("denial_recovery_score")),
+                    self.stringify_export_value(intel_export.get("trust_score")),
+                    self.stringify_export_value(intel_export.get("checkpoint_required")),
+                    self.stringify_export_value(intel_export.get("coordination_score")),
+                    self.stringify_export_value(intel_export.get("reliability_score")),
+                    self.stringify_export_value(intel_export.get("policy_confidence")),
+                    self.stringify_export_value(intel_export.get("deployment_confidence")),
                 ])
 
         self.log("Report exported.")
@@ -722,6 +1178,10 @@ class MainWindow(QMainWindow):
 
         self.files=[]
         self.results={}
+        self.update_scan_diagnostics_button()
+
+        if self.scan_diagnostics_dialog:
+            self.scan_diagnostics_dialog.close()
 
         self.log("Results cleared.")
 

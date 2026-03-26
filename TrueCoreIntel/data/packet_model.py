@@ -5,7 +5,11 @@ class Packet:
         self.files = []
         self.pages = []
         self.page_sources = []
+        self.page_metadata = []
         self.source_type = None
+        self.ocr_provider = None
+        self.intake_diagnostics = {}
+        self.benchmark_scores = {}
 
         # Detection
         self.document_types = {}
@@ -31,6 +35,10 @@ class Packet:
 
         # Metadata
         self.page_confidence = {}
+        self.document_intelligence = {}
+        self.document_confidence_map = {}
+        self.source_reliability_ranking = []
+        self.document_spans = []
 
         # Relationships
         self.links = {}
@@ -40,8 +48,19 @@ class Packet:
         # Validation
         self.missing_fields = []
         self.conflicts = []
+        self.validation_intelligence = {}
+        self.deep_verification_score = None
 
         # Intelligence
+        self.evidence_intelligence = {}
+        self.clinical_intelligence = {}
+        self.denial_intelligence = {}
+        self.human_loop_intelligence = {}
+        self.orchestration_intelligence = {}
+        self.architecture_intelligence = {}
+        self.recovery_intelligence = {}
+        self.policy_intelligence = {}
+        self.deployment_intelligence = {}
         self.packet_score = None
         self.packet_strength = None
         self.approval_probability = None

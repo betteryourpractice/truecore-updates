@@ -280,6 +280,101 @@ def test_intel_import():
 
 
 # -------------------------------------------------
+# INTEL CAPABILITY SMOKE TEST
+# -------------------------------------------------
+
+def test_intel_capabilities():
+
+    if not os.path.isdir(INTEL_ROOT):
+        return True
+
+    print("Testing TrueCoreIntel capabilities...")
+
+    try:
+
+        from TrueCoreIntel.intel_engine import process_pages
+
+        pages = [
+            "VA Form 10-10172\nPatient Name: Jacob Talbott\nDOB: 04/03/1992\nAuthorization Number: VA0051513368\nReferring Provider: Amy Allen\nICN: 1041529679V678591\nDate of Service: 01/01/2025 to 03/19/2026",
+            "Consultation and Treatment Request\nOrdering Provider: William Durrett\nReason for Request: low back pain, bilateral hip pain\nProcedure: MRI\nDiagnosis: lumbar radiculopathy\nICD-10: M54.16, M54.50",
+            "Letter of Medical Necessity\nDiagnosis: lumbar radiculopathy\nReason for Request: low back pain\nPatient failed physical therapy and ibuprofen.\nSignature Date: 03/12/2026\nSigned by: William Durrett",
+            "Clinical Notes\nHistory of Present Illness\nPatient Name: Jacob Talbott\nDOB: 04/03/1992\nProvider: William Durrett\nAssessment: low back pain\nImpression: lumbar radiculopathy\nPatient reports pain, numbness, and tingling.\nSigned by: William Durrett",
+        ]
+
+        packet = process_pages(pages, source_type="pdf")
+        output = dict(getattr(packet, "output", {}) or {})
+
+        required_payloads = [
+            "evidence_intelligence_1",
+            "clinical_intelligence_1",
+            "denial_intelligence_1",
+            "human_in_the_loop_intelligence_1",
+            "orchestration_intelligence_1",
+            "architecture_intelligence_1",
+            "recovery_intelligence_1",
+            "validation_intelligence_2",
+            "document_intelligence_2",
+            "policy_intelligence_2",
+            "deployment_intelligence_1",
+        ]
+
+        missing = [
+            key
+            for key in required_payloads
+            if not output.get(key)
+        ]
+
+        if missing:
+            print("ERROR: TrueCoreIntel capability payloads missing:", ", ".join(missing))
+            return False
+
+        if not packet.links.get("pipeline_stage_trace"):
+            print("ERROR: Pipeline stage trace missing from Intel output.")
+            return False
+
+        return True
+
+    except Exception as e:
+
+        print("ERROR: TrueCoreIntel capability smoke test failed:", e)
+        return False
+
+
+# -------------------------------------------------
+# INTEL SCAN BENCHMARK
+# -------------------------------------------------
+
+def test_intel_scan_benchmark():
+
+    if not os.path.isdir(INTEL_ROOT):
+        return True
+
+    print("Testing TrueCoreIntel scan benchmark...")
+
+    try:
+
+        from TrueCoreIntel.benchmarks.scan_benchmark import run_scan_benchmark
+
+        benchmark = run_scan_benchmark()
+
+        if not benchmark.get("pass"):
+            print("ERROR: Scan benchmark failed:", benchmark)
+            return False
+
+        aggregate = benchmark.get("aggregate_score", 0.0)
+        if aggregate < 0.68:
+            print("ERROR: Scan benchmark score below threshold:", aggregate)
+            return False
+
+        return True
+
+    except Exception as e:
+
+        print("ERROR: TrueCoreIntel scan benchmark failed:", e)
+        return False
+
+
+# -------------------------------------------------
 # GUI STARTUP TEST
 # -------------------------------------------------
 
@@ -324,6 +419,8 @@ def run_validation():
         check_pipeline_order,
         compile_project,
         test_intel_import,
+        test_intel_capabilities,
+        test_intel_scan_benchmark,
         test_gui_startup
     ]
 

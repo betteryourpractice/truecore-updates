@@ -463,6 +463,82 @@ def _build_intel_display(packet, packet_output):
     }
 
 
+def _format_document_type_name(document_type):
+    if not document_type or document_type == "unknown":
+        return "Unknown"
+
+    return FORM_NAME_MAP.get(
+        document_type,
+        str(document_type).replace("_", " ").title(),
+    )
+
+
+def _build_scan_diagnostics(packet, packet_output):
+    intake_summary = dict(
+        packet_output.get("ocr_intake_summary", {})
+        or getattr(packet, "intake_diagnostics", {})
+        or {}
+    )
+    document_intelligence = dict(
+        packet_output.get("document_intelligence_2", {})
+        or getattr(packet, "document_intelligence", {})
+        or {}
+    )
+    confidence_map = dict(
+        document_intelligence.get("document_intelligence_confidence_map", {})
+        or packet_output.get("document_confidence_map", {})
+        or {}
+    )
+    scan_quality = dict(document_intelligence.get("scan_quality_assessment", {}) or {})
+    handwriting = dict(document_intelligence.get("handwriting_risk_detection", {}) or {})
+    layout_summary = dict(document_intelligence.get("layout_zone_detection", {}).get("summary", {}) or {})
+    source_ranking = list(document_intelligence.get("source_reliability_ranking", []) or [])
+    page_metadata = list(getattr(packet, "page_metadata", []) or [])
+
+    pages = []
+    for index, metadata in enumerate(page_metadata, start=1):
+        metadata = dict(metadata or {})
+        layout = dict(metadata.get("layout", {}) or {})
+        confidence_entry = dict(confidence_map.get(f"page_{index}", {}) or {})
+        pages.append({
+            "page": index,
+            "document_type": _format_document_type_name(
+                confidence_entry.get("document_type")
+                or getattr(packet, "document_types", {}).get(index - 1, "unknown")
+            ),
+            "classification_confidence": confidence_entry.get("confidence"),
+            "classification_band": confidence_entry.get("confidence_band"),
+            "ocr_confidence": metadata.get("ocr_confidence"),
+            "scan_quality": confidence_entry.get("scan_quality_band"),
+            "handwriting_risk": confidence_entry.get("handwriting_risk_level"),
+            "field_zone_count": len(metadata.get("field_zones", []) or []),
+            "split_segment_count": len(metadata.get("ocr_segments", []) or []),
+            "table_region_count": len(layout.get("table_regions", []) or []),
+            "signature_region_count": len(layout.get("signature_regions", []) or []),
+            "handwritten_region_count": len(layout.get("handwritten_regions", []) or []),
+        })
+
+    return {
+        "summary": {
+            "ocr_provider": getattr(packet, "ocr_provider", None),
+            "page_count": intake_summary.get("page_count", len(page_metadata)),
+            "pages_with_ocr": intake_summary.get("pages_with_ocr"),
+            "pages_with_field_zones": intake_summary.get("pages_with_field_zones"),
+            "pages_with_split_segments": intake_summary.get("pages_with_split_segments"),
+            "average_ocr_confidence": intake_summary.get("average_ocr_confidence"),
+            "scan_quality_band": scan_quality.get("overall_band"),
+            "scan_quality_score": scan_quality.get("average_score"),
+            "handwriting_risk_level": handwriting.get("overall_level"),
+            "handwriting_risk_score": handwriting.get("average_score"),
+            "pages_with_table_regions": layout_summary.get("pages_with_table_regions"),
+            "pages_with_signature_regions": layout_summary.get("pages_with_signature_regions"),
+            "pages_with_handwritten_regions": layout_summary.get("pages_with_handwritten_regions"),
+        },
+        "pages": pages,
+        "source_reliability_ranking": source_ranking[:5],
+    }
+
+
 def _apply_host_packet_rules(result, packet=None):
     score = int(result.get("score", 0))
     fields = dict(result.get("fields", {}))
@@ -559,8 +635,20 @@ def build_intel_result(file_path, approved_icd_codes=None, legacy_result=None):
         "intel": {
             "enabled": True,
             "packet_output": packet_output,
+            "evidence_intelligence": dict(packet_output.get("evidence_intelligence_1", {}) or {}),
+            "clinical_intelligence": dict(packet_output.get("clinical_intelligence_1", {}) or {}),
+            "denial_intelligence": dict(packet_output.get("denial_intelligence_1", {}) or {}),
+            "human_in_the_loop_intelligence": dict(packet_output.get("human_in_the_loop_intelligence_1", {}) or {}),
+            "orchestration_intelligence": dict(packet_output.get("orchestration_intelligence_1", {}) or {}),
+            "architecture_intelligence": dict(packet_output.get("architecture_intelligence_1", {}) or {}),
+            "recovery_intelligence": dict(packet_output.get("recovery_intelligence_1", {}) or {}),
+            "policy_intelligence": dict(packet_output.get("policy_intelligence_2", {}) or {}),
+            "deployment_intelligence": dict(packet_output.get("deployment_intelligence_1", {}) or {}),
+            "document_intelligence": dict(packet_output.get("document_intelligence_2", {}) or {}),
+            "validation_intelligence": dict(packet_output.get("validation_intelligence_2", {}) or {}),
             "review_flags": list(getattr(packet, "review_flags", []) or []),
             "metrics": dict(getattr(packet, "metrics", {}) or {}),
+            "scan_diagnostics": _build_scan_diagnostics(packet, packet_output),
             "display": _build_intel_display(packet, packet_output),
         },
     }

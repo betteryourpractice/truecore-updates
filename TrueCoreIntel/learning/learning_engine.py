@@ -35,10 +35,39 @@ class LearningEngine:
         packet.metrics["detected_documents"] = sorted(packet.detected_documents)
         packet.metrics["duplicate_pages"] = list(packet.duplicate_pages)
         packet.metrics["page_confidence"] = dict(packet.page_confidence)
+        packet.metrics["ocr_provider"] = getattr(packet, "ocr_provider", None)
+        packet.metrics["intake_diagnostics"] = dict(getattr(packet, "intake_diagnostics", {}) or {})
+        packet.metrics["benchmark_scores"] = dict(getattr(packet, "benchmark_scores", {}) or {})
+        packet.metrics["page_metadata"] = [
+            {
+                "page_number": metadata.get("page_number"),
+                "ocr_confidence": metadata.get("ocr_confidence"),
+                "ocr_provider": metadata.get("ocr_provider"),
+                "field_zone_count": len(metadata.get("field_zones", []) or []),
+                "has_header_text": bool((metadata.get("layout", {}) or {}).get("header_text")),
+                "table_region_count": len(((metadata.get("layout", {}) or {}).get("table_regions", []) or [])),
+                "handwritten_region_count": len(((metadata.get("layout", {}) or {}).get("handwritten_regions", []) or [])),
+            }
+            for metadata in list(getattr(packet, "page_metadata", []) or [])
+        ]
+        packet.metrics["evidence_intelligence"] = dict(getattr(packet, "evidence_intelligence", {}) or {})
+        packet.metrics["clinical_intelligence"] = dict(getattr(packet, "clinical_intelligence", {}) or {})
+        packet.metrics["denial_intelligence"] = dict(getattr(packet, "denial_intelligence", {}) or {})
+        packet.metrics["human_in_the_loop_intelligence"] = dict(getattr(packet, "human_loop_intelligence", {}) or {})
+        packet.metrics["orchestration_intelligence"] = dict(getattr(packet, "orchestration_intelligence", {}) or {})
+        packet.metrics["architecture_intelligence"] = dict(getattr(packet, "architecture_intelligence", {}) or {})
+        packet.metrics["recovery_intelligence"] = dict(getattr(packet, "recovery_intelligence", {}) or {})
+        packet.metrics["policy_intelligence"] = dict(getattr(packet, "policy_intelligence", {}) or {})
+        packet.metrics["deployment_intelligence"] = dict(getattr(packet, "deployment_intelligence", {}) or {})
+        packet.metrics["document_intelligence"] = dict(getattr(packet, "document_intelligence", {}) or {})
+        packet.metrics["validation_intelligence"] = dict(getattr(packet, "validation_intelligence", {}) or {})
+        packet.metrics["deep_verification_score"] = getattr(packet, "deep_verification_score", None)
         packet.metrics["links"] = {
             "document_chronology": list(packet.links.get("document_chronology", [])),
             "recommended_page_order": list(packet.links.get("recommended_page_order", [])),
             "page_order_review_needed": bool(packet.links.get("page_order_review_needed")),
+            "evidence_traceback_links": list(packet.links.get("evidence_traceback_links", [])),
+            "pipeline_stage_trace": list(packet.links.get("pipeline_stage_trace", [])),
         }
         packet.metrics["submission_decision"] = dict(packet.output.get("submission_decision", {}))
         packet.metrics["decision_intelligence"] = {
