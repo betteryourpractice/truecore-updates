@@ -394,3 +394,12 @@ CHANGES
 
 * New Intelligence System and Analysis
 
+
+
+VERSION: 4
+DATE: 2026-03-26
+
+CHANGES
+
+* OCR Reviewer Pipeline and Host Intelligence Upgrade
+
