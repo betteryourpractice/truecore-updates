@@ -18,15 +18,17 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect
 )
 
-from PySide6.QtGui import QIcon, QColor, QPixmap
+from PySide6.QtGui import QIcon, QColor, QPixmap, QFont
 from PySide6.QtCore import Qt, QSize, QTimer
 
 import os
 import csv
 import html
+import json
+import re
 from datetime import datetime
 
-from TrueCore.utils.logging_system import log_event
+from TrueCore.utils.logging_system import LOG_FILE, LEGACY_LOG_FILE, log_event, mask_phi
 from TrueCore.utils.runtime_info import (
     ensure_runtime_environment,
     get_version,
@@ -37,6 +39,12 @@ from TrueCore.utils.runtime_info import (
 
 from TrueCore.core.packet_processor import process_packet
 from TrueCore.core.packet_triage import triage_packet
+from TrueCore.core.host_intelligence import record_manual_outcome
+from TrueCore.core.case_memory import (
+    get_recent_packet_events,
+    get_recent_packet_runs,
+    memory_totals,
+)
 from TrueCore.export.workbook_export import export_patient
 from TrueCore.medical.icd_lookup import load_icd_codes
 
@@ -139,11 +147,17 @@ class MainWindow(QMainWindow):
             "Scan Diagnostics"
         )
         self.btn_scan_diagnostics.setEnabled(False)
+        self.btn_record_outcome = QPushButton(
+            QIcon(icon_base + "file-text.svg"),
+            "Record Outcome"
+        )
+        self.btn_record_outcome.setEnabled(False)
 
         self.btn_close = QPushButton("Exit")
         self.btn_close.setObjectName("closeButton")
 
         header_layout.addWidget(self.btn_scan_diagnostics)
+        header_layout.addWidget(self.btn_record_outcome)
         header_layout.addWidget(self.btn_admin)
         header_layout.addWidget(self.btn_close)
 
@@ -190,6 +204,7 @@ class MainWindow(QMainWindow):
             self.btn_export,
             self.btn_clear,
             self.btn_scan_diagnostics,
+            self.btn_record_outcome,
             self.btn_admin
         ]:
             btn.setIconSize(QSize(18,18))
@@ -266,6 +281,7 @@ class MainWindow(QMainWindow):
 
         self.console = QTextEdit()
         self.console.setReadOnly(True)
+        self.console.setFont(QFont("Consolas", 10))
 
         console_layout.addWidget(self.console)
 
@@ -288,6 +304,7 @@ class MainWindow(QMainWindow):
 
         self.details = QTextEdit()
         self.details.setReadOnly(True)
+        self.details.setFont(QFont("Segoe UI", 10))
 
         details_layout.addWidget(self.details)
 
@@ -304,6 +321,7 @@ class MainWindow(QMainWindow):
         self.btn_export.clicked.connect(self.export_report)
         self.btn_clear.clicked.connect(self.clear_results)
         self.btn_scan_diagnostics.clicked.connect(self.open_scan_diagnostics)
+        self.btn_record_outcome.clicked.connect(self.open_record_outcome)
         self.btn_admin.clicked.connect(self.open_admin_panel)
         self.btn_close.clicked.connect(self.close)
 
@@ -377,6 +395,32 @@ class MainWindow(QMainWindow):
 
         return str(value)
 
+    def format_scan_mode(self, mode):
+
+        normalized = str(mode or "").strip().lower()
+
+        mapping = {
+            "native_text": "Native Text",
+            "native_text_structured": "Native Text + Field Zones",
+            "ocr_text": "OCR Text",
+            "layout_ocr": "Layout OCR",
+            "fallback_ocr": "OCR Fallback",
+        }
+
+        if not normalized:
+            return "Unknown"
+
+        return mapping.get(normalized, self.format_field(normalized))
+
+    def format_admin_value(self, value, missing="Missing"):
+
+        display_value = self.format_detail_value(value)
+
+        if display_value == "Missing":
+            return missing
+
+        return mask_phi(display_value)
+
     def build_detail_card(self, title, body_html, accent_color="#2F80ED", margin_top=12):
 
         return (
@@ -432,6 +476,36 @@ class MainWindow(QMainWindow):
 
         return self.build_detail_card(title, "".join(lines), accent_color=accent)
 
+    def build_html_grid_table(self, headers, rows, column_colors=None):
+
+        if not rows:
+            return "<div style=\"color:#9CA3AF;\">No data</div>"
+
+        header_html = "".join(
+            f"<td style=\"color:#FFFFFF; font-weight:700; padding:6px 8px;\">{html.escape(str(header))}</td>"
+            for header in headers
+        )
+
+        rendered_rows = []
+        column_colors = list(column_colors or [])
+
+        for row in rows:
+            cells = []
+            for index, value in enumerate(row):
+                color = column_colors[index] if index < len(column_colors) else "#DCE6F2"
+                cells.append(
+                    f"<td style=\"color:{color}; padding:6px 8px; vertical-align:top;\">"
+                    f"{html.escape(self.format_detail_value(value))}</td>"
+                )
+            rendered_rows.append("<tr>" + "".join(cells) + "</tr>")
+
+        return (
+            "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;\">"
+            f"<tr>{header_html}</tr>"
+            + "".join(rendered_rows) +
+            "</table>"
+        )
+
     def intel_payload(self, result):
 
         return result.get("intel", {}) if isinstance(result, dict) else {}
@@ -459,11 +533,18 @@ class MainWindow(QMainWindow):
         clinical = intel.get("clinical_intelligence", {}) or {}
         denial = intel.get("denial_intelligence", {}) or {}
         human_loop = intel.get("human_in_the_loop_intelligence", {}) or {}
+        memory = intel.get("memory_intelligence", {}) or {}
+        triage = intel.get("triage_intelligence", {}) or {}
+        operator = intel.get("operator_intelligence", {}) or {}
+        learning = intel.get("learning_intelligence", {}) or {}
+        insight = intel.get("insight_intelligence", {}) or {}
+        benchmark = intel.get("benchmark_intelligence", {}) or {}
         orchestration = intel.get("orchestration_intelligence", {}) or {}
         architecture = intel.get("architecture_intelligence", {}) or {}
         recovery = intel.get("recovery_intelligence", {}) or {}
         policy = intel.get("policy_intelligence", {}) or {}
         deployment = intel.get("deployment_intelligence", {}) or {}
+        validation = intel.get("validation_intelligence", {}) or {}
 
         sections = []
 
@@ -579,6 +660,277 @@ class MainWindow(QMainWindow):
                 )
             )
 
+        memory_rows = [
+            ("Prior Cases", self.get_nested_value(memory, "persistent_case_memory", "prior_case_count")),
+            ("Last Status", self.get_nested_value(memory, "persistent_case_memory", "last_status")),
+            ("Last Score", self.get_nested_value(memory, "persistent_case_memory", "last_score")),
+            ("Memory Confidence", self.get_nested_value(memory, "memory_confidence_scoring", "score")),
+            ("Memory Band", self.get_nested_value(memory, "memory_confidence_scoring", "band")),
+            ("Risk Drift", self.get_nested_value(memory, "longitudinal_risk_drift_tracking", "direction")),
+            ("Provider Quality", self.get_nested_value(memory, "provider_relationship_memory", "quality_trend")),
+            ("Provider Packet Count", self.get_nested_value(memory, "provider_relationship_memory", "packet_count")),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in memory_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Case Memory",
+                    self.build_detail_table(memory_rows, value_color="#9B8CFF", show_missing=False),
+                    accent_color="#9B8CFF",
+                )
+            )
+
+        recurring_issues = self.get_nested_value(memory, "recurring_deficiency_detection", "recurring_issues", default=[])
+        if recurring_issues:
+            sections.append(
+                self.build_bullet_section(
+                    "Recurring Deficiencies",
+                    recurring_issues[:5],
+                    color="#EB5757",
+                    accent_color="#EB5757",
+                )
+            )
+
+        carryover_context = self.get_nested_value(memory, "context_carryover_engine", "carryover_context", default=[])
+        if carryover_context:
+            sections.append(
+                self.build_bullet_section(
+                    "Context Carryover",
+                    carryover_context[:5],
+                    color="#9B8CFF",
+                    accent_color="#9B8CFF",
+                )
+            )
+
+        similar_cases = self.get_nested_value(memory, "similar_case_recall", default=[])
+        if similar_cases:
+            similar_case_items = [
+                f"{item.get('file_name')} | similarity {item.get('similarity_score')} | "
+                f"status {item.get('status')} | score {item.get('score')}"
+                for item in similar_cases[:4]
+            ]
+            sections.append(
+                self.build_bullet_section(
+                    "Similar Case Recall",
+                    similar_case_items,
+                    color="#9B8CFF",
+                    accent_color="#9B8CFF",
+                )
+            )
+
+        triage_rows = [
+            ("Priority", triage.get("priority_level")),
+            ("Urgency", triage.get("urgency_classification")),
+            ("Review Depth", triage.get("review_depth_allocation")),
+            ("Time To Action", triage.get("time_to_action_scoring")),
+            ("Staff Route", triage.get("staff_match_routing")),
+            ("Queue Risk", triage.get("queue_risk_forecasting")),
+            ("Triage Confidence", triage.get("triage_confidence_scoring")),
+            ("Deferral Safe", triage.get("deferral_safety_check")),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in triage_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Triage Intelligence",
+                    self.build_detail_table(triage_rows, value_color="#56CCF2", show_missing=False),
+                    accent_color="#56CCF2",
+                )
+            )
+
+        triage_focus = triage.get("next_operator_focus", []) or []
+        if triage_focus:
+            sections.append(
+                self.build_bullet_section(
+                    "Triage Focus",
+                    triage_focus[:5],
+                    color="#56CCF2",
+                    accent_color="#56CCF2",
+                )
+            )
+
+        operator_rows = [
+            ("Primary Route", self.get_nested_value(operator, "operator_workbench_layer", "primary_route")),
+            ("Priority", self.get_nested_value(operator, "operator_workbench_layer", "priority_level")),
+            ("Review Depth", self.get_nested_value(operator, "operator_workbench_layer", "review_depth")),
+            ("Time To Action", self.get_nested_value(operator, "operator_workbench_layer", "time_to_action")),
+            ("Efficiency", self.get_nested_value(operator, "reviewer_efficiency_scoring", "band")),
+            ("Efficiency Score", self.get_nested_value(operator, "reviewer_efficiency_scoring", "score")),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in operator_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Operator Workbench",
+                    self.build_detail_table(operator_rows, value_color="#6FCF97", show_missing=False),
+                    accent_color="#27AE60",
+                )
+            )
+
+        operator_checklist = self.get_nested_value(operator, "smart_review_checklist_generation", "checklist", default=[])
+        if operator_checklist:
+            sections.append(
+                self.build_bullet_section(
+                    "Operator Checklist",
+                    operator_checklist[:6],
+                    color="#6FCF97",
+                    accent_color="#27AE60",
+                )
+            )
+
+        productivity_hints = self.get_nested_value(operator, "productivity_hint_engine", "hints", default=[])
+        if productivity_hints:
+            sections.append(
+                self.build_bullet_section(
+                    "Productivity Hints",
+                    productivity_hints[:5],
+                    color="#6FCF97",
+                    accent_color="#27AE60",
+                )
+            )
+
+        operator_feedback = self.get_nested_value(operator, "operator_support_feedback_loop", "suggestions", default=[])
+        if operator_feedback:
+            sections.append(
+                self.build_bullet_section(
+                    "Operator Feedback Loop",
+                    operator_feedback[:5],
+                    color="#6FCF97",
+                    accent_color="#27AE60",
+                )
+            )
+
+        operator_patterns = self.get_nested_value(operator, "work_pattern_analysis", "friction_points", default=[])
+        if operator_patterns:
+            sections.append(
+                self.build_bullet_section(
+                    "Operator Friction Points",
+                    operator_patterns[:5],
+                    color="#6FCF97",
+                    accent_color="#27AE60",
+                )
+            )
+
+        escalation_note = self.get_nested_value(operator, "escalation_note_drafting", "note")
+        if escalation_note:
+            sections.append(
+                self.build_detail_card(
+                    "Escalation Note",
+                    f"<div style=\"color:#6FCF97;\">{html.escape(str(escalation_note))}</div>",
+                    accent_color="#27AE60",
+                )
+            )
+
+        learning_rows = [
+            ("Latest Outcome", self.get_nested_value(learning, "outcome_feedback_ingestion", "latest_outcome")),
+            ("Outcome Count", self.get_nested_value(learning, "outcome_feedback_ingestion", "outcome_count")),
+            ("Calibration", self.get_nested_value(learning, "confidence_calibration_engine", "status")),
+            ("Calibration Delta", self.get_nested_value(learning, "confidence_calibration_engine", "delta")),
+            ("Override Status", self.get_nested_value(learning, "reviewer_override_learning", "status")),
+            ("Override Rate", self.get_nested_value(learning, "reviewer_override_learning", "override_rate")),
+            ("Readiness", self.get_nested_value(learning, "continuous_intelligence_refinement", "readiness_band")),
+            ("Readiness Score", self.get_nested_value(learning, "continuous_intelligence_refinement", "readiness_score")),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in learning_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Learning Intelligence",
+                    self.build_detail_table(learning_rows, value_color="#F2994A", show_missing=False),
+                    accent_color="#F2994A",
+                )
+            )
+
+        rule_adjustments = self.get_nested_value(learning, "rule_adjustment_recommendation", "recommendations", default=[])
+        if rule_adjustments:
+            sections.append(
+                self.build_bullet_section(
+                    "Rule Adjustment Recommendations",
+                    rule_adjustments[:5],
+                    color="#F2994A",
+                    accent_color="#F2994A",
+                )
+            )
+
+        learning_safeguards = self.get_nested_value(learning, "failure_to_learning_conversion", "recommended_safeguards", default=[])
+        if learning_safeguards:
+            sections.append(
+                self.build_bullet_section(
+                    "Learning Safeguards",
+                    learning_safeguards[:5],
+                    color="#F2994A",
+                    accent_color="#F2994A",
+                )
+            )
+
+        insight_rows = [
+            ("Trend", self.get_nested_value(insight, "hidden_trend_detection", "status")),
+            ("Recent Avg Score", self.get_nested_value(insight, "hidden_trend_detection", "recent_average_score")),
+            ("Provider Rank", self.get_nested_value(insight, "provider_network_insight_engine", "provider_rank")),
+            ("Provider Avg Score", self.get_nested_value(insight, "provider_network_insight_engine", "provider_average_score")),
+            ("Variance", self.get_nested_value(insight, "process_variance_detection", "status")),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in insight_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Insight Intelligence",
+                    self.build_detail_table(insight_rows, value_color="#BB6BD9", show_missing=False),
+                    accent_color="#BB6BD9",
+                )
+            )
+
+        strategic_insights = self.get_nested_value(insight, "strategic_insight_summarization", default=[])
+        if strategic_insights:
+            sections.append(
+                self.build_bullet_section(
+                    "Insight Summary",
+                    strategic_insights[:5],
+                    color="#BB6BD9",
+                    accent_color="#BB6BD9",
+                )
+            )
+
+        insight_actions = self.get_nested_value(insight, "insight_action_recommendation", default=[])
+        if insight_actions:
+            sections.append(
+                self.build_bullet_section(
+                    "Insight Actions",
+                    insight_actions[:5],
+                    color="#BB6BD9",
+                    accent_color="#BB6BD9",
+                )
+            )
+
+        benchmark_rows = [
+            ("Standing", self.get_nested_value(benchmark, "internal_benchmark_engine", "standing")),
+            ("Average Score", self.get_nested_value(benchmark, "internal_benchmark_engine", "average_score")),
+            ("Quality Percentile", self.get_nested_value(benchmark, "quality_benchmark_calibration", "score_percentile")),
+            ("Benchmark Confidence", self.get_nested_value(benchmark, "benchmark_confidence_scoring", "band")),
+            ("Target Score", self.get_nested_value(benchmark, "improvement_target_modeling", "target_score")),
+            ("Provider Rank", self.get_nested_value(benchmark, "team_to_team_benchmarking", "provider_rank")),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in benchmark_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Benchmark Intelligence",
+                    self.build_detail_table(benchmark_rows, value_color="#2DCE89", show_missing=False),
+                    accent_color="#2DCE89",
+                )
+            )
+
+        benchmark_targets = self.get_nested_value(benchmark, "improvement_target_modeling", "recommendations", default=[])
+        if benchmark_targets:
+            sections.append(
+                self.build_bullet_section(
+                    "Benchmark Targets",
+                    benchmark_targets[:5],
+                    color="#2DCE89",
+                    accent_color="#2DCE89",
+                )
+            )
+
         system_rows = [
             ("Pipeline State", self.get_nested_value(orchestration, "pipeline_health_state_machine", "state")),
             ("Coordination Score", self.get_nested_value(orchestration, "end_to_end_coordination_scoring", "score")),
@@ -615,6 +967,46 @@ class MainWindow(QMainWindow):
                 )
             )
 
+        validation_rows = [
+            ("Deep Verification Score", self.get_nested_value(validation, "deep_verification_score", "score")),
+            ("Verification Band", self.get_nested_value(validation, "deep_verification_score", "band")),
+            ("Verified Claims", self.get_nested_value(validation, "extraction_claim_verification", "verified_claims")),
+            ("Weak Claims", self.get_nested_value(validation, "extraction_claim_verification", "weak_claims")),
+            ("Date Logic", self.get_nested_value(validation, "date_logic_validation", "status")),
+            ("Procedure-Code Check", self.get_nested_value(validation, "procedure_code_consistency_checks", "status")),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in validation_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Reviewer Verification",
+                    self.build_detail_table(validation_rows, value_color="#56CCF2", show_missing=False),
+                    accent_color="#56CCF2",
+                )
+            )
+
+        traceback_items = []
+        for item in (self.get_nested_value(validation, "evidence_traceback_links", default=[]) or [])[:8]:
+            field_name = self.format_field(item.get("field"))
+            support_status = self.format_field(item.get("support_status") or "unknown")
+            document_type = self.format_field(item.get("document_type") or "unknown")
+            page_number = item.get("page_number") or "?"
+            provider = item.get("ocr_provider") or item.get("extraction_strategy") or "native_text"
+            value = self.format_detail_value(item.get("value"))
+            traceback_items.append(
+                f"{field_name}: {value} | {support_status} | {document_type} | page {page_number} | {provider}"
+            )
+
+        if traceback_items:
+            sections.append(
+                self.build_bullet_section(
+                    "Source Traceback",
+                    traceback_items,
+                    color="#56CCF2",
+                    accent_color="#56CCF2",
+                )
+            )
+
         return sections
 
     def build_export_summary(self, result):
@@ -624,6 +1016,12 @@ class MainWindow(QMainWindow):
         clinical = intel.get("clinical_intelligence", {}) or {}
         denial = intel.get("denial_intelligence", {}) or {}
         human_loop = intel.get("human_in_the_loop_intelligence", {}) or {}
+        memory = intel.get("memory_intelligence", {}) or {}
+        triage = intel.get("triage_intelligence", {}) or {}
+        operator = intel.get("operator_intelligence", {}) or {}
+        learning = intel.get("learning_intelligence", {}) or {}
+        insight = intel.get("insight_intelligence", {}) or {}
+        benchmark = intel.get("benchmark_intelligence", {}) or {}
         orchestration = intel.get("orchestration_intelligence", {}) or {}
         recovery = intel.get("recovery_intelligence", {}) or {}
         policy = intel.get("policy_intelligence", {}) or {}
@@ -640,6 +1038,33 @@ class MainWindow(QMainWindow):
             "denial_recovery_score": self.get_nested_value(denial, "failure_recovery_scoring", "score"),
             "trust_score": self.get_nested_value(human_loop, "trust_score_modeling", "trust_score"),
             "checkpoint_required": self.get_nested_value(human_loop, "approval_checkpoint_layer", "checkpoint_required"),
+            "prior_case_count": self.get_nested_value(memory, "persistent_case_memory", "prior_case_count"),
+            "memory_confidence": self.get_nested_value(memory, "memory_confidence_scoring", "score"),
+            "risk_drift": self.get_nested_value(memory, "longitudinal_risk_drift_tracking", "direction"),
+            "provider_quality_trend": self.get_nested_value(memory, "provider_relationship_memory", "quality_trend"),
+            "triage_priority": triage.get("priority_level"),
+            "triage_urgency": triage.get("urgency_classification"),
+            "triage_review_depth": triage.get("review_depth_allocation"),
+            "triage_staff_route": triage.get("staff_match_routing"),
+            "triage_time_to_action": triage.get("time_to_action_scoring"),
+            "operator_primary_route": self.get_nested_value(operator, "operator_workbench_layer", "primary_route"),
+            "operator_focus": self.get_nested_value(operator, "operator_workbench_layer", "next_operator_focus", default=[]),
+            "operator_efficiency": self.get_nested_value(operator, "reviewer_efficiency_scoring", "band"),
+            "latest_outcome": self.get_nested_value(learning, "outcome_feedback_ingestion", "latest_outcome"),
+            "outcome_count": self.get_nested_value(learning, "outcome_feedback_ingestion", "outcome_count"),
+            "calibration_status": self.get_nested_value(learning, "confidence_calibration_engine", "status"),
+            "calibration_delta": self.get_nested_value(learning, "confidence_calibration_engine", "delta"),
+            "override_status": self.get_nested_value(learning, "reviewer_override_learning", "status"),
+            "override_rate": self.get_nested_value(learning, "reviewer_override_learning", "override_rate"),
+            "learning_readiness": self.get_nested_value(learning, "continuous_intelligence_refinement", "readiness_band"),
+            "learning_readiness_score": self.get_nested_value(learning, "continuous_intelligence_refinement", "readiness_score"),
+            "insight_trend": self.get_nested_value(insight, "hidden_trend_detection", "status"),
+            "insight_provider_rank": self.get_nested_value(insight, "provider_network_insight_engine", "provider_rank"),
+            "insight_top_action": self.get_nested_value(insight, "insight_action_recommendation", default=[]),
+            "benchmark_standing": self.get_nested_value(benchmark, "internal_benchmark_engine", "standing"),
+            "benchmark_percentile": self.get_nested_value(benchmark, "quality_benchmark_calibration", "score_percentile"),
+            "benchmark_target_score": self.get_nested_value(benchmark, "improvement_target_modeling", "target_score"),
+            "benchmark_confidence_band": self.get_nested_value(benchmark, "benchmark_confidence_scoring", "band"),
             "coordination_score": self.get_nested_value(orchestration, "end_to_end_coordination_scoring", "score"),
             "reliability_score": self.get_nested_value(recovery, "reliability_scoring", "score"),
             "policy_confidence": self.get_nested_value(policy, "policy_compliance_confidence", "band"),
@@ -669,6 +1094,7 @@ class MainWindow(QMainWindow):
         _, result = self.current_selected_result()
         diagnostics = ((result or {}).get("intel", {}) or {}).get("scan_diagnostics", {})
         self.btn_scan_diagnostics.setEnabled(bool(diagnostics))
+        self.btn_record_outcome.setEnabled(bool(result))
 
     def build_scan_diagnostics_html(self, file_path, result):
 
@@ -692,12 +1118,26 @@ class MainWindow(QMainWindow):
                 self.build_detail_table(
                     [
                         ("Packet", os.path.basename(file_path)),
-                        ("OCR Provider", summary.get("ocr_provider")),
+                        ("Extraction Mode", self.format_scan_mode(summary.get("extraction_mode"))),
+                        ("OCR Attempted", "Yes" if summary.get("ocr_attempted") else "No"),
+                        ("OCR Provider", summary.get("ocr_provider") or "Not used"),
+                        ("Provider Chain", ", ".join(summary.get("ocr_provider_chain", []) or []) or "Not used"),
+                        ("Available OCR Providers", ", ".join(summary.get("available_ocr_providers", []) or []) or "None"),
+                        ("Available PDF Tools", ", ".join(summary.get("available_pdf_tools", []) or []) or "None"),
+                        ("Fallback Applied", "Yes" if summary.get("fallback_applied") else "No"),
                         ("Pages", summary.get("page_count")),
-                        ("Pages With OCR", summary.get("pages_with_ocr")),
+                        ("Pages With Native Text", summary.get("pages_with_native_text")),
+                        ("Pages With OCR Text", summary.get("pages_with_ocr")),
+                        ("Pages With OCR Field Zones", summary.get("pages_with_ocr_field_zones")),
+                        ("Pages With Native Field Zones", summary.get("pages_with_native_field_zones")),
                         ("Pages With Field Zones", summary.get("pages_with_field_zones")),
                         ("Pages With Split Segments", summary.get("pages_with_split_segments")),
-                        ("Average OCR Confidence", summary.get("average_ocr_confidence")),
+                        (
+                            "Average OCR Confidence",
+                            summary.get("average_ocr_confidence")
+                            if summary.get("ocr_attempted")
+                            else "Not used",
+                        ),
                         ("Scan Quality", summary.get("scan_quality_band")),
                         ("Scan Quality Score", summary.get("scan_quality_score")),
                         ("Handwriting Risk", summary.get("handwriting_risk_level")),
@@ -737,10 +1177,15 @@ class MainWindow(QMainWindow):
                     "<tr>"
                     f"<td style=\"color:#FFFFFF; padding:4px 8px;\">{html.escape(str(page.get('page')))}</td>"
                     f"<td style=\"color:#DCE6F2; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('document_type')))}</td>"
-                    f"<td style=\"color:#57B6FF; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('ocr_confidence')))}</td>"
+                    f"<td style=\"color:#9B8CFF; padding:4px 8px;\">{html.escape(self.format_scan_mode(page.get('text_source')))}</td>"
+                    f"<td style=\"color:#57B6FF; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('ocr_provider') or 'Not used'))}</td>"
+                    f"<td style=\"color:#57B6FF; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('ocr_confidence') if page.get('ocr_confidence') is not None else 'Not used'))}</td>"
+                    f"<td style=\"color:#56CCF2; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('classification_confidence')))}</td>"
                     f"<td style=\"color:#DCE6F2; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('scan_quality')))}</td>"
                     f"<td style=\"color:#F2C94C; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('handwriting_risk')))}</td>"
                     f"<td style=\"color:#6FCF97; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('field_zone_count')))}</td>"
+                    f"<td style=\"color:#57B6FF; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('ocr_field_zone_count')))}</td>"
+                    f"<td style=\"color:#6FCF97; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('native_field_zone_count')))}</td>"
                     f"<td style=\"color:#DCE6F2; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('split_segment_count')))}</td>"
                     "</tr>"
                 )
@@ -750,10 +1195,15 @@ class MainWindow(QMainWindow):
                 "<tr>"
                 "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Page</td>"
                 "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Document</td>"
+                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Read Mode</td>"
+                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Provider</td>"
                 "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">OCR</td>"
+                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Classify</td>"
                 "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Scan Quality</td>"
                 "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Handwriting</td>"
                 "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Field Zones</td>"
+                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">OCR Zones</td>"
+                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Native Zones</td>"
                 "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Segments</td>"
                 "</tr>"
                 + "".join(page_rows) +
@@ -814,6 +1264,7 @@ class MainWindow(QMainWindow):
 
             view = QTextEdit()
             view.setReadOnly(True)
+            view.setFont(QFont("Segoe UI", 10))
 
             layout.addWidget(view)
             dialog.setLayout(layout)
@@ -825,6 +1276,52 @@ class MainWindow(QMainWindow):
         self.scan_diagnostics_dialog.show()
         self.scan_diagnostics_dialog.raise_()
         self.scan_diagnostics_dialog.activateWindow()
+
+    def open_record_outcome(self):
+
+        file_path, result = self.current_selected_result()
+
+        if not file_path or not result:
+            QMessageBox.information(self, "Record Outcome", "Select a packet result first.")
+            return
+
+        options = [
+            "Approved",
+            "Denied",
+            "Corrected",
+            "Resubmitted",
+            "Reviewer Override",
+            "Deferred",
+        ]
+
+        outcome, ok = QInputDialog.getItem(
+            self,
+            "Record Outcome",
+            "Select packet outcome:",
+            options,
+            0,
+            False,
+        )
+
+        if not ok or not outcome:
+            return
+
+        note, _ = QInputDialog.getMultiLineText(
+            self,
+            "Record Outcome",
+            "Optional note:",
+        )
+
+        updated_result = record_manual_outcome(file_path, result, outcome, note=note)
+        self.results[file_path] = updated_result
+        self.details.setHtml(self.build_packet_details_html(file_path, updated_result))
+        self.update_scan_diagnostics_button()
+
+        if self.scan_diagnostics_dialog and self.scan_diagnostics_dialog.isVisible():
+            self.refresh_scan_diagnostics_dialog()
+
+        self.log(f"Recorded outcome for {os.path.basename(file_path)}: {outcome}")
+        QMessageBox.information(self, "Record Outcome", f"Saved outcome: {outcome}")
 
     def build_packet_details_html(self, file, result):
 
@@ -1015,7 +1512,7 @@ class MainWindow(QMainWindow):
 
             self.table.setItem(row,2,status)
 
-            triage_packet(file,score)
+            triage_packet(file, score, result=result)
 
         if self.table.rowCount() > 0:
             self.table.selectRow(0)
@@ -1121,6 +1618,33 @@ class MainWindow(QMainWindow):
                 "Reliability Score",
                 "Policy Confidence",
                 "Deployment Confidence",
+                "Prior Case Count",
+                "Memory Confidence",
+                "Risk Drift",
+                "Provider Quality Trend",
+                "Triage Priority",
+                "Triage Urgency",
+                "Triage Review Depth",
+                "Triage Staff Route",
+                "Triage Time To Action",
+                "Operator Primary Route",
+                "Operator Focus",
+                "Operator Efficiency",
+                "Latest Outcome",
+                "Outcome Count",
+                "Calibration Status",
+                "Calibration Delta",
+                "Override Status",
+                "Override Rate",
+                "Learning Readiness",
+                "Learning Readiness Score",
+                "Insight Trend",
+                "Insight Provider Rank",
+                "Insight Top Action",
+                "Benchmark Standing",
+                "Benchmark Percentile",
+                "Benchmark Target Score",
+                "Benchmark Confidence",
             ])
 
             for file,result in self.results.items():
@@ -1162,6 +1686,33 @@ class MainWindow(QMainWindow):
                     self.stringify_export_value(intel_export.get("reliability_score")),
                     self.stringify_export_value(intel_export.get("policy_confidence")),
                     self.stringify_export_value(intel_export.get("deployment_confidence")),
+                    self.stringify_export_value(intel_export.get("prior_case_count")),
+                    self.stringify_export_value(intel_export.get("memory_confidence")),
+                    self.stringify_export_value(intel_export.get("risk_drift")),
+                    self.stringify_export_value(intel_export.get("provider_quality_trend")),
+                    self.stringify_export_value(intel_export.get("triage_priority")),
+                    self.stringify_export_value(intel_export.get("triage_urgency")),
+                    self.stringify_export_value(intel_export.get("triage_review_depth")),
+                    self.stringify_export_value(intel_export.get("triage_staff_route")),
+                    self.stringify_export_value(intel_export.get("triage_time_to_action")),
+                    self.stringify_export_value(intel_export.get("operator_primary_route")),
+                    self.stringify_export_value(intel_export.get("operator_focus")),
+                    self.stringify_export_value(intel_export.get("operator_efficiency")),
+                    self.stringify_export_value(intel_export.get("latest_outcome")),
+                    self.stringify_export_value(intel_export.get("outcome_count")),
+                    self.stringify_export_value(intel_export.get("calibration_status")),
+                    self.stringify_export_value(intel_export.get("calibration_delta")),
+                    self.stringify_export_value(intel_export.get("override_status")),
+                    self.stringify_export_value(intel_export.get("override_rate")),
+                    self.stringify_export_value(intel_export.get("learning_readiness")),
+                    self.stringify_export_value(intel_export.get("learning_readiness_score")),
+                    self.stringify_export_value(intel_export.get("insight_trend")),
+                    self.stringify_export_value(intel_export.get("insight_provider_rank")),
+                    self.stringify_export_value(intel_export.get("insight_top_action")),
+                    self.stringify_export_value(intel_export.get("benchmark_standing")),
+                    self.stringify_export_value(intel_export.get("benchmark_percentile")),
+                    self.stringify_export_value(intel_export.get("benchmark_target_score")),
+                    self.stringify_export_value(intel_export.get("benchmark_confidence_band")),
                 ])
 
         self.log("Report exported.")
@@ -1205,12 +1756,13 @@ class MainWindow(QMainWindow):
         # Create Admin Window
         dialog = QDialog(self)
         dialog.setWindowTitle("TrueCore Admin Panel")
-        dialog.resize(900,600)
+        dialog.resize(1180, 760)
 
         layout = QVBoxLayout()
 
         text = QTextEdit()
         text.setReadOnly(True)
+        text.setFont(QFont("Segoe UI", 10))
 
         layout.addWidget(text)
 
@@ -1223,10 +1775,10 @@ class MainWindow(QMainWindow):
         try:
 
             changelog_path = resource_path("CHANGELOG.txt")
-            activity_path = resource_path("logs/activity.log")
+            activity_path = LOG_FILE if os.path.exists(LOG_FILE) else LEGACY_LOG_FILE
 
             changelog = ""
-            activity = ""
+            activity_lines = []
 
             if os.path.exists(changelog_path):
                 with open(changelog_path,"r",encoding="utf-8") as f:
@@ -1234,35 +1786,137 @@ class MainWindow(QMainWindow):
 
             if os.path.exists(activity_path):
                 with open(activity_path,"r",encoding="utf-8") as f:
-                    activity_lines = f.readlines()
-                    activity = "".join(reversed(activity_lines[:200]))
+                    activity_lines = [line.rstrip() for line in f.readlines() if line.strip()]
 
-            text.append("TRUECORE SYSTEM OVERVIEW\n")
-            text.append("====================================\n")
+            totals = memory_totals()
+            recent_runs = get_recent_packet_runs(8)
+            recent_events = get_recent_packet_events(10)
+            recent_activity = [mask_phi(line) for line in activity_lines[-80:]]
 
-            text.append(f"Engine Version: {self.version}\n")
-
-            if self.build_timestamp:
-                text.append(f"Build Time: {self.build_timestamp}\n")
-
-            text.append("\nRecent Updates\n")
-            text.append("------------------------------------\n")
+            unmasked_dob_count = len(re.findall(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", "\n".join(recent_activity)))
+            unmasked_va_count = len(re.findall(r"\bVA\d{6,}\b", "\n".join(recent_activity), flags=re.IGNORECASE))
+            unmasked_email_count = len(re.findall(r"\b[\w.\-]+@[\w.\-]+\.\w+\b", "\n".join(recent_activity)))
+            unmasked_phone_count = len(re.findall(r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b", "\n".join(recent_activity)))
 
             blocks = changelog.split("VERSION:")
             blocks = [b.strip() for b in blocks if b.strip()]
             blocks.reverse()
-            blocks = blocks[:10]
+            blocks = blocks[:5]
 
-            for block in blocks:
-                text.append("VERSION: " + block + "\n")
+            updates_html = "".join(
+                f"<div style=\"color:#DCE6F2; margin:0 0 10px 0; white-space:pre-wrap;\">{html.escape(mask_phi('VERSION: ' + block[:800]))}</div>"
+                for block in blocks
+            ) or "<div style=\"color:#9CA3AF;\">No changelog entries found.</div>"
 
-            text.append("\nActivity Log\n")
-            text.append("------------------------------------\n")
-            text.append(activity)
+            run_rows = [
+                [
+                    self.format_admin_value(run.get("file_name"), missing="Unknown"),
+                    self.format_admin_value(run.get("patient_name"), missing="Unknown"),
+                    run.get("score"),
+                    self.format_field(run.get("status") or "unknown"),
+                    self.format_field(run.get("denial_risk") or "unknown"),
+                    run.get("triage_priority") or "-",
+                    self.format_field(run.get("scan_quality_band") or "unknown"),
+                    self.format_admin_value(run.get("provider_name"), missing="Unknown"),
+                ]
+                for run in recent_runs
+            ]
+
+            event_rows = [
+                [
+                    event.get("created_at"),
+                    self.format_field(event.get("event_type") or "unknown"),
+                    self.format_field(event.get("event_status") or "unknown"),
+                    self.format_admin_value(event.get("file_name"), missing="Unknown"),
+                    self.format_admin_value(event.get("note"), missing="-"),
+                ]
+                for event in recent_events
+            ]
+
+            activity_html = (
+                "<div style=\"color:#9CA3AF; white-space:pre-wrap;\">"
+                + "<br>".join(html.escape(line) for line in recent_activity)
+                + "</div>"
+            ) if recent_activity else "<div style=\"color:#9CA3AF;\">No activity log entries found.</div>"
+
+            sections = [
+                self.build_detail_card(
+                    "System Summary",
+                    self.build_detail_table(
+                        [
+                            ("Engine Version", self.version),
+                            ("Build Time", self.build_timestamp or "Unknown"),
+                            ("PHI Masking", "Active"),
+                            ("Activity Log Path", activity_path if os.path.exists(activity_path) else "Missing"),
+                            ("Legacy Log Mirror", LEGACY_LOG_FILE if os.path.exists(LEGACY_LOG_FILE) else "Missing"),
+                            ("Packets Remembered", totals.get("packet_count", 0)),
+                            ("Cases Remembered", totals.get("case_count", 0)),
+                            ("Providers Remembered", totals.get("provider_count", 0)),
+                            ("Recent Activity Entries", len(recent_activity)),
+                        ],
+                        value_color="#57B6FF",
+                    ),
+                    accent_color="#57B6FF",
+                    margin_top=0,
+                ),
+                self.build_detail_card(
+                    "PHI Masking Audit",
+                    self.build_detail_table(
+                        [
+                            ("Raw DOB Tokens In Recent Log", unmasked_dob_count),
+                            ("Raw VA Tokens In Recent Log", unmasked_va_count),
+                            ("Raw Email Tokens In Recent Log", unmasked_email_count),
+                            ("Raw Phone Tokens In Recent Log", unmasked_phone_count),
+                        ],
+                        value_color="#6FCF97" if not any([unmasked_dob_count, unmasked_va_count, unmasked_email_count, unmasked_phone_count]) else "#EB5757",
+                    ),
+                    accent_color="#27AE60" if not any([unmasked_dob_count, unmasked_va_count, unmasked_email_count, unmasked_phone_count]) else "#EB5757",
+                ),
+                self.build_detail_card(
+                    "Recent Packet Runs",
+                    self.build_html_grid_table(
+                        ["File", "Patient", "Score", "Status", "Risk", "Priority", "Scan", "Provider"],
+                        run_rows,
+                        column_colors=["#DCE6F2", "#57B6FF", "#F2C94C", "#DCE6F2", "#EB5757", "#6FCF97", "#DCE6F2", "#57B6FF"],
+                    ),
+                    accent_color="#57B6FF",
+                ),
+                self.build_detail_card(
+                    "Recent Events",
+                    self.build_html_grid_table(
+                        ["Timestamp", "Event", "Status", "File", "Note"],
+                        event_rows,
+                        column_colors=["#9CA3AF", "#57B6FF", "#F2C94C", "#DCE6F2", "#DCE6F2"],
+                    ),
+                    accent_color="#F2C94C",
+                ),
+                self.build_detail_card(
+                    "Recent Updates",
+                    updates_html,
+                    accent_color="#57B6FF",
+                ),
+                self.build_detail_card(
+                    "Masked Activity Log",
+                    activity_html,
+                    accent_color="#9B8CFF",
+                ),
+            ]
+
+            text.setHtml(
+                "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+                "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+                + "".join(section for section in sections if section)
+                + "</body></html>"
+            )
 
         except Exception as e:
 
-            text.append(f"Admin panel error:\n{str(e)}")
+            text.setHtml(
+                "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+                "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+                f"{self.build_detail_card('Admin Panel Error', '<div style=\"color:#EB5757;\">' + html.escape(str(e)) + '</div>', accent_color='#EB5757', margin_top=0)}"
+                "</body></html>"
+            )
 
         dialog.exec()
 

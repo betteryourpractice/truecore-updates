@@ -20,6 +20,10 @@ INTEL_HEADERS = [
     "Clinical Coherence",
     "Trust Score",
     "Policy Confidence",
+    "Operator Route",
+    "Learning Readiness",
+    "Insight Trend",
+    "Benchmark Standing",
 ]
 
 
@@ -148,6 +152,10 @@ def export_patient(fields, packet_path, intel_summary=None):
             intel_summary.get("clinical_coherence"),
             intel_summary.get("trust_score"),
             intel_summary.get("policy_confidence"),
+            intel_summary.get("operator_primary_route"),
+            intel_summary.get("learning_readiness"),
+            intel_summary.get("insight_trend"),
+            intel_summary.get("benchmark_standing"),
         ]
 
         for offset, value in enumerate(intel_values, start=13):

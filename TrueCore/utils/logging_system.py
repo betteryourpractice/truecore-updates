@@ -5,14 +5,16 @@ from TrueCore.utils.runtime_info import resource_path
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_FOLDER = os.path.join(BASE_DIR, "logs")
+LEGACY_LOG_FOLDER = os.path.join(BASE_DIR, "logs")
+LEGACY_LOG_FILE = os.path.join(LEGACY_LOG_FOLDER, "activity.log")
+LOG_FOLDER = resource_path("logs")
 LOG_FILE = os.path.join(LOG_FOLDER, "activity.log")
 
 
 def ensure_log_folder():
 
-    if not os.path.exists(LOG_FOLDER):
-        os.makedirs(LOG_FOLDER)
+    os.makedirs(LOG_FOLDER, exist_ok=True)
+    os.makedirs(LEGACY_LOG_FOLDER, exist_ok=True)
 
 
 # -------------------------------------------------
@@ -32,6 +34,11 @@ def mask_phi(text):
 
     # Mask authorization numbers (keep last 2 characters)
     text = re.sub(r"(auth[:\s]*[A-Za-z0-9\-]+)", lambda m: m.group(0)[:-2] + "**", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bVA\d{6,}\b", lambda m: m.group(0)[:2] + "*" * max(0, len(m.group(0)) - 4) + m.group(0)[-2:], text, flags=re.IGNORECASE)
+    text = re.sub(r"\b\d{9,}V\d{3,}\b", lambda m: m.group(0)[:2] + "*" * max(0, len(m.group(0)) - 4) + m.group(0)[-2:], text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:claim number|referral number|member id|reference number|tracking number)\s*[:#-]?\s*([A-Za-z0-9\-]{5,})\b", lambda m: m.group(0).replace(m.group(1), m.group(1)[:2] + "*" * max(0, len(m.group(1)) - 4) + m.group(1)[-2:]), text, flags=re.IGNORECASE)
+    text = re.sub(r"\b[\w.\-]+@[\w.\-]+\.\w+\b", "[EMAIL_REDACTED]", text)
+    text = re.sub(r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b", "[PHONE_REDACTED]", text)
 
     # Convert full names to initials (John Smith -> JS)
     def initials(match):
@@ -55,5 +62,6 @@ def log_event(action, details=""):
 
     entry = f"{timestamp} | ACTION: {action} | DETAILS: {details}\n"
 
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(entry)
+    for path in {LOG_FILE, LEGACY_LOG_FILE}:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(entry)

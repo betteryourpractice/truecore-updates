@@ -9,6 +9,7 @@ import subprocess
 import compileall
 import sys
 import time
+import tempfile
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 REPO_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, ".."))
@@ -375,6 +376,79 @@ def test_intel_scan_benchmark():
 
 
 # -------------------------------------------------
+# HOST INTELLIGENCE SMOKE TEST
+# -------------------------------------------------
+
+def test_host_intelligence():
+
+    print("Testing host intelligence wiring...")
+
+    try:
+
+        from TrueCore.core.packet_processor import process_packet
+
+        sample_text = "\n".join([
+            "Clinical Notes",
+            "Patient Name: Jacob Talbott",
+            "DOB: 04/03/1992",
+            "Authorization Number: VA0051513368",
+            "Ordering Provider: William Durrett",
+            "Referring Provider: Amy Allen",
+            "Diagnosis: low back pain",
+            "Reason for Request: MRI lumbar spine",
+            "ICD-10: M54.16, M54.50",
+            "Signed by: William Durrett",
+        ])
+
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as handle:
+            handle.write(sample_text)
+            temp_path = handle.name
+
+        try:
+            result = process_packet(temp_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+        intel = dict(result.get("intel", {}) or {})
+
+        if not intel.get("memory_intelligence"):
+            print("ERROR: memory_intelligence missing from host result.")
+            return False
+
+        if not intel.get("triage_intelligence"):
+            print("ERROR: triage_intelligence missing from host result.")
+            return False
+
+        if not intel.get("operator_intelligence"):
+            print("ERROR: operator_intelligence missing from host result.")
+            return False
+
+        if not intel.get("learning_intelligence"):
+            print("ERROR: learning_intelligence missing from host result.")
+            return False
+
+        if not intel.get("insight_intelligence"):
+            print("ERROR: insight_intelligence missing from host result.")
+            return False
+
+        if not intel.get("benchmark_intelligence"):
+            print("ERROR: benchmark_intelligence missing from host result.")
+            return False
+
+        if not intel.get("host_display"):
+            print("ERROR: host_display missing from host result.")
+            return False
+
+        return True
+
+    except Exception as e:
+
+        print("ERROR: Host intelligence smoke test failed:", e)
+        return False
+
+
+# -------------------------------------------------
 # GUI STARTUP TEST
 # -------------------------------------------------
 
@@ -421,6 +495,7 @@ def run_validation():
         test_intel_import,
         test_intel_capabilities,
         test_intel_scan_benchmark,
+        test_host_intelligence,
         test_gui_startup
     ]
 

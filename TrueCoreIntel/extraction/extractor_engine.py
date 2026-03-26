@@ -447,6 +447,10 @@ class ExtractorEngine:
         if auth_number:
             data["authorization_number"] = auth_number
 
+        facility = self.infer_facility(text)
+        if facility:
+            data.setdefault("facility", facility)
+
         return data
 
     def extract_clinical(self, page, page_metadata=None, field_context=None):
@@ -513,6 +517,8 @@ class ExtractorEngine:
                 self.FIELD_PATTERNS["facility"],
                 "facility",
             )
+        if not facility:
+            facility = self.infer_facility(text)
         if facility:
             data["facility"] = facility
 
@@ -549,6 +555,8 @@ class ExtractorEngine:
                 self.FIELD_PATTERNS["facility"],
                 "facility",
             )
+        if not facility:
+            facility = self.infer_facility(text)
         if facility:
             data["facility"] = facility
 
@@ -682,6 +690,9 @@ class ExtractorEngine:
             return None
 
         hints = [hint.lower() for hint in self.get_field_zone_hints(field_name)]
+        if not hints:
+            return None
+
         candidates = []
         for zone in field_zones:
             label = str(zone.get("normalized_label") or zone.get("label") or "").lower()
@@ -759,6 +770,16 @@ class ExtractorEngine:
                 data["provider"] = data["ordering_provider"]
             elif "referring_provider" in data:
                 data["provider"] = data["referring_provider"]
+
+        if "va_icn" not in data:
+            inferred_va_icn = self.infer_va_icn(text)
+            if inferred_va_icn:
+                data["va_icn"] = inferred_va_icn
+
+        if "clinic_name" not in data:
+            inferred_clinic_name = self.infer_clinic_name(text)
+            if inferred_clinic_name:
+                data["clinic_name"] = inferred_clinic_name
 
         return data
 
@@ -932,6 +953,9 @@ class ExtractorEngine:
         if field_name == "medications":
             return self.normalize_medications(value)
 
+        if field_name == "procedure":
+            return self.normalize_procedure(value)
+
         return value or None
 
     def format_title_text(self, value):
@@ -1060,6 +1084,12 @@ class ExtractorEngine:
         )
         value = self.cut_at_stop_label(value)
         value = re.split(
+            r"\b(?:today'?s(?:\s+date)?|date\s*\(mm/dd(?:/yyyy)?\)|mm/dd(?:/yyyy)?)\b",
+            value,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        value = re.split(
             r"\b(?:(?:p|d)ate\s+of\s+submission|primary diagnosis code|office staff|submitting office|reviewed|patient name|veteran name|phone|fax|npi|address|facility|date|dob|reason(?:\s+for\s+(?:request|referral))?|chief complaint|requested service|requested procedure|diagnosis|assessment|impression)\b",
             value,
             maxsplit=1,
@@ -1079,6 +1109,22 @@ class ExtractorEngine:
 
         lowered = value.lower()
         if re.match(r"^(?:is|was|are|new|the|for|patient|evaluation|treatment)\b", lowered):
+            return None
+        invalid_phrases = (
+            "secure email",
+            "email address",
+            "provider signa",
+            "provider signature",
+            "signature",
+            "office staff",
+            "fax number",
+            "phone number",
+            "today's",
+            "todays",
+        )
+        if any(phrase in lowered for phrase in invalid_phrases):
+            return None
+        if re.match(r"^(?:another|secure|email|signature)\b", lowered):
             return None
         narrative_keywords = {
             "evaluation",
@@ -1158,10 +1204,15 @@ class ExtractorEngine:
             for token in alpha_tokens
             if token not in narrative_keywords and token not in organizational_tokens and token not in connector_tokens
         ]
+        long_name_tokens = [token for token in clean_name_tokens if len(token) >= 2]
         if len(tokens) == 1:
             if len(clean_name_tokens) != 1:
                 return None
         elif len(clean_name_tokens) < 2:
+            return None
+        if len(long_name_tokens) < 2:
+            return None
+        if len(tokens) <= 2 and any(len(token) == 1 for token in clean_name_tokens):
             return None
 
         if len(value) > 60:
@@ -1223,6 +1274,7 @@ class ExtractorEngine:
             return None
 
         digit_count = sum(ch.isdigit() for ch in compact)
+        alpha_count = sum(ch.isalpha() for ch in value)
 
         if not value.startswith("VA") and re.fullmatch(r"[A-Z]{2}-\d{5}(?:-\d{4})?(?:-[A-Z]{1,12}){0,4}", value):
             return None
@@ -1237,6 +1289,12 @@ class ExtractorEngine:
         ):
             return None
 
+        if not value.startswith("VA") and re.fullmatch(r"\d{3}-\d{3}-\d{4,7}[A-Z]{0,2}", value):
+            return None
+
+        if not value.startswith("VA") and digit_count >= 10 and value.count("-") >= 2 and alpha_count <= 1:
+            return None
+
         if compact.isdigit():
             if len(compact) < 9 or len(compact) > 18:
                 return None
@@ -1247,8 +1305,6 @@ class ExtractorEngine:
 
         if digit_count < 4:
             return None
-
-        alpha_count = sum(ch.isalpha() for ch in value)
 
         if not value.startswith("VA") and alpha_count > 4:
             return None
@@ -1326,6 +1382,48 @@ class ExtractorEngine:
             return None
 
         return self.format_title_text(value)
+
+    def infer_clinic_name(self, text):
+        compact = re.sub(r"[\r\n\t]+", " ", str(text or ""))
+        compact = re.sub(r"\s+", " ", compact).strip()
+        if not compact:
+            return None
+
+        patterns = [
+            r"\b([A-Z][A-Z&,\-\. ]{8,}(?:LLC|L\.L\.C\.|PC|P\.C\.|INC|CORP|CLINIC|MANAGEMENT))\b",
+            r"\b([A-Z][A-Z&,\-\. ]{8,}(?:NEUROSCIENCES|PAIN MANAGEMENT|MEDICAL GROUP|MEDICAL CENTER|CLINIC))\b",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, compact)
+            if not match:
+                continue
+            candidate = self.normalize_clinic_name(match.group(1))
+            if candidate:
+                return candidate
+
+        return None
+
+    def infer_va_icn(self, text):
+        compact = re.sub(r"[\r\n\t]+", " ", str(text or ""))
+        compact = re.sub(r"\s+", " ", compact).strip()
+        lower_text = compact.lower()
+
+        if not lower_text:
+            return None
+
+        if "va community care" not in lower_text and "optum - va community care" not in lower_text:
+            return None
+
+        insurance_match = re.search(
+            r"insurance\s*(?:number|no\.?|#)\s*[:\-]?\s*([A-Z0-9]{8,24})\b",
+            compact,
+            re.IGNORECASE,
+        )
+        if not insurance_match:
+            return None
+
+        return self.normalize_identifier(insurance_match.group(1), min_length=8)
 
     def normalize_location(self, value):
         value = self.cut_at_stop_label(value)
@@ -1445,8 +1543,17 @@ class ExtractorEngine:
             "LASTFOUR",
             "LASTFOURSS",
             "LASTFOURSSN",
+            "REFERRING",
+            "PROVIDER",
+            "UNKNOWN",
+            "NONE",
+            "NA",
+            "NAN",
         }
         if cleaned in invalid_cleaned_values:
+            return None
+
+        if not re.search(r"\d", cleaned):
             return None
 
         date_like_patterns = [
@@ -1497,6 +1604,37 @@ class ExtractorEngine:
 
         return unique or None
 
+    def normalize_procedure(self, value):
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            return None
+
+        lowered = re.sub(r"\s+", " ", cleaned).lower()
+
+        if re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\)?", lowered):
+            return None
+
+        if any(marker in lowered for marker in [
+            "extremities",
+            "capillary",
+            "opioid use",
+            "pain management",
+            "provider signa",
+            "signature",
+        ]):
+            return None
+
+        if re.search(r"\bmri\b|\bmagnetic resonance imaging\b", lowered):
+            return "MRI"
+        if re.search(r"\bcat scan\b|\bcomputed tomography\b", lowered):
+            return "CT"
+        if re.search(r"\bx[- ]?ray\b|\bradiograph\b", lowered):
+            return "XRAY"
+        if re.search(r"\bphysical therapy\b|\bpt evaluation\b", lowered):
+            return "PHYSICAL_THERAPY"
+
+        return None
+
     def normalize_diagnosis(self, value):
         value = self.cut_at_stop_label(value)
         value = re.sub(r"\s+", " ", value).strip(" ,.-")
@@ -1521,6 +1659,9 @@ class ExtractorEngine:
             return None
 
         if len(lowered) > 90:
+            return None
+
+        if "primary:" in lowered and "secondary" in lowered:
             return None
 
         procedural_noise_markers = [
@@ -1649,6 +1790,28 @@ class ExtractorEngine:
 
         return None
 
+    def infer_facility(self, text):
+        compact = re.sub(r"[\r\n\t]+", " ", str(text or ""))
+        compact = re.sub(r"\s+", " ", compact).strip()
+        lower_text = compact.lower()
+
+        if not lower_text:
+            return None
+
+        if re.search(r"charlie\s+n[0o]r[vw][o0]{2}d", lower_text):
+            return "Charlie Norwood VA Medical Center"
+
+        if "va medical center" in lower_text and "augusta" in lower_text:
+            return "Charlie Norwood VA Medical Center"
+
+        match = re.search(r"(va medical center[^\n\r]{0,80})", compact, re.IGNORECASE)
+        if match:
+            candidate = self.normalize_facility(match.group(1))
+            if candidate:
+                return candidate
+
+        return None
+
     def infer_symptom(self, text):
         lower_text = text.lower()
 
@@ -1662,20 +1825,31 @@ class ExtractorEngine:
         return None
 
     def infer_procedure(self, text):
-        lower_text = text.lower()
+        request_windows = [
+            r"(?:requested procedure|requested service|authorization is requested for|authorization requested for|plan includes|candidate for|procedure(?:s)? performed)\s*[:\-]?\s*([^\n\r]{0,120})",
+            r"([^\n\r]{0,120})\s*(?:requested procedure|requested service|authorization is requested for)",
+        ]
 
-        # MRI is common and reliable
-        if re.search(r"\bmri\b|\bmagnetic resonance imaging\b", lower_text):
+        candidates = []
+        for pattern in request_windows:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                candidates.append(match.group(1))
+
+        if not candidates:
+            return None
+
+        combined = " ".join(candidates).lower()
+
+        if re.search(r"\bmri\b|\bmagnetic resonance imaging\b", combined):
             return "MRI"
 
-        # CT should only trigger with strong context, not naked 'ct'
-        if re.search(r"\bcat scan\b|\bcomputed tomography\b", lower_text):
+        if re.search(r"\bcat scan\b|\bcomputed tomography\b", combined):
             return "CT"
 
-        if re.search(r"\bx[- ]?ray\b|\bradiograph\b", lower_text):
+        if re.search(r"\bx[- ]?ray\b|\bradiograph\b", combined):
             return "XRAY"
 
-        if re.search(r"\bphysical therapy\b|\bpt evaluation\b", lower_text):
+        if re.search(r"\bphysical therapy\b|\bpt evaluation\b", combined):
             return "PHYSICAL_THERAPY"
 
         return None

@@ -1,7 +1,6 @@
-print("Engine GUI starting...")
-
 import sys
 from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QFont
 
 from TrueCore.utils.runtime_info import resource_path
 from TrueCore.ui.pyside_gui.main_window import MainWindow
@@ -10,6 +9,7 @@ from TrueCore.ui.pyside_gui.main_window import MainWindow
 def launch_gui():
 
     app = QApplication(sys.argv)
+    app.setFont(QFont("Segoe UI", 10))
 
     # -------------------------------------------------
     # LOAD TRUESUITE THEME

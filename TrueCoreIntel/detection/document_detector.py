@@ -159,6 +159,8 @@ class DocumentDetector:
             packet.page_confidence[idx] = confidence
 
             if doc_type != "unknown":
+                if self.is_unfilled_document(doc_type, str(page)):
+                    packet.unfilled_documents.add(doc_type)
                 packet.detected_documents.add(doc_type)
 
         self.supplement_detected_documents(packet)
@@ -471,6 +473,8 @@ class DocumentDetector:
                     if self.should_skip_document(hinted_doc, str(page)):
                         packet.unfilled_documents.add(hinted_doc)
                     else:
+                        if self.is_unfilled_document(hinted_doc, str(page)):
+                            packet.unfilled_documents.add(hinted_doc)
                         packet.detected_documents.add(hinted_doc)
 
                         if self.should_apply_header_hint(current_doc_type, hinted_doc):
@@ -618,6 +622,64 @@ class DocumentDetector:
 
         return False
 
+    def is_unfilled_document(self, doc_type, page_text):
+        if doc_type == "consult_request":
+            return self.looks_like_unfilled_consult_request(page_text)
+
+        if doc_type == "clinical_notes":
+            return self.looks_like_unfilled_clinical_notes(page_text)
+
+        return False
+
+    def looks_like_unfilled_consult_request(self, page_text):
+        text = " ".join(str(page_text or "").replace("\r", "\n").split())
+        lower_text = text.lower()
+
+        if "consultation and treatment request" not in lower_text:
+            return False
+
+        blank_sequence_patterns = [
+            r"veteran name:\s*dob:\s*last four ssn:\s*va claim number:\s*referring va provider:",
+            r"veteran name:\s*dob:\s*last four ssn:",
+            r"va claim number:\s*referring va provider:",
+        ]
+        has_blank_shell = any(re.search(pattern, lower_text) for pattern in blank_sequence_patterns)
+
+        has_patient_fill = bool(
+            re.search(
+                r"veteran name:\s*(?!dob:|last four ssn:|va claim number:|referring va provider:)([A-Za-z][A-Za-z'\-]+(?:\s+[A-Za-z][A-Za-z'\-]+){1,3})",
+                text,
+                re.IGNORECASE,
+            )
+        )
+        has_dob_fill = bool(re.search(r"\bdob:\s*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", text, re.IGNORECASE))
+        has_ref_provider_fill = bool(
+            re.search(
+                r"referring va provider:\s*(?!evaluation\b|diagnoses\b|authorization\b)([A-Za-z][^\n\r]{3,})",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
+        return has_blank_shell and not (has_patient_fill and has_dob_fill and has_ref_provider_fill)
+
+    def looks_like_unfilled_clinical_notes(self, page_text):
+        text = " ".join(str(page_text or "").replace("\r", "\n").split())
+        lower_text = text.lower()
+
+        if "clinical documentation template" not in lower_text:
+            return False
+
+        blank_markers = [
+            r"pain severity\s*\(0.?10\)\s*:\s*iii\.",
+            r"describe specific functional impact:\s*m conservative therapy history",
+            r"mri date:\s*findings:\s*affected levels:",
+            r"diagnosis:\s*primary:\s*secondary",
+        ]
+        blank_hits = sum(1 for pattern in blank_markers if re.search(pattern, lower_text))
+
+        return blank_hits >= 1
+
     def detect_duplicate_pages(self, packet):
         fingerprints = {}
         candidate_pages = {}
@@ -646,6 +708,14 @@ class DocumentDetector:
 
             doc_types = [packet.document_types.get(index, "unknown") for index in indices]
             if all(doc_type == "unknown" for doc_type in doc_types):
+                continue
+
+            # Ignore exact-duplicate clusters that are only short header stubs.
+            normalized_lengths = [
+                len(candidate_pages.get(index, {}).get("normalized", ""))
+                for index in indices
+            ]
+            if normalized_lengths and max(normalized_lengths) < 220:
                 continue
 
             duplicates.append({
@@ -711,6 +781,11 @@ class DocumentDetector:
                 if left_doc != right_doc:
                     continue
                 if left_doc == "unknown":
+                    continue
+                if max(
+                    len(left.get("normalized", "")),
+                    len(right.get("normalized", "")),
+                ) < 220:
                     continue
 
                 right_text = right["comparison_text"]

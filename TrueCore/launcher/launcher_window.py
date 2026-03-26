@@ -347,11 +347,15 @@ class LauncherWindow(QWidget):
 
         try:
             log(f"Launching TrueCore engine: {engine}")
+            popen_kwargs = {}
+
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
             if isinstance(engine, list):
-                subprocess.Popen(engine)
+                subprocess.Popen(engine, **popen_kwargs)
             else:
-                subprocess.Popen([engine])
+                subprocess.Popen([engine], **popen_kwargs)
 
             self.close()
 

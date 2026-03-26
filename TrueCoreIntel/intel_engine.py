@@ -6,6 +6,7 @@ from typing import Iterable
 
 from TrueCoreIntel.core.pipeline import TrueCorePipeline
 from TrueCoreIntel.data.packet_model import Packet
+from TrueCoreIntel.intake.ocr_runtime import available_ocr_providers, available_pdf_tools
 from TrueCoreIntel.intake.pdf_ingestion import (
     extract_document_pages,
     extract_document_pages_with_fallback,
@@ -32,18 +33,96 @@ def build_packet_label(packet: Packet) -> str:
 
 def should_retry_with_ocr(packet: Packet, result: Packet) -> list[str]:
     reasons: list[str] = []
+    page_metadata = list(getattr(packet, "page_metadata", []) or [])
+    page_count = len(packet.pages)
+    native_text_pages = sum(1 for metadata in page_metadata if str(metadata.get("native_text") or "").strip())
+    field_zone_pages = sum(1 for metadata in page_metadata if metadata.get("field_zones"))
+    native_text_ratio = (native_text_pages / max(page_count, 1)) if page_count else 0.0
+    field_zone_ratio = (field_zone_pages / max(page_count, 1)) if page_count else 0.0
+    strong_native_coverage = native_text_ratio >= 0.85 and field_zone_ratio >= 0.5
+    sparse_pages = sum(1 for page in packet.pages if is_sparse_page_text(page))
+    front_window = packet.pages[: min(page_count, 16)]
+    front_sparse_pages = sum(1 for page in front_window if is_sparse_page_text(page))
+    sparse_ratio = (sparse_pages / max(page_count, 1)) if page_count else 0.0
 
-    if "authorization_number" not in result.fields:
+    if "authorization_number" not in result.fields and (
+        not strong_native_coverage
+        or front_sparse_pages >= 4
+        or sparse_ratio >= 0.25
+    ):
         reasons.append("authorization_number missing after primary extraction")
 
-    if len(packet.pages) >= 8 and len(result.detected_documents) <= 2:
+    if len(packet.pages) >= 8 and len(result.detected_documents) <= 2 and (
+        not strong_native_coverage
+        or front_sparse_pages >= 4
+        or sparse_ratio >= 0.25
+    ):
         reasons.append("document detection is sparse for packet size")
 
-    sparse_pages = sum(1 for page in packet.pages if is_sparse_page_text(page))
-    if len(packet.pages) >= 3 and sparse_pages >= max(2, int(len(packet.pages) * 0.35)):
+    if len(packet.pages) >= 3 and (
+        sparse_pages >= max(2, int(len(packet.pages) * 0.35)) and native_text_ratio < 0.7
+        or front_sparse_pages >= 4 and sparse_ratio >= 0.2
+    ):
         reasons.append("packet contains many sparse text pages")
 
     return reasons
+
+
+def build_intake_diagnostics(packet: Packet, fallback_applied: bool = False) -> dict:
+    page_metadata = list(getattr(packet, "page_metadata", []) or [])
+    providers = [
+        metadata.get("ocr_provider")
+        for metadata in page_metadata
+        if isinstance(metadata, dict) and metadata.get("ocr_provider")
+    ]
+    ocr_confidences = [
+        float(metadata.get("ocr_confidence") or 0.0)
+        for metadata in page_metadata
+        if isinstance(metadata, dict)
+        and metadata.get("ocr_provider")
+        and metadata.get("ocr_confidence") is not None
+    ]
+    pages_with_native_text = sum(1 for metadata in page_metadata if str(metadata.get("native_text") or "").strip())
+    pages_with_ocr_text = sum(1 for metadata in page_metadata if str(metadata.get("ocr_text") or "").strip())
+    pages_with_ocr_field_zones = sum(
+        1
+        for metadata in page_metadata
+        if any(str(zone.get("zone_name") or "").lower() != "native_text" for zone in (metadata.get("field_zones") or []))
+    )
+    pages_with_native_field_zones = sum(
+        1
+        for metadata in page_metadata
+        if any(str(zone.get("zone_name") or "").lower() == "native_text" for zone in (metadata.get("field_zones") or []))
+    )
+    pages_with_split_segments = sum(1 for metadata in page_metadata if len(metadata.get("ocr_segments", []) or []) > 1)
+    ocr_attempted = bool(pages_with_ocr_text or pages_with_ocr_field_zones or providers)
+
+    extraction_mode = "native_text"
+    if pages_with_ocr_text:
+        extraction_mode = "ocr_text"
+    elif pages_with_ocr_field_zones:
+        extraction_mode = "layout_ocr"
+
+    if fallback_applied and ocr_attempted:
+        extraction_mode = "fallback_ocr"
+
+    return {
+        "page_count": len(getattr(packet, "pages", []) or []),
+        "pages_with_native_text": pages_with_native_text,
+        "pages_with_ocr": pages_with_ocr_text,
+        "pages_with_ocr_field_zones": pages_with_ocr_field_zones,
+        "pages_with_native_field_zones": pages_with_native_field_zones,
+        "pages_with_field_zones": sum(1 for metadata in page_metadata if metadata.get("field_zones")),
+        "pages_with_split_segments": pages_with_split_segments,
+        "average_ocr_confidence": round(sum(ocr_confidences) / max(len(ocr_confidences), 1), 2) if ocr_confidences else None,
+        "ocr_attempted": ocr_attempted,
+        "ocr_provider": providers[0] if providers else None,
+        "ocr_provider_chain": providers,
+        "available_ocr_providers": available_ocr_providers(),
+        "available_pdf_tools": available_pdf_tools(),
+        "extraction_mode": extraction_mode,
+        "fallback_applied": fallback_applied,
+    }
 
 
 def build_structured_result(
@@ -113,12 +192,8 @@ class TrueCoreIntelEngine:
             packet.page_sources = list(page_sources)
         if page_metadata is not None:
             packet.page_metadata = list(page_metadata)
-            providers = [
-                metadata.get("ocr_provider")
-                for metadata in packet.page_metadata
-                if isinstance(metadata, dict) and metadata.get("ocr_provider")
-            ]
-            packet.ocr_provider = providers[0] if providers else None
+            packet.intake_diagnostics = build_intake_diagnostics(packet)
+            packet.ocr_provider = packet.intake_diagnostics.get("ocr_provider")
         return self.process_packet(packet)
 
     def process_path(self, path: str | Path, log_fn=None) -> dict:
@@ -132,24 +207,8 @@ class TrueCoreIntelEngine:
         packet.files = [str(source_path)]
         packet.pages, packet.page_metadata = extract_document_pages(source_path, log_fn=log_fn, return_metadata=True)
         packet.page_sources = [str(source_path)] * len(packet.pages)
-        providers = [
-            metadata.get("ocr_provider")
-            for metadata in packet.page_metadata
-            if isinstance(metadata, dict) and metadata.get("ocr_provider")
-        ]
-        ocr_confidences = [
-            float(metadata.get("ocr_confidence") or 0.0)
-            for metadata in packet.page_metadata
-            if isinstance(metadata, dict) and metadata.get("ocr_confidence") is not None
-        ]
-        packet.ocr_provider = providers[0] if providers else None
-        packet.intake_diagnostics = {
-            "page_count": len(packet.pages),
-            "pages_with_ocr": sum(1 for metadata in packet.page_metadata if metadata.get("ocr_text")),
-            "pages_with_field_zones": sum(1 for metadata in packet.page_metadata if metadata.get("field_zones")),
-            "pages_with_split_segments": sum(1 for metadata in packet.page_metadata if len(metadata.get("ocr_segments", []) or []) > 1),
-            "average_ocr_confidence": round(sum(ocr_confidences) / max(len(ocr_confidences), 1), 2) if ocr_confidences else 0.0,
-        }
+        packet.intake_diagnostics = build_intake_diagnostics(packet)
+        packet.ocr_provider = packet.intake_diagnostics.get("ocr_provider")
 
         if log_fn:
             log_fn(f"[DEBUG] Packet pages loaded: {len(packet.pages)}")
@@ -161,7 +220,13 @@ class TrueCoreIntelEngine:
         if retry_reasons:
             if log_fn:
                 log_fn(f"[DEBUG] Retrying with OCR fallback: {', '.join(retry_reasons)}")
-            fallback_pages, fallback_metadata = extract_document_pages_with_fallback(source_path, log_fn=log_fn, return_metadata=True)
+            fallback_pages, fallback_metadata = extract_document_pages_with_fallback(
+                source_path,
+                log_fn=log_fn,
+                return_metadata=True,
+                base_pages=packet.pages,
+                base_metadata=packet.page_metadata,
+            )
 
             if fallback_pages != packet.pages:
                 used_ocr_fallback = True
@@ -171,25 +236,8 @@ class TrueCoreIntelEngine:
                 packet.pages = fallback_pages
                 packet.page_metadata = list(fallback_metadata or [])
                 packet.page_sources = [str(source_path)] * len(packet.pages)
-                providers = [
-                    metadata.get("ocr_provider")
-                    for metadata in packet.page_metadata
-                    if isinstance(metadata, dict) and metadata.get("ocr_provider")
-                ]
-                ocr_confidences = [
-                    float(metadata.get("ocr_confidence") or 0.0)
-                    for metadata in packet.page_metadata
-                    if isinstance(metadata, dict) and metadata.get("ocr_confidence") is not None
-                ]
-                packet.ocr_provider = providers[0] if providers else None
-                packet.intake_diagnostics = {
-                    "page_count": len(packet.pages),
-                    "pages_with_ocr": sum(1 for metadata in packet.page_metadata if metadata.get("ocr_text")),
-                    "pages_with_field_zones": sum(1 for metadata in packet.page_metadata if metadata.get("field_zones")),
-                    "pages_with_split_segments": sum(1 for metadata in packet.page_metadata if len(metadata.get("ocr_segments", []) or []) > 1),
-                    "average_ocr_confidence": round(sum(ocr_confidences) / max(len(ocr_confidences), 1), 2) if ocr_confidences else 0.0,
-                    "fallback_applied": True,
-                }
+                packet.intake_diagnostics = build_intake_diagnostics(packet, fallback_applied=True)
+                packet.ocr_provider = packet.intake_diagnostics.get("ocr_provider")
                 if log_fn:
                     log_fn(f"[DEBUG] Packet pages reloaded with OCR fallback: {len(packet.pages)}")
                 result = self.process_packet(packet)

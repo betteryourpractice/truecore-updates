@@ -2,7 +2,18 @@ from __future__ import annotations
 
 import math
 import re
+import shutil
 from pathlib import Path
+
+try:
+    import cv2
+except Exception:  # pragma: no cover - optional dependency fallback
+    cv2 = None
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - optional dependency fallback
+    np = None
 
 try:
     import pypdfium2 as pdfium
@@ -24,6 +35,14 @@ except Exception:  # pragma: no cover - optional dependency fallback
     ImageFilter = None
     ImageOps = None
     ImageStat = None
+
+from TrueCoreIntel.intake.ocr_runtime import (
+    available_ocr_providers,
+    configure_tesseract,
+    get_doctr_predictor,
+    get_easyocr_reader,
+    get_rapidocr_engine,
+)
 
 
 FIELD_LABEL_PATTERNS = [
@@ -139,7 +158,285 @@ def emit(log_fn, message):
         log_fn(message)
 
 
-def render_pdf_pages_as_images(pdf_path, dpi=300, log_fn=None):
+if pytesseract is not None:
+    configure_tesseract(pytesseract)
+
+
+def layout_ocr_available():
+    return (
+        pdfium is not None
+        and Image is not None
+        and bool(available_ocr_providers())
+    )
+
+
+def ocr_confidence_percent(value):
+    try:
+        value = float(value)
+    except Exception:
+        return 0.0
+
+    if value <= 1.0:
+        value *= 100.0
+
+    return round(max(0.0, min(value, 100.0)), 2)
+
+
+def polygon_to_bbox(points):
+    xs = []
+    ys = []
+
+    for point in points or []:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            continue
+        try:
+            xs.append(int(round(float(point[0]))))
+            ys.append(int(round(float(point[1]))))
+        except Exception:
+            continue
+
+    if not xs or not ys:
+        return [0, 0, 0, 0]
+
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def provider_order(include_rescue=False):
+    providers = list(available_ocr_providers())
+    ordered = []
+
+    for name in ("tesseract_layout", "rapidocr"):
+        if name in providers:
+            ordered.append(name)
+
+    if include_rescue:
+        for name in ("doctr", "easyocr", "paddleocr"):
+            if name in providers:
+                ordered.append(name)
+
+    return ordered
+
+
+def run_provider_ocr(provider_name, image, zone_name="full_page"):
+    if provider_name == "rapidocr":
+        return run_rapidocr_ocr(image, zone_name=zone_name)
+    if provider_name == "tesseract_layout":
+        return run_tesseract_ocr(image, zone_name=zone_name)
+    if provider_name == "doctr":
+        return run_doctr_ocr(image, zone_name=zone_name)
+    if provider_name == "easyocr":
+        return run_easyocr_ocr(image, zone_name=zone_name)
+    return None
+
+
+def run_quality_score(ocr_run):
+    if not ocr_run:
+        return 0.0
+    confidence = float(ocr_run.get("confidence") or 0.0)
+    text_length = len(normalize_text(ocr_run.get("text", "")))
+    return confidence + min(text_length / 6.0, 24.0)
+
+
+def run_rapidocr_ocr(image, zone_name="full_page"):
+    engine = get_rapidocr_engine()
+    if engine is None or np is None:
+        return None
+
+    try:
+        image_array = np.array(image.convert("RGB"))
+        results, _elapsed = engine(image_array)
+    except Exception:
+        return None
+
+    if not results:
+        return None
+
+    lines = []
+    words = []
+
+    for item in results or []:
+        if not isinstance(item, (list, tuple)) or len(item) < 3:
+            continue
+
+        polygon, text, confidence = item[0], normalize_text(item[1]), item[2]
+        if not text:
+            continue
+
+        bbox = polygon_to_bbox(polygon)
+        line_confidence = ocr_confidence_percent(confidence)
+        lines.append({
+            "text": text,
+            "confidence": line_confidence,
+            "bbox": bbox,
+            "zone_name": zone_name,
+        })
+        words.append({
+            "text": text,
+            "confidence": line_confidence,
+            "bbox": bbox,
+            "line_key": ("rapidocr", len(lines)),
+        })
+
+    if not lines:
+        return None
+
+    return {
+        "provider": "rapidocr",
+        "providers": ["rapidocr"],
+        "zone_name": zone_name,
+        "text": normalize_text("\n".join(line["text"] for line in lines)),
+        "confidence": round(sum(line["confidence"] for line in lines) / max(len(lines), 1), 2),
+        "words": words,
+        "lines": lines,
+    }
+
+
+def run_easyocr_ocr(image, zone_name="full_page"):
+    reader = get_easyocr_reader()
+    if reader is None or np is None:
+        return None
+
+    try:
+        results = reader.readtext(np.array(image.convert("RGB")), detail=1, paragraph=False)
+    except Exception:
+        return None
+
+    if not results:
+        return None
+
+    lines = []
+    words = []
+
+    for bbox_points, text, confidence in results:
+        text = normalize_text(text)
+        if not text:
+            continue
+
+        bbox = polygon_to_bbox(bbox_points)
+        line_confidence = ocr_confidence_percent(confidence)
+        lines.append({
+            "text": text,
+            "confidence": line_confidence,
+            "bbox": bbox,
+            "zone_name": zone_name,
+        })
+        words.append({
+            "text": text,
+            "confidence": line_confidence,
+            "bbox": bbox,
+            "line_key": ("easyocr", len(lines)),
+        })
+
+    if not lines:
+        return None
+
+    return {
+        "provider": "easyocr",
+        "providers": ["easyocr"],
+        "zone_name": zone_name,
+        "text": normalize_text("\n".join(line["text"] for line in lines)),
+        "confidence": round(sum(line["confidence"] for line in lines) / max(len(lines), 1), 2),
+        "words": words,
+        "lines": lines,
+    }
+
+
+def doctr_geometry_to_bbox(geometry, image_size):
+    width, height = image_size
+    if not geometry or not isinstance(geometry, (list, tuple)) or len(geometry) != 2:
+        return [0, 0, 0, 0]
+
+    try:
+        (x0, y0), (x1, y1) = geometry
+        return [
+            int(round(float(x0) * width)),
+            int(round(float(y0) * height)),
+            int(round(float(x1) * width)),
+            int(round(float(y1) * height)),
+        ]
+    except Exception:
+        return [0, 0, 0, 0]
+
+
+def run_doctr_ocr(image, zone_name="full_page"):
+    predictor = get_doctr_predictor()
+    if predictor is None or np is None:
+        return None
+
+    try:
+        document = predictor([np.array(image.convert("RGB"))])
+        exported = document.pages[0].export()
+    except Exception:
+        return None
+
+    blocks = list(exported.get("blocks", []) or [])
+    if not blocks:
+        return None
+
+    image_size = image.size
+    lines = []
+    words = []
+
+    for block_index, block in enumerate(blocks):
+        for line_index, line in enumerate(block.get("lines", []) or []):
+            line_words = list(line.get("words", []) or [])
+            if not line_words:
+                continue
+
+            line_text_parts = []
+            line_confidences = []
+            line_bbox = None
+
+            for word_index, word in enumerate(line_words):
+                text = normalize_text(word.get("value"))
+                if not text:
+                    continue
+
+                confidence = ocr_confidence_percent(word.get("confidence"))
+                bbox = doctr_geometry_to_bbox(word.get("geometry"), image_size)
+                words.append({
+                    "text": text,
+                    "confidence": confidence,
+                    "bbox": bbox,
+                    "line_key": ("doctr", block_index, line_index, word_index),
+                })
+                line_text_parts.append(text)
+                line_confidences.append(confidence)
+                if line_bbox is None:
+                    line_bbox = list(bbox)
+                else:
+                    line_bbox = [
+                        min(line_bbox[0], bbox[0]),
+                        min(line_bbox[1], bbox[1]),
+                        max(line_bbox[2], bbox[2]),
+                        max(line_bbox[3], bbox[3]),
+                    ]
+
+            if not line_text_parts:
+                continue
+
+            lines.append({
+                "text": normalize_text(" ".join(line_text_parts)),
+                "confidence": round(sum(line_confidences) / max(len(line_confidences), 1), 2),
+                "bbox": line_bbox or [0, 0, 0, 0],
+                "zone_name": zone_name,
+            })
+
+    if not lines:
+        return None
+
+    return {
+        "provider": "doctr",
+        "providers": ["doctr"],
+        "zone_name": zone_name,
+        "text": normalize_text("\n".join(line["text"] for line in lines)),
+        "confidence": round(sum(line["confidence"] for line in lines) / max(len(lines), 1), 2),
+        "words": words,
+        "lines": lines,
+    }
+
+
+def render_pdf_pages_as_images(pdf_path, dpi=300, page_numbers=None, log_fn=None):
     if pdfium is None or Image is None:
         return []
 
@@ -147,12 +444,16 @@ def render_pdf_pages_as_images(pdf_path, dpi=300, log_fn=None):
     try:
         document = pdfium.PdfDocument(str(Path(pdf_path).expanduser().resolve()))
         scale = max(1.0, float(dpi) / 72.0)
+        selected_pages = {int(number) for number in (page_numbers or []) if int(number) >= 1}
 
         for index in range(len(document)):
+            page_number = index + 1
+            if selected_pages and page_number not in selected_pages:
+                continue
             page = document[index]
             bitmap = page.render(scale=scale, rotation=0)
             pil_image = bitmap.to_pil()
-            images.append(pil_image)
+            images.append((page_number, pil_image))
         emit(log_fn, f"[DEBUG] Rendered {len(images)} PDF page image(s) with pdfium")
     except Exception as exc:
         emit(log_fn, f"[DEBUG] PDF rendering failed: {exc}")
@@ -189,6 +490,24 @@ def choose_deskew_angle(image):
     preview = image.copy()
     preview.thumbnail((1400, 1400))
     preview = preview.convert("L")
+
+    if cv2 is not None and np is not None:
+        try:
+            preview_array = np.array(preview)
+            _threshold, binary = cv2.threshold(
+                preview_array,
+                0,
+                255,
+                cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+            )
+            coordinates = np.column_stack(np.where(binary > 0))
+            if len(coordinates) >= 32:
+                angle = cv2.minAreaRect(coordinates)[-1]
+                angle = -(90.0 + angle) if angle < -45.0 else -float(angle)
+                if abs(angle) <= 12.0:
+                    return angle
+        except Exception:
+            pass
 
     best_angle = 0.0
     best_score = -1.0
@@ -254,6 +573,24 @@ def preprocess_image_object_for_ocr(image, log_fn=None):
     steps.append("binarize")
     image = ImageOps.expand(image, border=12, fill=255)
     steps.append("border")
+
+    if cv2 is not None and np is not None:
+        try:
+            matrix = np.array(image)
+            matrix = cv2.medianBlur(matrix, 3)
+            matrix = cv2.adaptiveThreshold(
+                matrix,
+                255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                31,
+                11,
+            )
+            matrix = cv2.copyMakeBorder(matrix, 8, 8, 8, 8, cv2.BORDER_CONSTANT, value=255)
+            image = Image.fromarray(matrix)
+            steps.append("opencv_adaptive_threshold")
+        except Exception as exc:
+            emit(log_fn, f"[DEBUG] OpenCV OCR preprocessing skipped: {exc}")
 
     emit(log_fn, f"[DEBUG] OCR preprocessing steps: {', '.join(steps)}")
     return image, {
@@ -372,6 +709,7 @@ def run_tesseract_ocr(image, zone_name="full_page"):
 
     return {
         "provider": "tesseract_layout",
+        "providers": ["tesseract_layout"],
         "zone_name": zone_name,
         "text": line_text,
         "confidence": overall_confidence,
@@ -532,6 +870,7 @@ def merge_ocr_runs(primary_run, secondary_run):
 
     return {
         "provider": primary_run.get("provider") or secondary_run.get("provider"),
+        "providers": list(dict.fromkeys(list(primary_run.get("providers", [])) + list(secondary_run.get("providers", [])))),
         "zone_name": "merged",
         "text": normalize_text("\n".join(merged_text_parts)),
         "confidence": round(max(confidences) if confidences else 0.0, 2),
@@ -545,16 +884,46 @@ def ocr_image_with_layout(image, log_fn=None):
     if Image is None:
         return None
 
+    if not layout_ocr_available():
+        return None
+
     segments = split_scanned_image_segments(image, log_fn=log_fn)
     page_results = []
+    providers = provider_order()
+    rescue_providers = provider_order(include_rescue=True)
 
     for segment in segments:
         processed, preprocessing = preprocess_image_object_for_ocr(segment["image"], log_fn=log_fn)
-        full_run = run_tesseract_ocr(processed, zone_name="full_page")
+        full_run = None
+        provider_runs = []
+        primary_provider = providers[0] if providers else None
+
+        for provider_index, provider_name in enumerate(providers):
+            candidate_run = run_provider_ocr(provider_name, processed, zone_name="full_page")
+
+            if not candidate_run:
+                continue
+
+            provider_runs.append({
+                "provider": provider_name,
+                "confidence": candidate_run.get("confidence"),
+                "text_length": len(candidate_run.get("text", "")),
+            })
+            full_run = merge_ocr_runs(full_run, candidate_run) if full_run else candidate_run
+
+            confidence = float(full_run.get("confidence", 0.0) or 0.0)
+            text_length = len(full_run.get("text", "") or "")
+            if confidence >= 88.0 and text_length >= 100:
+                break
+            if provider_index == 0 and confidence >= 82.0 and text_length >= 80:
+                break
+            if full_run and confidence >= 86.0 and text_length >= 260:
+                break
 
         if not full_run:
             page_results.append({
                 "provider": None,
+                "providers": [],
                 "text": "",
                 "confidence": 0.0,
                 "field_zones": [],
@@ -563,6 +932,7 @@ def ocr_image_with_layout(image, log_fn=None):
                 "segment_reason": segment["segment_reason"],
                 "segment_bbox": segment["bbox"],
                 "preprocessing": preprocessing,
+                "provider_runs": provider_runs,
             })
             continue
 
@@ -571,13 +941,55 @@ def ocr_image_with_layout(image, log_fn=None):
         region_runs = []
 
         if full_run.get("confidence", 0.0) < 70.0 or len(full_run.get("text", "")) < 220:
-            for region in build_region_crops(processed):
-                region_run = run_tesseract_ocr(region["image"], zone_name=region["zone_name"])
-                if not region_run or not region_run.get("text"):
+            region_candidates = build_region_crops(processed)
+            if full_run.get("confidence", 0.0) >= 85.0 and len(full_run.get("text", "")) >= 100:
+                allowed_regions = {"page_header"}
+            elif full_run.get("confidence", 0.0) >= 60.0 and len(full_run.get("text", "")) >= 120:
+                allowed_regions = {"page_header", "center_form"}
+            else:
+                allowed_regions = {"page_header", "center_form", "left_column"}
+
+            region_providers = []
+            if primary_provider:
+                region_providers.append(primary_provider)
+            if (
+                primary_provider
+                and primary_provider != "rapidocr"
+                and "rapidocr" in providers
+                and (full_run.get("confidence", 0.0) < 60.0 or len(full_run.get("text", "")) < 80)
+            ):
+                region_providers.append("rapidocr")
+            if not region_providers:
+                region_providers = list(providers[:1])
+
+            for region in region_candidates:
+                if region.get("zone_name") not in allowed_regions:
+                    continue
+                best_region_run = None
+                best_region_provider = None
+                best_region_score = -1.0
+
+                for provider_name in region_providers:
+                    region_run = run_provider_ocr(provider_name, region["image"], zone_name=region["zone_name"])
+
+                    if not region_run or not region_run.get("text"):
+                        continue
+
+                    region_score = run_quality_score(region_run)
+                    if region_score <= best_region_score:
+                        continue
+                    best_region_score = region_score
+                    best_region_run = region_run
+                    best_region_provider = provider_name
+
+                    if region_score >= 92.0:
+                        break
+
+                if not best_region_run:
                     continue
 
                 adjusted_lines = []
-                for line in region_run.get("lines", []):
+                for line in best_region_run.get("lines", []):
                     bbox = list(line.get("bbox") or [0, 0, 0, 0])
                     bbox[0] += region["bbox"][0]
                     bbox[1] += region["bbox"][1]
@@ -588,20 +1000,40 @@ def ocr_image_with_layout(image, log_fn=None):
                     adjusted_line["zone_name"] = region["zone_name"]
                     adjusted_lines.append(adjusted_line)
 
-                region_run["lines"] = adjusted_lines
-                region_run["image_size"] = processed.size
+                best_region_run["lines"] = adjusted_lines
+                best_region_run["image_size"] = processed.size
                 region_runs.append({
                     "zone_name": region["zone_name"],
-                    "confidence": region_run.get("confidence"),
-                    "text_length": len(region_run.get("text", "")),
+                    "provider": best_region_provider,
+                    "confidence": best_region_run.get("confidence"),
+                    "text_length": len(best_region_run.get("text", "")),
                 })
-                merged_run = merge_ocr_runs(merged_run, region_run)
+                merged_run = merge_ocr_runs(merged_run, best_region_run)
+
+        if merged_run.get("confidence", 0.0) < 55.0 or len(merged_run.get("text", "")) < 120:
+            for provider_name in rescue_providers:
+                if provider_name in providers:
+                    continue
+
+                rescue_run = run_provider_ocr(provider_name, processed, zone_name="full_page")
+
+                if not rescue_run or not rescue_run.get("text"):
+                    continue
+
+                provider_runs.append({
+                    "provider": provider_name,
+                    "confidence": rescue_run.get("confidence"),
+                    "text_length": len(rescue_run.get("text", "")),
+                })
+                merged_run = merge_ocr_runs(merged_run, rescue_run)
+                break
 
         lines = list(merged_run.get("lines", []))
         field_zones = build_field_zones(lines, processed.size)
         layout = build_layout_summary(merged_run.get("words", []), lines, processed.size)
         page_results.append({
             "provider": merged_run.get("provider"),
+            "providers": merged_run.get("providers", []) or ([merged_run.get("provider")] if merged_run.get("provider") else []),
             "text": normalize_text(merged_run.get("text")),
             "confidence": round(float(merged_run.get("confidence") or 0.0), 2),
             "field_zones": field_zones,
@@ -611,6 +1043,7 @@ def ocr_image_with_layout(image, log_fn=None):
             "segment_bbox": segment["bbox"],
             "preprocessing": preprocessing,
             "region_runs": region_runs,
+            "provider_runs": provider_runs,
         })
 
     return page_results
@@ -664,6 +1097,14 @@ def build_hybrid_page_metadata(page_number, source_type, native_text="", ocr_res
 
     confidences = [float(result.get("confidence") or 0.0) for result in ocr_results if result.get("confidence") is not None]
     providers = [result.get("provider") for result in ocr_results if result.get("provider")]
+    provider_chain = []
+    for result in ocr_results:
+        for provider in result.get("providers", []) or []:
+            if provider and provider not in provider_chain:
+                provider_chain.append(provider)
+        single_provider = result.get("provider")
+        if single_provider and single_provider not in provider_chain:
+            provider_chain.append(single_provider)
     layout = {}
     if ocr_results:
         layout = dict(ocr_results[0].get("layout", {}) or {})
@@ -687,6 +1128,7 @@ def build_hybrid_page_metadata(page_number, source_type, native_text="", ocr_res
         "ocr_text": merged_ocr_text,
         "ocr_confidence": round(sum(confidences) / max(len(confidences), 1), 2) if confidences else 0.0,
         "ocr_provider": providers[0] if providers else None,
+        "ocr_provider_chain": provider_chain,
         "form_lines": list(form_lines or []),
         "field_zones": field_zones,
         "layout": layout,
@@ -709,6 +1151,7 @@ def build_hybrid_page_metadata(page_number, source_type, native_text="", ocr_res
 __all__ = [
     "build_hybrid_page_metadata",
     "collect_text_field_zones",
+    "layout_ocr_available",
     "normalize_label",
     "normalize_text",
     "ocr_image_with_layout",

@@ -98,6 +98,21 @@ TEXT_REPLACEMENTS = {
     "seoc": "SEOC",
 }
 
+UNFILLED_DOCUMENT_MESSAGES = {
+    "consent": (
+        "Virtual Consent Form is present but unfilled",
+        "Complete Virtual Consent Form",
+    ),
+    "consult_request": (
+        "Consultation & Treatment Request is present but unfilled",
+        "Complete Consultation & Treatment Request",
+    ),
+    "clinical_notes": (
+        "Clinical Notes are present but unfilled",
+        "Complete Clinical Notes",
+    ),
+}
+
 HOST_REQUIRED_FIELDS = [
     ("patient_name", 20, "Missing patient name", "Add patient name to packet"),
     ("dob", 15, "Missing patient DOB", "Add patient date of birth"),
@@ -224,44 +239,62 @@ def _has_unfilled_document(packet, document_type):
     return document_type in set(getattr(packet, "unfilled_documents", set()) or set())
 
 
+def _unfilled_document_entries(packet):
+    entries = []
+
+    for document_type, messages in UNFILLED_DOCUMENT_MESSAGES.items():
+        if not _has_unfilled_document(packet, document_type):
+            continue
+        issue_text, fix_text = messages
+        entries.append((issue_text, fix_text))
+
+    return entries
+
+
 def _rewrite_unfilled_document_language(text, packet):
     rewritten = str(text or "")
 
-    if _has_unfilled_document(packet, "consent"):
+    for document_type, (issue_text, fix_text) in UNFILLED_DOCUMENT_MESSAGES.items():
+        if not _has_unfilled_document(packet, document_type):
+            continue
+
+        form_name = FORM_NAME_MAP.get(document_type, document_type.replace("_", " "))
         rewritten = re.sub(
-            r"Missing required document:\s*consent\b\.?",
-            "Virtual Consent Form is present but unfilled",
+            rf"Missing required document:\s*{re.escape(document_type)}\b\.?",
+            issue_text,
             rewritten,
             flags=re.IGNORECASE,
         )
         rewritten = re.sub(
-            r"Attach required document:\s*consent\b\.?",
-            "Complete Virtual Consent Form",
+            rf"Attach required document:\s*{re.escape(document_type)}\b\.?",
+            fix_text,
             rewritten,
             flags=re.IGNORECASE,
         )
         rewritten = re.sub(
-            r"Missing consent\b\.?",
-            "Virtual Consent Form is present but unfilled",
+            rf"Missing {re.escape(document_type)}\b\.?",
+            issue_text,
             rewritten,
             flags=re.IGNORECASE,
         )
         rewritten = rewritten.replace(
-            "Missing Virtual Consent Form",
-            "Virtual Consent Form is present but unfilled",
+            f"Missing {form_name}",
+            issue_text,
         )
         rewritten = rewritten.replace(
-            "Missing required document: Virtual Consent Form",
-            "Virtual Consent Form is present but unfilled",
+            f"Missing required document: {form_name}",
+            issue_text,
         )
         rewritten = rewritten.replace(
-            "Attach required document: Virtual Consent Form",
-            "Complete Virtual Consent Form",
+            f"Attach required document: {form_name}",
+            fix_text,
         )
         rewritten = rewritten.replace(
-            "Add Virtual Consent Form",
-            "Complete Virtual Consent Form",
+            f"Add {form_name}",
+            fix_text,
         )
+
+    if _unfilled_document_entries(packet):
         rewritten = rewritten.replace(
             "Missing required documents:",
             "Missing or incomplete required documents:",
@@ -354,6 +387,9 @@ def _build_issues(packet, packet_output):
             packet,
         ))
 
+    for issue_text, _fix_text in _unfilled_document_entries(packet):
+        issues.append(_clean_issue(issue_text))
+
     for conflict in getattr(packet, "conflicts", []) or []:
         message = conflict.get("message")
 
@@ -398,6 +434,9 @@ def _build_fixes(packet, packet_output, legacy_result=None):
                 continue
         fixes.append(_clean_fix(_rewrite_unfilled_document_language(recommendation, packet)))
 
+    for _issue_text, fix_text in _unfilled_document_entries(packet):
+        fixes.append(_clean_fix(fix_text))
+
     fixes = _merge_unique_strings(fixes, _fix_key)
 
     return fixes
@@ -433,6 +472,13 @@ def _build_intel_display(packet, packet_output):
         conflict_items = []
         approval_rationale = [item for item in approval_rationale if "conflict" not in item.lower()]
 
+    missing_items = [_clean_issue(_rewrite_unfilled_document_language(item, packet)) for item in review_summary.get("missing_items", [])]
+    for issue_text, _fix_text in _unfilled_document_entries(packet):
+        missing_items.append(_clean_issue(issue_text))
+
+    for _issue_text, fix_text in _unfilled_document_entries(packet):
+        priority_fixes.append(_clean_fix(fix_text))
+
     return {
         "packet_confidence": packet_output.get("packet_confidence", getattr(packet, "packet_confidence", None)),
         "approval_probability": packet_output.get("approval_probability", getattr(packet, "approval_probability", None)),
@@ -448,7 +494,7 @@ def _build_intel_display(packet, packet_output):
             _issue_key,
         ),
         "missing_items": _merge_unique_strings(
-            [_clean_issue(_rewrite_unfilled_document_language(item, packet)) for item in review_summary.get("missing_items", [])],
+            missing_items,
             _issue_key,
         ),
         "conflict_items": _merge_unique_strings(
@@ -499,6 +545,26 @@ def _build_scan_diagnostics(packet, packet_output):
     for index, metadata in enumerate(page_metadata, start=1):
         metadata = dict(metadata or {})
         layout = dict(metadata.get("layout", {}) or {})
+        field_zones = list(metadata.get("field_zones", []) or [])
+        ocr_zone_count = sum(
+            1
+            for zone in field_zones
+            if str(zone.get("zone_name") or "").lower() != "native_text"
+        )
+        native_zone_count = sum(
+            1
+            for zone in field_zones
+            if str(zone.get("zone_name") or "").lower() == "native_text"
+        )
+        has_ocr_text = bool(str(metadata.get("ocr_text") or "").strip())
+        has_native_text = bool(str(metadata.get("native_text") or "").strip())
+        text_source = "native_text"
+        if has_ocr_text:
+            text_source = "ocr_text"
+        elif ocr_zone_count:
+            text_source = "layout_ocr"
+        elif has_native_text and native_zone_count:
+            text_source = "native_text_structured"
         confidence_entry = dict(confidence_map.get(f"page_{index}", {}) or {})
         pages.append({
             "page": index,
@@ -508,24 +574,38 @@ def _build_scan_diagnostics(packet, packet_output):
             ),
             "classification_confidence": confidence_entry.get("confidence"),
             "classification_band": confidence_entry.get("confidence_band"),
-            "ocr_confidence": metadata.get("ocr_confidence"),
+            "ocr_provider": metadata.get("ocr_provider"),
+            "ocr_provider_chain": list(metadata.get("ocr_provider_chain", []) or []),
+            "ocr_confidence": metadata.get("ocr_confidence") if has_ocr_text or ocr_zone_count else None,
             "scan_quality": confidence_entry.get("scan_quality_band"),
             "handwriting_risk": confidence_entry.get("handwriting_risk_level"),
-            "field_zone_count": len(metadata.get("field_zones", []) or []),
+            "field_zone_count": len(field_zones),
+            "ocr_field_zone_count": ocr_zone_count,
+            "native_field_zone_count": native_zone_count,
             "split_segment_count": len(metadata.get("ocr_segments", []) or []),
             "table_region_count": len(layout.get("table_regions", []) or []),
             "signature_region_count": len(layout.get("signature_regions", []) or []),
             "handwritten_region_count": len(layout.get("handwritten_regions", []) or []),
+            "text_source": text_source,
         })
 
     return {
         "summary": {
-            "ocr_provider": getattr(packet, "ocr_provider", None),
+            "ocr_provider": intake_summary.get("ocr_provider") or getattr(packet, "ocr_provider", None),
             "page_count": intake_summary.get("page_count", len(page_metadata)),
+            "pages_with_native_text": intake_summary.get("pages_with_native_text"),
             "pages_with_ocr": intake_summary.get("pages_with_ocr"),
+            "pages_with_ocr_field_zones": intake_summary.get("pages_with_ocr_field_zones"),
+            "pages_with_native_field_zones": intake_summary.get("pages_with_native_field_zones"),
             "pages_with_field_zones": intake_summary.get("pages_with_field_zones"),
             "pages_with_split_segments": intake_summary.get("pages_with_split_segments"),
             "average_ocr_confidence": intake_summary.get("average_ocr_confidence"),
+            "ocr_attempted": intake_summary.get("ocr_attempted"),
+            "extraction_mode": intake_summary.get("extraction_mode"),
+            "fallback_applied": intake_summary.get("fallback_applied"),
+            "available_ocr_providers": list(intake_summary.get("available_ocr_providers", []) or []),
+            "available_pdf_tools": list(intake_summary.get("available_pdf_tools", []) or []),
+            "ocr_provider_chain": list(intake_summary.get("ocr_provider_chain", []) or []),
             "scan_quality_band": scan_quality.get("overall_band"),
             "scan_quality_score": scan_quality.get("average_score"),
             "handwriting_risk_level": handwriting.get("overall_level"),

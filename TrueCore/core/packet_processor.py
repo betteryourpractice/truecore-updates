@@ -15,6 +15,7 @@ from TrueCore.validation.validator import validate_packet
 from TrueCore.validation.suggestions import generate_suggestions
 from TrueCore.medical.icd_lookup import detect_icd_codes
 from TrueCore.core.intel_bridge import build_intel_result
+from TrueCore.core.host_intelligence import enrich_result_with_host_intelligence
 from TrueCore.utils.logging_system import log_event
 
 
@@ -108,10 +109,8 @@ def process_file(file_path, approved_icd_codes=None):
         legacy_result=result,
     )
 
-    if intel_result:
-        return intel_result
-
-    return result
+    final_result = intel_result or result
+    return enrich_result_with_host_intelligence(file_path, final_result)
 
 
 # -------------------------------------------------

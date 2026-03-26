@@ -25,10 +25,18 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
 from TrueCoreIntel.intake.ocr_layout import (
     build_hybrid_page_metadata,
+    layout_ocr_available,
     normalize_label,
     ocr_image_with_layout,
     preprocess_image_object_for_ocr,
     render_pdf_pages_as_images,
+)
+from TrueCoreIntel.intake.ocr_runtime import (
+    available_ocr_providers,
+    available_pdf_tools,
+    build_execution_env,
+    ocrmypdf_available,
+    resolve_executable,
 )
 
 
@@ -230,6 +238,119 @@ def get_powershell_command():
     return None
 
 
+def run_text_capture_command(arguments, log_fn=None, timeout=240):
+    try:
+        completed = subprocess.run(
+            arguments,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=build_execution_env(),
+            check=False,
+        )
+    except Exception as exc:
+        emit(log_fn, f"[DEBUG] Text capture command failed to start: {exc}")
+        return None
+
+    if completed.returncode != 0:
+        stderr = normalize_pdf_text(completed.stderr)
+        if stderr:
+            emit(log_fn, f"[DEBUG] Text capture command failed: {stderr}")
+        return None
+
+    return completed.stdout
+
+
+def split_pages_from_formfeed(text):
+    pages = [normalize_pdf_text(page) for page in str(text or "").split("\f")]
+    while pages and not pages[-1]:
+        pages.pop()
+    return pages
+
+
+def extract_pdf_pages_with_pdftotext(pdf_path, log_fn=None):
+    pdftotext_path = resolve_executable("pdftotext")
+    if not pdftotext_path:
+        return []
+
+    output = run_text_capture_command(
+        [pdftotext_path, "-layout", str(pdf_path), "-"],
+        log_fn=log_fn,
+        timeout=240,
+    )
+    if not output:
+        return []
+
+    pages = split_pages_from_formfeed(output)
+    if pages:
+        emit(log_fn, f"[DEBUG] pdftotext extracted {len(pages)} page(s)")
+    return pages
+
+
+def build_searchable_pdf_with_ocrmypdf(pdf_path, log_fn=None):
+    if not ocrmypdf_available():
+        return None
+
+    ocrmypdf_path = resolve_executable("ocrmypdf")
+    if not ocrmypdf_path:
+        return None
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="truecoreintel_ocrmypdf_"))
+    output_pdf = temp_dir / f"{Path(pdf_path).stem}_searchable.pdf"
+    command = [
+        ocrmypdf_path,
+        "--force-ocr",
+        "--deskew",
+        "--rotate-pages",
+        "--clean-final",
+        "--skip-big",
+        "80",
+        "--output-type",
+        "pdf",
+        str(pdf_path),
+        str(output_pdf),
+    ]
+
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=900,
+            env=build_execution_env(),
+            check=False,
+        )
+    except Exception as exc:
+        emit(log_fn, f"[DEBUG] OCRmyPDF failed to start: {exc}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return None
+
+    if completed.returncode != 0 or not output_pdf.exists():
+        stderr = normalize_pdf_text(completed.stderr)
+        if stderr:
+            emit(log_fn, f"[DEBUG] OCRmyPDF failed: {stderr}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return None
+
+    emit(log_fn, f"[DEBUG] OCRmyPDF generated searchable copy: {output_pdf}")
+    return output_pdf
+
+
+def cleanup_temporary_pdf(pdf_path, log_fn=None):
+    if not pdf_path:
+        return
+
+    try:
+        pdf_path = Path(pdf_path)
+        parent = pdf_path.parent
+        if pdf_path.exists():
+            pdf_path.unlink()
+        if parent.exists():
+            parent.rmdir()
+    except Exception as exc:
+        emit(log_fn, f"[DEBUG] Unable to clean OCRmyPDF temp file: {exc}")
+
+
 def run_windows_ocr_script(script, env, log_fn=None, timeout=240):
     shell = get_powershell_command()
     if not shell:
@@ -280,6 +401,24 @@ def normalize_ocr_pages_payload(payload):
                 normalized.append(str(item))
         return normalized
     return [str(payload)]
+
+
+def page_metadata_has_real_ocr_content(metadata):
+    metadata = dict(metadata or {})
+    if normalize_pdf_text(metadata.get("ocr_text")):
+        return True
+    if metadata.get("ocr_provider"):
+        return True
+
+    field_zones = list(metadata.get("field_zones", []) or [])
+    if any(str(zone.get("zone_name") or "").lower() != "native_text" for zone in field_zones):
+        return True
+
+    layout = dict(metadata.get("layout", {}) or {})
+    if layout.get("header_text") or layout.get("structured_line_count") or layout.get("field_zone_count"):
+        return True
+
+    return False
 
 
 def merge_field_zones(primary_zones, secondary_zones):
@@ -447,21 +586,85 @@ def extract_pdf_native_text(page, plumber_page=None):
     return best
 
 
-def extract_pdf_page_ocr_metadata(pdf_path, log_fn=None):
-    page_images = render_pdf_pages_as_images(pdf_path, log_fn=log_fn)
-    metadata = []
+def select_pdf_ocr_candidate_pages(pages, metadata, max_candidates=6):
+    candidates = []
+
+    for index, page_text in enumerate(pages or [], start=1):
+        page_metadata = dict((metadata or [])[index - 1] or {}) if index - 1 < len(metadata or []) else {}
+        field_zones = list(page_metadata.get("field_zones", []) or [])
+        native_zone_count = sum(
+            1
+            for zone in field_zones
+            if str(zone.get("zone_name") or "").lower() == "native_text"
+        )
+        signal_count = count_pattern_matches(page_text, OCR_PAGE_EXCERPT_SIGNAL_PATTERNS)
+        sparse = is_sparse_page_text(page_text)
+        priority = 0
+
+        if sparse:
+            priority += 5
+        if signal_count <= 1:
+            priority += 3
+        if native_zone_count <= 1:
+            priority += 2
+        if index <= 12:
+            priority += 1
+
+        if priority > 0:
+            fingerprint = normalize_pdf_text(page_text)[:240].lower()
+            candidates.append((priority, index, fingerprint))
+
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+
+    grouped = {}
+    for priority, index, fingerprint in candidates:
+        grouped.setdefault(fingerprint or f"page_{index}", []).append((priority, index))
+
+    selected = []
+    seen = set()
+    ordered_groups = sorted(
+        grouped.values(),
+        key=lambda items: (-max(priority for priority, _index in items), min(index for _priority, index in items)),
+    )
+
+    for items in ordered_groups:
+        indices = sorted(index for _priority, index in items)
+        representatives = []
+        if indices:
+            representatives.append(indices[0])
+        if len(indices) >= 3:
+            representatives.append(indices[len(indices) // 2])
+        if len(indices) >= 2:
+            representatives.append(indices[-1])
+
+        for index in representatives:
+            if index in seen:
+                continue
+            seen.add(index)
+            selected.append(index)
+            if len(selected) >= max_candidates:
+                return selected
+
+    return selected
+
+
+def extract_pdf_page_ocr_metadata(pdf_path, log_fn=None, page_numbers=None):
+    if not layout_ocr_available():
+        emit(log_fn, "[DEBUG] Layout OCR backend unavailable; skipping pdfium/tesseract OCR stage")
+        return {}
+
+    page_images = render_pdf_pages_as_images(pdf_path, page_numbers=page_numbers, log_fn=log_fn)
+    metadata = {}
     if not page_images:
         return metadata
 
-    for index, image in enumerate(page_images, start=1):
+    for index, image in page_images:
         page_results = ocr_image_with_layout(image, log_fn=log_fn) or []
-        metadata.append(
-            build_hybrid_page_metadata(
-                page_number=index,
-                source_type="pdf",
-                ocr_results=page_results,
-                source_file=str(pdf_path),
-            )
+        metadata[index] = build_hybrid_page_metadata(
+            page_number=index,
+            source_type="pdf",
+            ocr_results=page_results,
+            source_file=str(pdf_path),
         )
 
     return metadata
@@ -1036,6 +1239,7 @@ def extract_pdf_pages(pdf_path, log_fn=None, return_metadata=False):
     pages = []
     metadata = []
     plumber_document = None
+    poppler_pages = extract_pdf_pages_with_pdftotext(pdf_path, log_fn=log_fn)
 
     try:
         if pdfplumber is not None:
@@ -1072,22 +1276,58 @@ def extract_pdf_pages(pdf_path, log_fn=None, return_metadata=False):
             except Exception:
                 pass
 
+    if poppler_pages:
+        merged_pages = []
+        merged_metadata = []
+        total_pages = max(len(pages), len(poppler_pages))
+        improved_pages = 0
+
+        for index in range(total_pages):
+            base_metadata = metadata[index] if index < len(metadata) else build_hybrid_page_metadata(
+                page_number=index + 1,
+                source_type="pdf",
+                source_file=str(pdf_path),
+            )
+            poppler_text = poppler_pages[index] if index < len(poppler_pages) else ""
+            native_text = normalize_pdf_text(base_metadata.get("native_text"))
+            chosen_native = merge_page_texts(native_text, poppler_text) if poppler_text else native_text
+            if chosen_native and chosen_native != native_text:
+                improved_pages += 1
+            base_metadata["native_text"] = chosen_native
+            merged_text, base_metadata = finalize_page_text_from_metadata(base_metadata)
+            merged_pages.append(merged_text)
+            merged_metadata.append(base_metadata)
+
+        if improved_pages:
+            emit(log_fn, f"[DEBUG] Poppler text strengthened {improved_pages} PDF page(s)")
+        pages = merged_pages
+        metadata = merged_metadata
+
     return (pages, metadata) if return_metadata else pages
 
 
-def extract_pdf_pages_with_fallback(pdf_path, log_fn=None, return_metadata=False):
-    pages, metadata = extract_pdf_pages(pdf_path, log_fn=log_fn, return_metadata=True)
-    ocr_metadata = extract_pdf_page_ocr_metadata(pdf_path, log_fn=log_fn)
+def extract_pdf_pages_with_fallback(pdf_path, log_fn=None, return_metadata=False, base_pages=None, base_metadata=None):
+    if base_pages is not None and base_metadata is not None:
+        pages = list(base_pages or [])
+        metadata = list(base_metadata or [])
+    else:
+        pages, metadata = extract_pdf_pages(pdf_path, log_fn=log_fn, return_metadata=True)
+    candidate_pages = select_pdf_ocr_candidate_pages(pages, metadata)
+    if candidate_pages:
+        emit(log_fn, f"[DEBUG] Selective OCR candidate pages: {', '.join(str(page) for page in candidate_pages[:20])}")
+    ocr_metadata = extract_pdf_page_ocr_metadata(pdf_path, log_fn=log_fn, page_numbers=candidate_pages)
+    searchable_copy = None
 
-    if not ocr_metadata:
+    if not any(page_metadata_has_real_ocr_content(item) for item in (ocr_metadata or {}).values()):
         ocr_pages = extract_pdf_pages_with_windows_ocr(pdf_path, log_fn=log_fn)
         if ocr_pages:
-            ocr_metadata = [
-                build_hybrid_page_metadata(
+            ocr_metadata = {
+                index: build_hybrid_page_metadata(
                     page_number=index,
                     source_type="pdf",
                     ocr_results=[{
                         "provider": "windows_ocr",
+                        "providers": ["windows_ocr"],
                         "text": normalize_pdf_text(text),
                         "confidence": 62.0,
                         "field_zones": [],
@@ -1101,7 +1341,26 @@ def extract_pdf_pages_with_fallback(pdf_path, log_fn=None, return_metadata=False
                     source_file=str(pdf_path),
                 )
                 for index, text in enumerate(ocr_pages, start=1)
-            ]
+            }
+
+    sparse_pages = sum(1 for page in pages if is_sparse_page_text(page))
+    should_try_searchable_copy = (
+        sparse_pages >= max(2, int(len(pages) * 0.25))
+        and not any(page_metadata_has_real_ocr_content(item) for item in (ocr_metadata or {}).values())
+        and ocrmypdf_available()
+    )
+
+    if should_try_searchable_copy:
+        searchable_copy = build_searchable_pdf_with_ocrmypdf(pdf_path, log_fn=log_fn)
+        if searchable_copy:
+            try:
+                searchable_pages, searchable_metadata = extract_pdf_pages(searchable_copy, log_fn=log_fn, return_metadata=True)
+                if searchable_pages:
+                    emit(log_fn, "[DEBUG] Searchable PDF copy extracted for fallback merge")
+                    pages = searchable_pages
+                    metadata = searchable_metadata
+            finally:
+                cleanup_temporary_pdf(searchable_copy, log_fn=log_fn)
 
     if not ocr_metadata:
         return (pages, metadata) if return_metadata else pages
@@ -1109,7 +1368,7 @@ def extract_pdf_pages_with_fallback(pdf_path, log_fn=None, return_metadata=False
     merged_pages = []
     merged_metadata = []
     changed_pages = 0
-    total_pages = max(len(metadata), len(ocr_metadata))
+    total_pages = len(metadata)
 
     for index in range(total_pages):
         primary_metadata = metadata[index] if index < len(metadata) else build_hybrid_page_metadata(
@@ -1117,7 +1376,7 @@ def extract_pdf_pages_with_fallback(pdf_path, log_fn=None, return_metadata=False
             source_type="pdf",
             source_file=str(pdf_path),
         )
-        secondary_metadata = ocr_metadata[index] if index < len(ocr_metadata) else {}
+        secondary_metadata = ocr_metadata.get(index + 1, {})
         merged_page_metadata = merge_page_metadata(primary_metadata, secondary_metadata)
         merged_text, merged_page_metadata = finalize_page_text_from_metadata(merged_page_metadata)
         if index < len(pages) and merged_text != pages[index]:
@@ -1148,12 +1407,18 @@ def extract_document_pages(file_path, log_fn=None, return_metadata=False):
     raise RuntimeError(f"Unsupported packet file type: {file_path.suffix or '<none>'}")
 
 
-def extract_document_pages_with_fallback(file_path, log_fn=None, return_metadata=False):
+def extract_document_pages_with_fallback(file_path, log_fn=None, return_metadata=False, base_pages=None, base_metadata=None):
     file_path = Path(file_path).expanduser().resolve()
     suffix = file_path.suffix.lower()
 
     if suffix == ".pdf":
-        return extract_pdf_pages_with_fallback(file_path, log_fn=log_fn, return_metadata=return_metadata)
+        return extract_pdf_pages_with_fallback(
+            file_path,
+            log_fn=log_fn,
+            return_metadata=return_metadata,
+            base_pages=base_pages,
+            base_metadata=base_metadata,
+        )
 
     return extract_document_pages(file_path, log_fn=log_fn, return_metadata=return_metadata)
 
