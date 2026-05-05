@@ -403,3 +403,12 @@ CHANGES
 
 * OCR Reviewer Pipeline and Host Intelligence Upgrade
 
+
+
+VERSION: 4.1
+DATE: 2026-05-05
+
+CHANGES
+
+* Admin auth hardening, packet intelligence upgrades, GUI improvements, and speed optimization
+
