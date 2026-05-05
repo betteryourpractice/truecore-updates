@@ -285,13 +285,17 @@ def get_paddleocr_engine():
 
     ensure_vendor_paths(front=True)
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
-    try:
-        from paddleocr import PaddleOCR
-    except Exception:
+    module = import_optional_module("paddleocr", use_vendor=True)
+    if module is None:
         return None
 
     try:
-        return PaddleOCR(use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False, lang="en")
+        return module.PaddleOCR(
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+            lang="en",
+        )
     except Exception:
         return None
 

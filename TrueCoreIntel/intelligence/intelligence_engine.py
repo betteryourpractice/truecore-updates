@@ -378,6 +378,8 @@ class IntelligenceEngine:
             score = min(score, 72)
         elif "weak_mri_justification" in packet.review_flags:
             score = min(score, 78)
+        elif "diagnosis_icd_mismatch" in packet.review_flags:
+            score = min(score, 84)
 
         return score
 

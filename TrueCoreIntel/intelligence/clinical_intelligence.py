@@ -183,9 +183,18 @@ class ClinicalIntelligenceAnalyzer:
 
     def build_treatment_progression_modeling(self, packet, packet_text):
         conservative_hits = self.find_pattern_hits(packet_text, self.CONSERVATIVE_CARE_PATTERNS)
-        has_advanced_imaging = bool(packet.fields.get("procedure") == "MRI" or re.search(r"\b(?:mri|ct|x-ray|xray)\b", packet_text))
+        detected_documents = set(getattr(packet, "detected_documents", set()) or set())
+        has_advanced_imaging = bool(
+            packet.fields.get("procedure") == "MRI"
+            or "imaging_report" in detected_documents
+            or re.search(r"\b(?:mri|ct|x-ray|xray)\b", packet_text)
+        )
         clinical_notes_present = "clinical_notes" in packet.detected_documents
         lomn_present = "lomn" in packet.detected_documents
+        conservative_summary_present = "conservative_care_summary" in detected_documents
+
+        if conservative_summary_present:
+            conservative_hits = sorted(set(conservative_hits).union({"conservative_care_summary"}))
 
         if has_advanced_imaging and conservative_hits:
             status = "logical_progression"
@@ -202,11 +211,17 @@ class ClinicalIntelligenceAnalyzer:
             "advanced_diagnostics_present": has_advanced_imaging,
             "clinical_notes_present": clinical_notes_present,
             "lomn_present": lomn_present,
+            "imaging_report_present": "imaging_report" in detected_documents,
+            "conservative_summary_present": conservative_summary_present,
         }
 
     def build_conservative_care_verification(self, packet, packet_text):
         hits = self.find_pattern_hits(packet_text, self.CONSERVATIVE_CARE_PATTERNS)
         procedure = packet.fields.get("procedure")
+        detected_documents = set(getattr(packet, "detected_documents", set()) or set())
+        conservative_summary_present = "conservative_care_summary" in detected_documents
+        if conservative_summary_present:
+            hits = sorted(set(hits).union({"conservative_care_summary"}))
 
         if hits and len(hits) >= 2:
             status = "verified"
@@ -221,6 +236,7 @@ class ClinicalIntelligenceAnalyzer:
             "status": status,
             "documented_modalities": sorted(hits),
             "procedure_context": procedure,
+            "conservative_summary_present": conservative_summary_present,
             "summary": {
                 "verified": "Conservative care appears documented before or alongside the current request.",
                 "partial": "Some conservative care is documented, but the treatment history is not comprehensive.",

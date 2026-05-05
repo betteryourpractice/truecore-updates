@@ -36,6 +36,37 @@ class ValidationIntelligenceAnalyzer:
         "signature_present",
     )
 
+    CONCEPT_TRACEBACK_SPECS = (
+        {
+            "concept": "request_intent",
+            "label": "Request Intent",
+            "fields": ("reason_for_request", "procedure", "service_date_range"),
+            "section_roles": {"request_intent", "request_scope", "routing_followup"},
+            "preferred_documents": {"consult_request", "seoc", "rfs", "cover_sheet"},
+        },
+        {
+            "concept": "diagnostic_basis",
+            "label": "Diagnostic Basis",
+            "fields": ("diagnosis", "icd_codes", "symptom"),
+            "section_roles": {"diagnostic_basis", "clinical_support", "justification"},
+            "preferred_documents": {"clinical_notes", "lomn", "rfs", "cover_sheet", "imaging_report"},
+        },
+        {
+            "concept": "clinical_justification",
+            "label": "Clinical Justification",
+            "fields": ("diagnosis", "reason_for_request", "procedure", "icd_codes"),
+            "section_roles": {"justification", "clinical_support", "diagnostic_basis"},
+            "preferred_documents": {"lomn", "clinical_notes", "consult_request", "seoc", "imaging_report", "conservative_care_summary"},
+        },
+        {
+            "concept": "routing_admin",
+            "label": "Routing / Admin",
+            "fields": ("authorization_number", "ordering_provider", "referring_provider", "facility", "va_icn", "claim_number"),
+            "section_roles": {"identity_admin", "routing_followup"},
+            "preferred_documents": {"cover_sheet", "rfs", "consult_request", "seoc"},
+        },
+    )
+
     REGION_HINTS = {
         "lumbar": {"back", "lumbar", "lumbago", "radiculopathy", "sciatica", "low back"},
         "cervical": {"neck", "cervical"},
@@ -54,6 +85,7 @@ class ValidationIntelligenceAnalyzer:
         procedure_code = self.build_procedure_code_consistency_checks(packet)
         conflict_ranking = self.build_validation_conflict_severity_ranking(packet)
         traceback_links = self.build_evidence_traceback_links(packet, extraction)
+        concept_tracebacks = self.build_concept_evidence_tracebacks(packet, extraction)
         deep_score = self.build_deep_verification_score(
             packet,
             extraction,
@@ -65,6 +97,7 @@ class ValidationIntelligenceAnalyzer:
         )
 
         packet.links["evidence_traceback_links"] = traceback_links
+        packet.links["concept_evidence_tracebacks"] = concept_tracebacks
         packet.deep_verification_score = deep_score.get("score")
         packet.validation_intelligence = {
             "cross_document_fact_verification": cross_document,
@@ -75,6 +108,7 @@ class ValidationIntelligenceAnalyzer:
             "procedure_code_consistency_checks": procedure_code,
             "validation_conflict_severity_ranking": conflict_ranking,
             "evidence_traceback_links": traceback_links,
+            "concept_evidence_tracebacks": concept_tracebacks,
             "deep_verification_score": deep_score,
         }
         return packet
@@ -98,8 +132,12 @@ class ValidationIntelligenceAnalyzer:
                 status = "missing"
                 missing += 1
             elif len(normalized_values) > 1:
-                status = "conflict"
-                conflicted += 1
+                if field in getattr(validator, "ROLE_TOLERANT_FIELDS", set()) and validator.has_only_cross_role_variation(packet, field):
+                    status = "consistent"
+                    consistent += 1
+                else:
+                    status = "conflict"
+                    conflicted += 1
             else:
                 status = "consistent"
                 consistent += 1
@@ -113,6 +151,7 @@ class ValidationIntelligenceAnalyzer:
                 "normalized_values": [self.serialize_value(value) for value in normalized_values[:4]],
                 "source_document_type": mapping.get("document_type"),
                 "source_page_number": mapping.get("page_number"),
+                "source_role": mapping.get("source_role"),
                 "confidence": mapping.get("confidence"),
                 "page_zone": mapping.get("page_zone"),
                 "ocr_confidence": mapping.get("ocr_confidence"),
@@ -153,6 +192,7 @@ class ValidationIntelligenceAnalyzer:
                 "confidence": mapping.get("confidence"),
                 "document_type": mapping.get("document_type"),
                 "page_number": mapping.get("page_number"),
+                "source_role": mapping.get("source_role"),
                 "page_zone": mapping.get("page_zone"),
                 "anchor_label": mapping.get("anchor_label"),
                 "ocr_confidence": mapping.get("ocr_confidence"),
@@ -422,6 +462,7 @@ class ValidationIntelligenceAnalyzer:
                 "confidence": mapping.get("confidence"),
                 "document_type": mapping.get("document_type"),
                 "page_number": mapping.get("page_number"),
+                "source_role": mapping.get("source_role"),
                 "page_zone": mapping.get("page_zone"),
                 "anchor_label": mapping.get("anchor_label"),
                 "ocr_confidence": mapping.get("ocr_confidence"),
@@ -433,6 +474,96 @@ class ValidationIntelligenceAnalyzer:
             })
 
         return traceback_links
+
+    def build_concept_evidence_tracebacks(self, packet, extraction):
+        by_field = extraction.get("by_field", {})
+        concept_links = []
+
+        for spec in self.CONCEPT_TRACEBACK_SPECS:
+            candidates = []
+            for field_index, field in enumerate(spec.get("fields", ())):
+                observations = list(packet.field_observations.get(field, []) or [])
+                if not observations and packet.field_mappings.get(field):
+                    observations = [packet.field_mappings.get(field)]
+
+                claim = by_field.get(field, {})
+                for observation in observations:
+                    if not observation:
+                        continue
+                    score = self.score_concept_candidate(
+                        observation,
+                        field,
+                        field_index=field_index,
+                        spec=spec,
+                    )
+                    if score <= 0:
+                        continue
+                    candidates.append({
+                        "concept": spec.get("concept"),
+                        "concept_label": spec.get("label"),
+                        "field": field,
+                        "field_priority": field_index,
+                        "score": round(score, 3),
+                        "value": self.serialize_value(observation.get("value")),
+                        "confidence": observation.get("confidence"),
+                        "support_status": claim.get("status"),
+                        "document_type": observation.get("document_type"),
+                        "page_number": observation.get("page_number"),
+                        "source_role": observation.get("source_role"),
+                        "primary_section_role": observation.get("primary_section_role"),
+                        "section_roles": list(observation.get("section_roles") or []),
+                        "section_headings": list(observation.get("section_headings") or []),
+                        "anchor_label": observation.get("anchor_label"),
+                        "page_zone": observation.get("page_zone"),
+                        "ocr_provider": observation.get("ocr_provider"),
+                        "extraction_strategy": observation.get("extraction_strategy"),
+                    })
+
+            if not candidates:
+                continue
+
+            candidates.sort(
+                key=lambda item: (
+                    float(item.get("score") or 0.0),
+                    float(item.get("confidence") or 0.0),
+                    -int(item.get("field_priority") or 0),
+                ),
+                reverse=True,
+            )
+            best = dict(candidates[0])
+            best.pop("field_priority", None)
+            best.pop("score", None)
+            concept_links.append(best)
+
+        return concept_links
+
+    def score_concept_candidate(self, observation, field, field_index, spec):
+        value = observation.get("value")
+        if value in (None, "", []):
+            return 0.0
+
+        base = float(observation.get("confidence") or 0.0)
+        document_type = str(observation.get("document_type") or "").strip().lower()
+        primary_section_role = str(observation.get("primary_section_role") or "").strip().lower()
+        section_roles = {str(role).strip().lower() for role in list(observation.get("section_roles") or []) if role}
+        preferred_documents = {str(item).strip().lower() for item in spec.get("preferred_documents", set())}
+        preferred_roles = {str(item).strip().lower() for item in spec.get("section_roles", set())}
+
+        if primary_section_role in preferred_roles:
+            base += 0.25
+        elif section_roles.intersection(preferred_roles):
+            base += 0.15
+
+        if document_type in preferred_documents:
+            base += 0.1
+        elif document_type in {"", "unknown"}:
+            base -= 0.04
+
+        if observation.get("anchor_label"):
+            base += 0.03
+
+        base += max(0.0, 0.12 - (field_index * 0.02))
+        return round(base, 3)
 
     def build_deep_verification_score(
         self,

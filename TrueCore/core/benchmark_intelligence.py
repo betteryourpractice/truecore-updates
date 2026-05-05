@@ -2,6 +2,16 @@ from collections import Counter, defaultdict
 from datetime import datetime
 
 from TrueCore.core.case_memory import build_provider_key, get_recent_packet_events, get_recent_packet_runs, parse_issues
+from TrueCore.core.statistical_scoring import (
+    beta_smoothed_rate,
+    build_outcome_model,
+    build_turnaround_observations,
+    empirical_bayes_average,
+    kaplan_meier_curve,
+    midrank_percentile,
+    summarize_outcome_model,
+    wilson_interval,
+)
 
 
 def _parse_ts(value):
@@ -24,8 +34,6 @@ def _band_from_score(score):
     if score >= 0.62:
         return "competitive"
     return "below_target"
-
-
 def build_internal_benchmark(result, all_runs):
     current_score = int(result.get("score", 0) or 0)
     scores = [int(row.get("score") or 0) for row in all_runs]
@@ -53,31 +61,48 @@ def build_team_benchmark(result, all_runs):
     fields = dict(result.get("fields", {}) or {})
     current_provider = build_provider_key(fields)
     provider_scores = defaultdict(list)
+    all_scores = []
 
     for row in all_runs:
+        score = int(row.get("score") or 0)
+        all_scores.append(score)
         provider_key = row.get("provider_key")
         if not provider_key or provider_key == "unknown_provider":
             continue
-        provider_scores[provider_key].append(int(row.get("score") or 0))
+        provider_scores[provider_key].append(score)
+
+    global_average = round(sum(all_scores) / max(len(all_scores), 1), 1) if all_scores else 0.0
 
     averages = [
-        (provider_key, round(sum(scores) / max(len(scores), 1), 1))
+        (
+            provider_key,
+            round(sum(scores) / max(len(scores), 1), 1),
+            empirical_bayes_average(scores, global_average, prior_weight=6.0),
+            len(scores),
+        )
         for provider_key, scores in provider_scores.items()
     ]
-    averages.sort(key=lambda item: item[1], reverse=True)
+    averages.sort(key=lambda item: (item[2], item[3], item[1]), reverse=True)
 
     rank = None
     current_average = None
-    for index, (provider_key, average_score) in enumerate(averages, start=1):
+    current_shrunk_average = None
+    current_sample_size = 0
+    for index, (provider_key, average_score, shrunk_average, sample_size) in enumerate(averages, start=1):
         if provider_key == current_provider:
             rank = index
             current_average = average_score
+            current_shrunk_average = shrunk_average
+            current_sample_size = sample_size
             break
 
     return {
         "provider_rank": rank,
         "provider_average_score": current_average,
+        "provider_shrunk_average_score": current_shrunk_average,
+        "provider_sample_size": current_sample_size,
         "provider_count": len(averages),
+        "global_average_score": global_average,
     }
 
 
@@ -106,14 +131,12 @@ def build_workflow_benchmark(all_runs):
 def build_quality_benchmark(result, all_runs):
     score = int(result.get("score", 0) or 0)
     scores = sorted(int(row.get("score") or 0) for row in all_runs)
-    percentile = 0
-    if scores:
-        below = sum(1 for item in scores if item <= score)
-        percentile = round(below / len(scores), 2)
+    percentile = midrank_percentile(score, scores)
 
     return {
         "score_percentile": percentile,
         "quality_band": _band_from_score(percentile),
+        "sample_size": len(scores),
     }
 
 
@@ -124,10 +147,16 @@ def build_denial_benchmark(result, all_events):
         if str(event.get("event_type") or "").lower() == "manual_outcome"
     ]
     denied = sum(1 for event in manual_events if str(event.get("event_status") or "").lower() == "denied")
-    denial_rate = round(denied / max(len(manual_events), 1), 2) if manual_events else 0.0
+    sample_size = len(manual_events)
+    denial_rate = round(denied / max(sample_size, 1), 2) if manual_events else 0.0
+    smoothed_denial_rate = beta_smoothed_rate(denied, sample_size, alpha=1.0, beta=1.0)
+    denial_interval = wilson_interval(denied, sample_size)
 
     return {
         "historical_denial_rate": denial_rate,
+        "smoothed_denial_rate": smoothed_denial_rate,
+        "historical_denial_rate_interval": denial_interval,
+        "sample_size": sample_size,
         "current_denial_risk": ((result.get("intel", {}) or {}).get("display", {}) or {}).get("denial_risk"),
     }
 
@@ -158,6 +187,18 @@ def build_turnaround_benchmark(all_runs, all_events):
     return {
         "median_hours_to_outcome": median_hours,
         "sample_count": len(durations),
+    }
+
+
+def build_turnaround_survival_benchmark(all_runs, all_events):
+    observations = build_turnaround_observations(all_runs, all_events)
+    survival = kaplan_meier_curve(observations)
+    return {
+        "median_hours_to_outcome": survival.get("median_survival_hours"),
+        "sample_size": survival.get("sample_size"),
+        "event_count": survival.get("event_count"),
+        "censored_count": survival.get("censored_count"),
+        "survival_curve": survival.get("curve"),
     }
 
 
@@ -239,10 +280,12 @@ def build_benchmark_intelligence(result):
     quality = build_quality_benchmark(result, all_runs)
     denial = build_denial_benchmark(result, all_events)
     turnaround = build_turnaround_benchmark(all_runs, all_events)
+    turnaround_survival = build_turnaround_survival_benchmark(all_runs, all_events)
     readiness = build_submission_readiness_benchmark(result, all_runs)
     complexity = build_complexity_normalized_benchmark(result, all_runs)
     targets = build_improvement_targets(result, internal, denial)
     confidence = build_benchmark_confidence(all_runs, all_events)
+    outcome_model = summarize_outcome_model(build_outcome_model(all_runs, all_events))
 
     return {
         "internal_benchmark_engine": internal,
@@ -251,8 +294,10 @@ def build_benchmark_intelligence(result):
         "quality_benchmark_calibration": quality,
         "denial_benchmark_comparison": denial,
         "turnaround_benchmark_analysis": turnaround,
+        "turnaround_survival_analysis": turnaround_survival,
         "submission_readiness_benchmarking": readiness,
         "complexity_normalized_benchmarking": complexity,
         "improvement_target_modeling": targets,
         "benchmark_confidence_scoring": confidence,
+        "approval_outcome_modeling": outcome_model,
     }

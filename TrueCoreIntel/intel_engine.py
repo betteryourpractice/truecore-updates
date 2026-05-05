@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Iterable
 
 from TrueCoreIntel.core.pipeline import TrueCorePipeline
@@ -198,6 +199,7 @@ class TrueCoreIntelEngine:
 
     def process_path(self, path: str | Path, log_fn=None) -> dict:
         source_path = Path(path).expanduser().resolve()
+        overall_start = perf_counter()
 
         if log_fn:
             log_fn("[DEBUG] Starting run()")
@@ -205,21 +207,36 @@ class TrueCoreIntelEngine:
         packet = Packet()
         packet.source_type = source_path.suffix.lower().lstrip(".") or None
         packet.files = [str(source_path)]
+        intake_start = perf_counter()
         packet.pages, packet.page_metadata = extract_document_pages(source_path, log_fn=log_fn, return_metadata=True)
+        intake_elapsed = perf_counter() - intake_start
         packet.page_sources = [str(source_path)] * len(packet.pages)
         packet.intake_diagnostics = build_intake_diagnostics(packet)
         packet.ocr_provider = packet.intake_diagnostics.get("ocr_provider")
+        packet.metrics["intake_seconds"] = round(intake_elapsed, 3)
+        packet.metrics["retry_evaluation_seconds"] = 0.0
+        packet.metrics["fallback_reload_seconds"] = 0.0
+        packet.metrics["fallback_pipeline_seconds"] = 0.0
+        packet.metrics["used_ocr_fallback"] = False
 
         if log_fn:
             log_fn(f"[DEBUG] Packet pages loaded: {len(packet.pages)}")
 
+        primary_pipeline_start = perf_counter()
         result = self.process_packet(packet)
+        primary_pipeline_elapsed = perf_counter() - primary_pipeline_start
+        result.metrics["primary_pipeline_seconds"] = round(primary_pipeline_elapsed, 3)
+        retry_eval_start = perf_counter()
         retry_reasons = should_retry_with_ocr(packet, result)
+        result.metrics["retry_evaluation_seconds"] = round(perf_counter() - retry_eval_start, 3)
+        result.metrics.setdefault("fallback_reload_seconds", 0.0)
+        result.metrics.setdefault("fallback_pipeline_seconds", 0.0)
         used_ocr_fallback = False
 
         if retry_reasons:
             if log_fn:
                 log_fn(f"[DEBUG] Retrying with OCR fallback: {', '.join(retry_reasons)}")
+            fallback_reload_start = perf_counter()
             fallback_pages, fallback_metadata = extract_document_pages_with_fallback(
                 source_path,
                 log_fn=log_fn,
@@ -227,6 +244,7 @@ class TrueCoreIntelEngine:
                 base_pages=packet.pages,
                 base_metadata=packet.page_metadata,
             )
+            fallback_reload_elapsed = perf_counter() - fallback_reload_start
 
             if fallback_pages != packet.pages:
                 used_ocr_fallback = True
@@ -238,9 +256,25 @@ class TrueCoreIntelEngine:
                 packet.page_sources = [str(source_path)] * len(packet.pages)
                 packet.intake_diagnostics = build_intake_diagnostics(packet, fallback_applied=True)
                 packet.ocr_provider = packet.intake_diagnostics.get("ocr_provider")
+                packet.metrics["intake_seconds"] = round(intake_elapsed, 3)
+                packet.metrics["primary_pipeline_seconds"] = round(primary_pipeline_elapsed, 3)
+                packet.metrics["retry_evaluation_seconds"] = result.metrics.get("retry_evaluation_seconds", 0.0)
+                packet.metrics["fallback_reload_seconds"] = round(fallback_reload_elapsed, 3)
+                packet.metrics["fallback_pipeline_seconds"] = 0.0
+                packet.metrics["used_ocr_fallback"] = True
                 if log_fn:
                     log_fn(f"[DEBUG] Packet pages reloaded with OCR fallback: {len(packet.pages)}")
+                fallback_pipeline_start = perf_counter()
                 result = self.process_packet(packet)
+                fallback_pipeline_elapsed = perf_counter() - fallback_pipeline_start
+                result.metrics["fallback_pipeline_seconds"] = round(fallback_pipeline_elapsed, 3)
+            else:
+                result.metrics["fallback_reload_seconds"] = round(fallback_reload_elapsed, 3)
+
+        result.metrics["intake_seconds"] = round(intake_elapsed, 3)
+        result.metrics["primary_pipeline_seconds"] = round(primary_pipeline_elapsed, 3)
+        result.metrics["used_ocr_fallback"] = used_ocr_fallback
+        result.metrics["process_path_total_seconds"] = round(perf_counter() - overall_start, 3)
 
         return {
             "packet": result,

@@ -23,6 +23,9 @@ class Packet:
         self.field_mappings = {}
         self.field_confidence = {}
         self.field_values = {}
+        self.field_observations = {}
+        self.suspect_fields = {}
+        self.template_markers = []
         self.identity_fields = {
             "name": [],
             "dob": [],
@@ -39,6 +42,7 @@ class Packet:
         self.document_confidence_map = {}
         self.source_reliability_ranking = []
         self.document_spans = []
+        self.section_roles = {}
 
         # Relationships
         self.links = {}

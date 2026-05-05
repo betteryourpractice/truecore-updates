@@ -83,6 +83,11 @@ def ensure_memory_db():
             workflow_queue TEXT,
             review_priority TEXT,
             packet_confidence REAL,
+            runtime_seconds REAL,
+            intel_runtime_seconds REAL,
+            legacy_runtime_seconds REAL,
+            host_runtime_seconds REAL,
+            analysis_mode TEXT,
             scan_quality_band TEXT,
             scan_quality_score REAL,
             ocr_confidence REAL,
@@ -114,8 +119,32 @@ def ensure_memory_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_packet_runs_case_key ON packet_runs(case_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_packet_runs_provider_key ON packet_runs(provider_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_packet_events_case_key ON packet_events(case_key)")
+    _ensure_packet_run_columns(
+        conn,
+        {
+            "runtime_seconds": "REAL",
+            "intel_runtime_seconds": "REAL",
+            "legacy_runtime_seconds": "REAL",
+            "host_runtime_seconds": "REAL",
+            "analysis_mode": "TEXT",
+        },
+    )
     conn.commit()
     return conn
+
+
+def _ensure_packet_run_columns(conn, columns):
+    existing = {
+        str(row["name"]).strip().lower()
+        for row in conn.execute("PRAGMA table_info(packet_runs)").fetchall()
+    }
+
+    for column_name, column_type in dict(columns or {}).items():
+        normalized = str(column_name or "").strip().lower()
+        if not normalized or normalized in existing:
+            continue
+        conn.execute(f"ALTER TABLE packet_runs ADD COLUMN {column_name} {column_type}")
+        existing.add(normalized)
 
 
 def determine_status(score):
@@ -179,6 +208,8 @@ def build_run_snapshot(file_path, result):
     intel = dict(result.get("intel", {}) or {})
     display = dict(intel.get("display", {}) or {})
     fields = dict(result.get("fields", {}) or {})
+    profiling = dict(result.get("profiling", {}) or {})
+    metrics = dict(intel.get("metrics", {}) or {})
     scan = dict(intel.get("scan_diagnostics", {}) or {})
     scan_summary = dict(scan.get("summary", {}) or {})
 
@@ -203,6 +234,11 @@ def build_run_snapshot(file_path, result):
         "workflow_queue": display.get("workflow_queue"),
         "review_priority": display.get("review_priority"),
         "packet_confidence": display.get("packet_confidence"),
+        "runtime_seconds": profiling.get("total_seconds"),
+        "intel_runtime_seconds": profiling.get("intel_seconds"),
+        "legacy_runtime_seconds": profiling.get("legacy_seconds"),
+        "host_runtime_seconds": profiling.get("host_seconds"),
+        "analysis_mode": profiling.get("analysis_mode"),
         "scan_quality_band": scan_summary.get("scan_quality_band"),
         "scan_quality_score": scan_summary.get("scan_quality_score"),
         "ocr_confidence": scan_summary.get("average_ocr_confidence"),
@@ -214,6 +250,18 @@ def build_run_snapshot(file_path, result):
             "why_weak": list(display.get("why_weak", []) or []),
             "review_flags": list(display.get("review_flags", []) or []),
             "scan_summary": scan_summary,
+            "runtime_profile": profiling,
+            "pipeline_stage_timings": dict(metrics.get("pipeline_stage_timings", {}) or {}),
+            "engine_metrics": {
+                "intake_seconds": metrics.get("intake_seconds"),
+                "primary_pipeline_seconds": metrics.get("primary_pipeline_seconds"),
+                "retry_evaluation_seconds": metrics.get("retry_evaluation_seconds"),
+                "fallback_reload_seconds": metrics.get("fallback_reload_seconds"),
+                "fallback_pipeline_seconds": metrics.get("fallback_pipeline_seconds"),
+                "pipeline_total_seconds": metrics.get("pipeline_total_seconds"),
+                "process_path_total_seconds": metrics.get("process_path_total_seconds"),
+                "used_ocr_fallback": metrics.get("used_ocr_fallback"),
+            },
         },
     }
 
@@ -643,6 +691,11 @@ def record_packet_analysis(file_path, result, triage_intelligence=None):
                 workflow_queue,
                 review_priority,
                 packet_confidence,
+                runtime_seconds,
+                intel_runtime_seconds,
+                legacy_runtime_seconds,
+                host_runtime_seconds,
+                analysis_mode,
                 scan_quality_band,
                 scan_quality_score,
                 ocr_confidence,
@@ -653,7 +706,7 @@ def record_packet_analysis(file_path, result, triage_intelligence=None):
                 fixes_json,
                 fields_json,
                 intel_summary_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snapshot["analyzed_at"],
@@ -676,6 +729,11 @@ def record_packet_analysis(file_path, result, triage_intelligence=None):
                 snapshot["workflow_queue"],
                 snapshot["review_priority"],
                 snapshot["packet_confidence"],
+                snapshot["runtime_seconds"],
+                snapshot["intel_runtime_seconds"],
+                snapshot["legacy_runtime_seconds"],
+                snapshot["host_runtime_seconds"],
+                snapshot["analysis_mode"],
                 snapshot["scan_quality_band"],
                 snapshot["scan_quality_score"],
                 snapshot["ocr_confidence"],

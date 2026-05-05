@@ -17,6 +17,13 @@ class ValidatorEngine:
         "service_date_range",
     }
 
+    ROLE_TOLERANT_FIELDS = {
+        "provider",
+        "clinic_name",
+        "facility",
+        "location",
+    }
+
     DOCUMENT_ORDER_PRIORITY = {
         "cover_sheet": 10,
         "rfs": 20,
@@ -443,6 +450,9 @@ class ValidatorEngine:
         normalized_values = self.get_normalized_unique_values("icd_codes", values)
 
         if len(normalized_values) > 1:
+            if self.has_mixed_episode_history(packet, "icd_codes"):
+                return
+
             code_sets = [set(value) for value in normalized_values if isinstance(value, tuple) and value]
             if len(code_sets) >= 2:
                 shared_codes = set.intersection(*code_sets)
@@ -501,6 +511,15 @@ class ValidatorEngine:
                 if field == "reason_for_request" and self.reason_values_substantially_overlap(normalized_values):
                     continue
 
+                if field in self.ROLE_TOLERANT_FIELDS and self.has_only_cross_role_variation(packet, field):
+                    continue
+
+                if field == "npi" and self.has_contextually_acceptable_npi_variation(packet):
+                    continue
+
+                if field in {"reason_for_request", "diagnosis"} and self.has_mixed_episode_history(packet, field):
+                    continue
+
                 self.add_conflict(
                     packet=packet,
                     field=field,
@@ -519,6 +538,15 @@ class ValidatorEngine:
         normalized_values = self.get_normalized_unique_values(field, values)
 
         if len(normalized_values) > 1:
+            if field in self.ROLE_TOLERANT_FIELDS and self.has_only_cross_role_variation(packet, field):
+                return
+
+            if field == "npi" and self.has_contextually_acceptable_npi_variation(packet):
+                return
+
+            if field in {"diagnosis"} and self.has_mixed_episode_history(packet, field):
+                return
+
             self.add_conflict(
                 packet=packet,
                 field=field,
@@ -527,6 +555,39 @@ class ValidatorEngine:
                 values=normalized_values,
                 message=message,
             )
+
+    def has_only_cross_role_variation(self, packet, field):
+        observations = list((getattr(packet, "field_observations", {}) or {}).get(field, []) or [])
+        if len(observations) < 2:
+            return False
+
+        role_values = {}
+        for observation in observations:
+            normalized_value = self.normalize_conflict_value(field, observation.get("value"))
+            if normalized_value is None:
+                continue
+
+            role = str(observation.get("source_role") or "unknown").strip().lower()
+            role_values.setdefault(role, set()).add(normalized_value)
+
+        concrete_roles = {
+            role: values
+            for role, values in role_values.items()
+            if role not in {"unknown", "shared", "patient"} and values
+        }
+
+        if len(concrete_roles) < 2:
+            return False
+
+        if any(len(values) > 1 for values in concrete_roles.values()):
+            return False
+
+        distinct_values = {
+            next(iter(values))
+            for values in concrete_roles.values()
+            if values
+        }
+        return len(distinct_values) > 1
 
     def get_normalized_unique_values(self, field, values):
         normalized = []
@@ -569,12 +630,52 @@ class ValidatorEngine:
             cleaned = [str(code).strip().upper() for code in value if code]
             return tuple(sorted(set(cleaned)))
 
+        if field == "clinic_name":
+            if isinstance(value, str):
+                cleaned = value.strip().lower()
+                cleaned = re.sub(r"[^a-z0-9&,'\- ]", " ", cleaned)
+                cleaned = re.sub(r"\s+", " ", cleaned).strip()
+                if not cleaned:
+                    return None
+
+                connector_fragments = {"and", "&", "of", "for"}
+                first_token = cleaned.split()[0] if cleaned.split() else ""
+                if first_token in connector_fragments:
+                    return None
+
+                if "aiken neurosciences" in cleaned and (
+                    "pain management" in cleaned or "painmanagement" in cleaned
+                ):
+                    return "aiken neurosciences and pain management llc"
+
+                if len(cleaned.split()) > 8:
+                    return None
+
+                generic_noise = [
+                    "year old",
+                    "presents to",
+                    "hours then heat",
+                    "chronic opioid use",
+                ]
+                if any(marker in cleaned for marker in generic_noise):
+                    return None
+
+                return cleaned
+
         if field == "reason_for_request":
             if isinstance(value, str):
                 cleaned = value.strip().lower()
                 cleaned = cleaned.replace("bilateral", " ")
                 cleaned = re.sub(r"[^a-z0-9,;/ ]", " ", cleaned)
                 cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+                if cleaned in {
+                    "is medically reasonable and necessary",
+                    "medically reasonable and necessary",
+                    "reasonable and necessary",
+                    "necessary",
+                }:
+                    return None
 
                 chunks = []
                 for part in re.split(r"[,;/]|\band\b", cleaned):
@@ -596,6 +697,17 @@ class ValidatorEngine:
                 cleaned = value.strip().lower()
                 cleaned = re.sub(r"\s+", " ", cleaned)
 
+                cervical_markers = [
+                    "cervical",
+                    "cervicalgia",
+                    "neck pain",
+                    "c spine",
+                    "c-spine",
+                    "cervical spondylosis",
+                ]
+                if any(marker in cleaned for marker in cervical_markers):
+                    return "cervical_spine_condition"
+
                 lumbar_markers = [
                     "low back pain",
                     "back pain",
@@ -610,6 +722,9 @@ class ValidatorEngine:
                 ]
                 if any(marker in cleaned for marker in lumbar_markers):
                     return "lumbar_spine_condition"
+
+                if "radiculopathy" in cleaned:
+                    return "spine_radiculopathy_condition"
 
                 return cleaned if cleaned else None
 
@@ -633,6 +748,21 @@ class ValidatorEngine:
         raw = " ".join(raw.split())
 
         if not raw:
+            return None
+
+        collapsed = raw.replace(" ", "")
+        label_fragments = (
+            "dateofbirth",
+            "birthdate",
+            "patientname",
+            "veteranname",
+            "fullname",
+            "membername",
+            "telehealthconsent",
+        )
+        if any(fragment in collapsed for fragment in label_fragments):
+            return None
+        if "birth" in collapsed and any(fragment in collapsed for fragment in ("phone", "phos", "dob")):
             return None
 
         junk_tokens = {
@@ -735,6 +865,111 @@ class ValidatorEngine:
                     return True
 
         return False
+
+    def has_contextually_acceptable_npi_variation(self, packet):
+        observations = list((getattr(packet, "field_observations", {}) or {}).get("npi", []) or [])
+        if len(observations) < 2:
+            return False
+
+        normalized = [
+            self.normalize_conflict_value("npi", observation.get("value"))
+            for observation in observations
+        ]
+        distinct_values = sorted({value for value in normalized if value})
+        if len(distinct_values) <= 1:
+            return False
+
+        counts = {}
+        for value in normalized:
+            if not value:
+                continue
+            counts[value] = counts.get(value, 0) + 1
+
+        if counts:
+            max_count = max(counts.values())
+            if max_count >= max(2, len(observations) - 1):
+                return True
+
+        context_markers = {
+            "pcp",
+            "primary care provider",
+            "patient's care team",
+            "care team",
+        }
+
+        contextual_hits = 0
+        for observation in observations:
+            snippet = str(observation.get("snippet") or "").lower()
+            matched_text = str(observation.get("matched_text") or "").lower()
+            anchor = str(observation.get("anchor_label") or "").lower()
+            combined = f"{snippet} {matched_text} {anchor}"
+            if any(marker in combined for marker in context_markers):
+                contextual_hits += 1
+
+        return contextual_hits >= max(1, len(observations) - 1)
+
+    def has_mixed_episode_history(self, packet, field):
+        observations = list((getattr(packet, "field_observations", {}) or {}).get(field, []) or [])
+        if len(observations) < 2:
+            return False
+
+        regions = set()
+        historical_like = 0
+        considered = 0
+
+        for observation in observations:
+            value = observation.get("value")
+            regions.update(self.infer_regions_for_field_value(field, value))
+
+            snippet = str(observation.get("snippet") or "").lower()
+            matched_text = str(observation.get("matched_text") or "").lower()
+            combined = f"{snippet} {matched_text}"
+            doc_type = str(observation.get("document_type") or "unknown").lower()
+
+            considered += 1
+            if (
+                doc_type == "unknown"
+                or any(marker in combined for marker in [
+                    "problems reviewed",
+                    "problems not reviewed",
+                    "past medical history",
+                    "chief complaint",
+                    "patient's care team",
+                    "encounter date",
+                ])
+            ):
+                historical_like += 1
+
+        if len(regions) < 2:
+            return False
+
+        return historical_like >= max(1, considered // 2)
+
+    def infer_regions_for_field_value(self, field, value):
+        regions = set()
+
+        if field in {"reason_for_request", "diagnosis"} and isinstance(value, str):
+            cleaned = value.lower()
+            if any(marker in cleaned for marker in ["cervical", "cervicalgia", "neck pain", "c-spine", "c spine"]):
+                regions.add("cervical")
+            if any(marker in cleaned for marker in ["lumbar", "lumbago", "low back", "back pain", "sciatica"]):
+                regions.add("lumbar")
+            if "migraine" in cleaned or "headache" in cleaned:
+                regions.add("head")
+            if "radiculopathy" in cleaned and not regions:
+                regions.add("spine")
+
+        if field == "icd_codes" and isinstance(value, list):
+            for code in value:
+                normalized = str(code).strip().upper()
+                if normalized.startswith("M54.2") or normalized.startswith("M47.812"):
+                    regions.add("cervical")
+                elif normalized.startswith("M54.5") or normalized.startswith("M54.4") or normalized.startswith("M51"):
+                    regions.add("lumbar")
+                elif normalized.startswith("G43"):
+                    regions.add("head")
+
+        return regions
 
     def get_field_severity(self, field):
         if field in self.HIGH_SEVERITY_FIELDS:

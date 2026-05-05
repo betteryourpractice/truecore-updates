@@ -274,6 +274,18 @@ clean_build()
 
 print("\nBuilding TrueCore Engine...\n")
 
+ENGINE_EXCLUDES = [
+    "paddleocr",
+    "paddle",
+    "baidubce",
+    "modelscope",
+]
+
+engine_exclude_args = " ".join(
+    f"--exclude-module={module_name}"
+    for module_name in ENGINE_EXCLUDES
+)
+
 engine_cmd = (
     f'{sys.executable} -m PyInstaller '
     f'--clean '
@@ -286,6 +298,7 @@ engine_cmd = (
     f'--hidden-import=PySide6.QtCore '
     f'--hidden-import=PySide6.QtGui '
     f'--hidden-import=PySide6.QtWidgets '
+    f'{engine_exclude_args} '
     f'"{ENGINE_APP}"'
 )
 

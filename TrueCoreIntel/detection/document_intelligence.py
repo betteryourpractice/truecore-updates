@@ -252,6 +252,7 @@ class DocumentIntelligenceAnalyzer:
     def build_document_spans(self, page_entries):
         spans = []
         current = None
+        entry_by_page = {entry["page"]: entry for entry in page_entries}
 
         for entry in page_entries:
             if current and current["document_type"] == entry["document_type"] and current["end_page"] == entry["page"] - 1:
@@ -266,24 +267,84 @@ class DocumentIntelligenceAnalyzer:
                 "end_page": entry["page"],
                 "page_indices": [entry["page"]],
                 "confidences": [entry["confidence"]],
+                "bridged_pages": [],
             }
             spans.append(current)
 
+        merged_spans = []
+        index = 0
+        while index < len(spans):
+            current = dict(spans[index])
+            current.setdefault("bridged_pages", [])
+            lookahead = index + 1
+
+            while lookahead < len(spans):
+                candidate = spans[lookahead]
+                if candidate["document_type"] != current["document_type"]:
+                    break
+
+                gap_pages = list(range(current["end_page"] + 1, candidate["start_page"]))
+                gap_entries = [entry_by_page.get(page) for page in gap_pages if entry_by_page.get(page)]
+
+                if not self.should_bridge_document_gap(current, candidate, gap_entries):
+                    break
+
+                current["end_page"] = candidate["end_page"]
+                current["page_indices"].extend(candidate["page_indices"])
+                current["confidences"].extend(candidate["confidences"])
+                current["bridged_pages"].extend(gap_pages)
+                lookahead += 1
+
+            merged_spans.append(current)
+            index = lookahead
+
         built = []
-        for index, span in enumerate(spans, start=1):
+        for index, span in enumerate(merged_spans, start=1):
             avg_confidence = round(sum(span["confidences"]) / max(len(span["confidences"]), 1), 2)
+            bridged_pages = sorted(set(span.get("bridged_pages", [])))
+            full_page_indices = sorted(set(span["page_indices"] + bridged_pages))
             built.append({
                 "span_id": index,
                 "document_type": span["document_type"],
                 "start_page": span["start_page"],
                 "end_page": span["end_page"],
-                "page_count": len(span["page_indices"]),
+                "page_count": len(full_page_indices),
+                "classified_page_count": len(span["page_indices"]),
                 "average_confidence": avg_confidence,
                 "cohesion": "strong" if len(span["page_indices"]) > 1 and avg_confidence >= 0.72 else "stable" if avg_confidence >= 0.55 else "fragile",
-                "page_indices": list(span["page_indices"]),
+                "page_indices": full_page_indices,
+                "bridged_pages": bridged_pages,
             })
 
         return built
+
+    def should_bridge_document_gap(self, current_span, candidate_span, gap_entries):
+        if not gap_entries:
+            return False
+
+        if current_span.get("document_type") != candidate_span.get("document_type"):
+            return False
+
+        if len(gap_entries) > 2:
+            return False
+
+        if any(entry.get("document_type") != "unknown" for entry in gap_entries):
+            return False
+
+        if float(current_span.get("confidences", [0])[-1] or 0.0) < 0.55:
+            return False
+
+        if float(candidate_span.get("confidences", [0])[0] or 0.0) < 0.55:
+            return False
+
+        for entry in gap_entries:
+            if entry.get("text_length", 0) > 420 and entry.get("structured_hint_count", 0) >= 2:
+                return False
+
+            if entry.get("scan_quality", {}).get("band") == "good" and entry.get("field_zone_count", 0) >= 4:
+                return False
+
+        return True
 
     def build_attachment_links(self, page_entries, spans):
         span_by_page = {}

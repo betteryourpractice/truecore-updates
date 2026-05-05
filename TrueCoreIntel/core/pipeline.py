@@ -1,3 +1,5 @@
+from time import perf_counter
+
 from TrueCoreIntel.detection.document_detector import DocumentDetector
 from TrueCoreIntel.core.post_review_intelligence import PostReviewIntelligenceEngine
 from TrueCoreIntel.extraction.extractor_engine import ExtractorEngine
@@ -20,20 +22,27 @@ class TrueCorePipeline:
 
     def run(self, packet):
         packet.links["pipeline_stage_trace"] = []
-        packet = self.detector.detect(packet)
-        self.record_stage(packet, "detection")
-        packet = self.extractor.extract(packet)
-        self.record_stage(packet, "extraction")
-        packet = self.validator.validate(packet)
-        self.record_stage(packet, "validation")
-        packet = self.intelligence.evaluate(packet)
-        self.record_stage(packet, "intelligence")
-        packet = self.reviewer.review(packet)
-        self.record_stage(packet, "review")
-        packet = self.post_reviewer.enrich(packet)
-        self.record_stage(packet, "post_review_intelligence")
-        packet = self.learning.learn(packet)
-        self.record_stage(packet, "learning")
+        packet.metrics.setdefault("pipeline_stage_timings", {})
+        pipeline_start = perf_counter()
+
+        stages = [
+            ("detection", self.detector.detect),
+            ("extraction", self.extractor.extract),
+            ("validation", self.validator.validate),
+            ("intelligence", self.intelligence.evaluate),
+            ("review", self.reviewer.review),
+            ("post_review_intelligence", self.post_reviewer.enrich),
+            ("learning", self.learning.learn),
+        ]
+
+        for stage_name, stage_fn in stages:
+            stage_start = perf_counter()
+            packet = stage_fn(packet)
+            elapsed = perf_counter() - stage_start
+            packet.metrics.setdefault("pipeline_stage_timings", {})[stage_name] = round(elapsed, 3)
+            self.record_stage(packet, stage_name, elapsed)
+
+        packet.metrics["pipeline_total_seconds"] = round(perf_counter() - pipeline_start, 3)
 
         packet.output["packet_label"] = self.build_packet_label(packet)
         packet.output["packet_score"] = packet.packet_score
@@ -89,11 +98,12 @@ class TrueCorePipeline:
 
         return packet
 
-    def record_stage(self, packet, stage_name):
+    def record_stage(self, packet, stage_name, elapsed_seconds=None):
         packet.links.setdefault("pipeline_stage_trace", [])
         packet.links["pipeline_stage_trace"].append({
             "stage": stage_name,
             "status": "completed",
+            "duration_seconds": round(float(elapsed_seconds), 3) if elapsed_seconds is not None else None,
             "detected_document_count": len(getattr(packet, "detected_documents", set()) or []),
             "field_count": len(getattr(packet, "fields", {}) or {}),
             "missing_field_count": len(getattr(packet, "missing_fields", []) or []),

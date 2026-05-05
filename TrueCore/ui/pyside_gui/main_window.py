@@ -1,4 +1,5 @@
 from PySide6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QWidget,
     QVBoxLayout,
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from PySide6.QtGui import QIcon, QColor, QPixmap, QFont
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer, QObject, QThread, Signal
 
 import os
 import csv
@@ -29,6 +30,7 @@ import re
 from datetime import datetime
 
 from TrueCore.utils.logging_system import LOG_FILE, LEGACY_LOG_FILE, log_event, mask_phi
+from TrueCore.utils.admin_auth import ensure_admin_auth_config, verify_admin_password
 from TrueCore.utils.runtime_info import (
     ensure_runtime_environment,
     get_version,
@@ -44,12 +46,67 @@ from TrueCore.core.case_memory import (
     get_recent_packet_events,
     get_recent_packet_runs,
     memory_totals,
+    parse_intel_summary,
 )
 from TrueCore.export.workbook_export import export_patient
 from TrueCore.medical.icd_lookup import load_icd_codes
 
 
-ADMIN_PASSWORD = "athena"
+def build_processing_error_result(file_path, error_text):
+
+    return {
+        "_processing_error": True,
+        "file": file_path,
+        "score": 0,
+        "fields": {},
+        "forms": [],
+        "issues": [f"Packet processing failed: {error_text}"],
+        "fixes": ["Retry packet analysis after reviewing the packet and logs."],
+        "intel": {
+            "display": {
+                "packet_strength": "error",
+                "submission_readiness": "needs_review",
+                "review_priority": "high",
+                "denial_risk": "high",
+                "workflow_queue": "review_queue",
+                "next_action": "retry_analysis",
+                "issue_details": [f"Packet processing failed: {error_text}"],
+                "priority_fixes": ["Retry packet analysis after reviewing the packet and logs."],
+                "review_rationale": ["The packet could not be fully analyzed."],
+                "review_flags": ["manual_review_required"],
+            }
+        },
+    }
+
+
+class PacketAnalysisWorker(QObject):
+
+    packet_started = Signal(int, int, str)
+    packet_finished = Signal(int, str, object)
+    finished = Signal()
+
+    def __init__(self, files):
+        super().__init__()
+        self.files = list(files or [])
+
+    def run(self):
+
+        total = len(self.files)
+
+        for index, file_path in enumerate(self.files, start=1):
+            basename = os.path.basename(file_path)
+            self.packet_started.emit(index, total, basename)
+
+            try:
+                result = process_packet(file_path)
+            except Exception as exc:
+                error_text = str(exc)
+                log_event("packet_processing_error", f"{basename} | {error_text}")
+                result = build_processing_error_result(file_path, error_text)
+
+            self.packet_finished.emit(index, file_path, result)
+
+        self.finished.emit()
 
 
 class MainWindow(QMainWindow):
@@ -58,6 +115,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         ensure_runtime_environment()
+        ensure_admin_auth_config()
 
         self.version = get_version()
         _, self.build_timestamp = get_build_info()
@@ -72,6 +130,8 @@ class MainWindow(QMainWindow):
         self.results = {}
         self.scan_diagnostics_dialog = None
         self.scan_diagnostics_view = None
+        self.analysis_thread = None
+        self.analysis_worker = None
 
         load_icd_codes()
 
@@ -341,6 +401,19 @@ class MainWindow(QMainWindow):
         if hasattr(self, "update_background"):
 
             self.update_background()
+
+    def closeEvent(self, event):
+
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            QMessageBox.information(
+                self,
+                "Analysis Running",
+                "Please wait for packet analysis to finish before exiting.",
+            )
+            event.ignore()
+            return
+
+        super().closeEvent(event)
     
     # ----------------------------------------------
     # BACKGROUND UPDATE
@@ -359,6 +432,106 @@ class MainWindow(QMainWindow):
                 )
 
                 self.bg_logo.setPixmap(scaled)
+
+    def set_analysis_controls_enabled(self, enabled):
+
+        for button in [
+            self.btn_select,
+            self.btn_analyze,
+            self.btn_folder,
+            self.btn_export,
+            self.btn_clear,
+            self.btn_admin,
+        ]:
+            button.setEnabled(enabled)
+
+    def append_analysis_result_row(self, file, result):
+
+        icon_base = resource_path("ui/pyside_gui/assets/icons/")
+        basename = os.path.basename(file)
+        score = result.get("score", 0)
+        intel_display = result.get("intel", {}).get("display", {})
+        workbook_summary = self.build_export_summary(result)
+        workbook_summary.update({
+            "packet_confidence": intel_display.get("packet_confidence"),
+            "approval_probability": intel_display.get("approval_probability"),
+            "submission_readiness": intel_display.get("submission_readiness"),
+            "workflow_queue": intel_display.get("workflow_queue"),
+            "next_action": intel_display.get("next_action"),
+            "denial_risk": intel_display.get("denial_risk"),
+        })
+
+        self.results[file] = result
+
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+
+        file_item = QTableWidgetItem(basename)
+        file_item.setIcon(QIcon(icon_base + "folder.svg"))
+        self.table.setItem(row, 0, file_item)
+
+        score_item = QTableWidgetItem(str(score))
+        score_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, 1, score_item)
+
+        status = QTableWidgetItem()
+
+        if result.get("_processing_error"):
+            status.setText("Error")
+            status.setIcon(QIcon(icon_base + "error.svg"))
+            status.setForeground(QColor("#EB5757"))
+            issue_text = (result.get("issues") or ["Packet processing failed."])[0]
+            self.log(f"Packet processing failed for {basename}: {issue_text}")
+        elif score >= 90:
+            status.setText("Approved")
+            status.setIcon(QIcon(icon_base + "check.svg"))
+            status.setForeground(QColor("#27AE60"))
+            export_patient(result.get("fields", {}), file, workbook_summary)
+            self.log(
+                f"Approved packet exported → {basename}",
+                action="packet_processed"
+            )
+        elif score >= 70:
+            status.setText("Needs Review")
+            status.setIcon(QIcon(icon_base + "warning.svg"))
+            status.setForeground(QColor("#F2C94C"))
+        else:
+            status.setText("Rejected")
+            status.setIcon(QIcon(icon_base + "error.svg"))
+            status.setForeground(QColor("#EB5757"))
+
+        self.table.setItem(row, 2, status)
+
+        if not result.get("_processing_error"):
+            triage_packet(file, score, result=result)
+
+        if row == 0:
+            self.table.selectRow(0)
+            self.load_packet_details()
+
+    def on_analysis_packet_started(self, index, total, basename):
+
+        self.log(f"Analyzing {index}/{total}: {basename}")
+
+    def on_analysis_packet_finished(self, index, file_path, result):
+
+        self.append_analysis_result_row(file_path, result)
+
+    def on_analysis_finished(self):
+
+        self.set_analysis_controls_enabled(True)
+
+        if self.table.rowCount() > 0 and self.table.currentRow() < 0:
+            self.table.selectRow(0)
+            self.load_packet_details()
+
+        self.update_scan_diagnostics_button()
+        self.log("Packet analysis complete.")
+
+    def cleanup_analysis_thread(self):
+
+        self.analysis_worker = None
+        self.analysis_thread = None
 
     # -------------------------------------------------
     # UTILITIES
@@ -395,6 +568,304 @@ class MainWindow(QMainWindow):
 
         return str(value)
 
+    def format_packet_field_label(self, name):
+
+        mapping = {
+            "dob": "DOB",
+            "icd_codes": "ICD Codes",
+            "va_icn": "VA ICN",
+            "npi": "NPI",
+        }
+
+        return mapping.get(str(name or "").strip().lower(), self.format_field(str(name or "")))
+
+    def format_packet_display_value(self, label, value):
+
+        if value in (None, "", [], {}):
+            return value
+
+        label_text = str(label or "").strip().lower()
+
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+
+        if isinstance(value, (int, float)) and 0 <= float(value) <= 1:
+            if "probability" in label_text or "confidence" in label_text or "trust score" in label_text:
+                return f"{round(float(value) * 100):.0f}%"
+
+        if isinstance(value, str):
+            if label_text in {
+                "submission readiness",
+                "next action",
+                "workflow queue",
+                "review priority",
+                "packet strength",
+                "denial risk",
+                "support level",
+                "freshness",
+                "escalation",
+                "coherence",
+                "severity",
+                "conservative care",
+                "specialty alignment",
+                "provider history",
+                "benchmark standing",
+                "pipeline state",
+                "reliability",
+                "policy confidence",
+                "verification band",
+            }:
+                return self.format_field(value)
+
+        return value
+
+    def format_review_flag(self, flag):
+
+        normalized = str(flag or "").strip().lower()
+        mapping = {
+            "diagnosis_icd_mismatch": "Diagnosis / ICD mismatch",
+        }
+
+        return mapping.get(normalized, self.format_field(normalized))
+
+    def format_document_type_label(self, document_type):
+
+        mapping = {
+            "cover_sheet": "Submission Cover Sheet",
+            "consent": "Virtual Consent Form",
+            "consult_request": "Consultation & Treatment Request",
+            "seoc": "SEOC",
+            "lomn": "Letter of Medical Necessity",
+            "rfs": "VA Form 10-10172",
+            "clinical_notes": "Clinical Notes",
+            "imaging_report": "MRI / Imaging Report",
+            "conservative_care_summary": "Conservative Care Summary",
+        }
+
+        normalized = str(document_type or "").strip().lower()
+        if not normalized:
+            return ""
+
+        return mapping.get(normalized, self.format_field(normalized))
+
+    def format_source_role_label(self, role):
+
+        mapping = {
+            "va_clinic": "VA",
+            "community_provider": "community provider",
+            "shared": "shared",
+            "patient": "patient",
+        }
+
+        normalized = str(role or "").strip().lower()
+        if not normalized:
+            return ""
+
+        return mapping.get(normalized, self.format_field(normalized))
+
+    def format_concept_source_phrase(self, item):
+
+        concept_key = str((item or {}).get("concept") or "").strip().lower()
+        document_type = str((item or {}).get("document_type") or "").strip()
+        primary_section_role = str((item or {}).get("primary_section_role") or "").strip().lower()
+        role_label = self.format_source_role_label((item or {}).get("source_role"))
+        page_number = (item or {}).get("page_number")
+        page_text = f" on page {page_number}" if page_number not in (None, "", [], {}) else ""
+
+        if document_type and document_type.lower() != "unknown":
+            return f"{self.format_document_type_label(document_type)}{page_text}"
+
+        if concept_key == "request_intent":
+            lead = f"{role_label} request content".strip() if role_label else "request content"
+            return f"{lead}{page_text}"
+
+        if concept_key == "diagnostic_basis":
+            lead = f"{role_label} diagnostic content".strip() if role_label else "diagnostic content"
+            return f"{lead}{page_text}"
+
+        if concept_key == "clinical_justification":
+            if primary_section_role == "imaging_support":
+                lead = f"{role_label} imaging support".strip() if role_label else "imaging support"
+            elif primary_section_role == "justification":
+                lead = f"{role_label} clinical justification".strip() if role_label else "clinical justification"
+            else:
+                lead = f"{role_label} clinical support".strip() if role_label else "clinical support"
+            return f"{lead}{page_text}"
+
+        if concept_key == "routing_admin":
+            lead = f"{role_label} facility and admin content".strip() if role_label else "facility and admin content"
+            return f"{lead}{page_text}"
+
+        if primary_section_role:
+            return f"{self.format_field(primary_section_role)}{page_text}"
+
+        if role_label:
+            return f"{role_label} packet content{page_text}"
+
+        return f"page {page_number}" if page_text else ""
+
+    def format_concept_evidence_item(self, item):
+
+        concept_label = self.format_field((item or {}).get("concept_label") or (item or {}).get("concept"))
+        source_phrase = self.format_concept_source_phrase(item)
+
+        if not concept_label:
+            return ""
+
+        if source_phrase:
+            return f"{concept_label}: Supported by {source_phrase}"
+
+        return concept_label
+
+    def polish_review_rationale_item(self, item):
+
+        text = self.format_detail_value(item)
+
+        concept_patterns = [
+            (r"^Request intent appears in (.+)\.$", "Request intent is supported by {source}."),
+            (r"^Diagnostic basis appears in (.+)\.$", "Diagnostic basis is supported by {source}."),
+            (r"^Clinical justification appears in (.+)\.$", "Clinical justification is supported by {source}."),
+            (r"^Routing and admin details appear in (.+)\.$", "Routing and admin details are supported by {source}."),
+        ]
+
+        for pattern, template in concept_patterns:
+            match = re.match(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            source = str(match.group(1) or "").strip()
+            source = re.sub(r"\brequest intent section\b", "request content", source, flags=re.IGNORECASE)
+            source = re.sub(r"\bdiagnostic basis section\b", "diagnostic content", source, flags=re.IGNORECASE)
+            source = re.sub(r"\bclinical justification section\b", "clinical support", source, flags=re.IGNORECASE)
+            source = re.sub(r"\bidentity admin section\b", "admin content", source, flags=re.IGNORECASE)
+            source = re.sub(r"\brouting followup section\b", "routing follow-up content", source, flags=re.IGNORECASE)
+            return template.format(source=source)
+
+        text = re.sub(r"^Inferred packet profile:\s*", "Packet profile: ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bExpected document family:\s*", "Expected documents: ", text, flags=re.IGNORECASE)
+        return text
+
+    def classify_review_rationale_item(self, item):
+
+        text = self.polish_review_rationale_item(item)
+        normalized = str(text or "").strip().lower()
+
+        if not normalized:
+            return ""
+
+        if normalized.startswith("training or template scaffolding detected"):
+            return "template"
+        if "packet may contain mixed patient or case identifiers" in normalized or "multiple identity signals suggest" in normalized:
+            return "integrity"
+        if "mixed clinical history still needs reviewer alignment" in normalized:
+            return "clinical_alignment"
+        if "diagnosis and icd" in normalized and "aligned" in normalized:
+            return "clinical_alignment"
+        if normalized.startswith("packet profile:"):
+            return "packet_profile"
+        if "critical required fields are missing" in normalized or normalized.startswith("missing required fields"):
+            return "missing_fields"
+        if "required supporting documents are missing" in normalized or normalized.startswith("missing required documents"):
+            return "missing_documents"
+        if normalized.startswith("request intent "):
+            return "concept_request"
+        if normalized.startswith("diagnostic basis "):
+            return "concept_diagnostic"
+        if normalized.startswith("clinical justification "):
+            return "concept_justification"
+        if normalized.startswith("routing and admin details "):
+            return "concept_routing"
+        if "packet has " in normalized or "overall packet strength is weak" in normalized or "packet is weak due" in normalized:
+            return "overall_support"
+        if "field conflicts still require reviewer confirmation" in normalized or "conflicts were found" in normalized:
+            return "conflicts"
+
+        return f"other:{normalized}"
+
+    def polish_review_rationale(self, items, max_items=5):
+
+        if not items:
+            return []
+
+        ordered_categories = [
+            "template",
+            "integrity",
+            "clinical_alignment",
+            "missing_fields",
+            "missing_documents",
+            "overall_support",
+            "packet_profile",
+            "concept_diagnostic",
+            "concept_justification",
+            "concept_request",
+            "concept_routing",
+            "conflicts",
+        ]
+
+        buckets = {}
+        category_order = []
+
+        for raw_item in items:
+            polished = self.polish_review_rationale_item(raw_item)
+            if not polished or polished == "Missing":
+                continue
+
+            category = self.classify_review_rationale_item(polished)
+            if category in buckets:
+                continue
+
+            buckets[category] = polished
+            category_order.append(category)
+
+        sorted_categories = [
+            category
+            for category in ordered_categories
+            if category in buckets
+        ]
+        sorted_categories.extend(
+            category for category in category_order
+            if category not in sorted_categories
+        )
+
+        return [buckets[category] for category in sorted_categories[:max_items]]
+
+    def format_evidence_rating(self, score):
+
+        if score in (None, "", [], {}):
+            return score
+
+        try:
+            numeric_score = float(score)
+        except (TypeError, ValueError):
+            return score
+
+        if numeric_score >= 95:
+            band = "Very strong"
+        elif numeric_score >= 85:
+            band = "Strong"
+        elif numeric_score >= 70:
+            band = "Moderate"
+        else:
+            band = "Limited"
+
+        return f"{band} ({int(round(numeric_score))})"
+
+    def get_issue_display_palette(self, intel_display):
+
+        missing_items = list((intel_display or {}).get("missing_items", []) or [])
+        denial_risk = str((intel_display or {}).get("denial_risk") or "").strip().lower()
+        readiness = str((intel_display or {}).get("submission_readiness") or "").strip().lower()
+
+        if missing_items or denial_risk in {"high", "critical"} or readiness == "not_ready":
+            return {
+                "color": "#EB5757",
+                "accent": "#EB5757",
+            }
+
+        return {
+            "color": "#F2C94C",
+            "accent": "#F2994A",
+        }
+
     def format_scan_mode(self, mode):
 
         normalized = str(mode or "").strip().lower()
@@ -421,12 +892,63 @@ class MainWindow(QMainWindow):
 
         return mask_phi(display_value)
 
+    def format_runtime_value(self, value):
+
+        if value in (None, "", [], {}):
+            return "—"
+
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+
+        if numeric_value < 1:
+            return f"{numeric_value:.2f}s"
+
+        return f"{numeric_value:.1f}s"
+
+    def build_metric_tiles(self, tiles):
+
+        rendered_tiles = []
+
+        for tile in tiles:
+            if not isinstance(tile, dict):
+                continue
+
+            title = str(tile.get("title") or "").strip()
+            value = self.format_detail_value(tile.get("value"))
+            accent = str(tile.get("accent") or "#57B6FF")
+            subtitle = str(tile.get("subtitle") or "").strip()
+
+            if not title:
+                continue
+
+            subtitle_html = (
+                f"<div style=\"color:#9CA3AF; font-size:11px; margin-top:4px;\">{html.escape(subtitle)}</div>"
+                if subtitle else ""
+            )
+
+            rendered_tiles.append(
+                "<div style=\"display:inline-block; width:31%; min-width:180px; vertical-align:top; "
+                "margin:0 1.5% 12px 0; padding:12px 14px; background-color:#10161E; "
+                f"border:1px solid #253243; border-top:3px solid {accent}; border-radius:8px; box-sizing:border-box;\">"
+                f"<div style=\"color:#FFFFFF; font-size:12px; font-weight:600;\">{html.escape(title)}</div>"
+                f"<div style=\"color:{accent}; font-size:24px; font-weight:700; margin-top:6px;\">{html.escape(value)}</div>"
+                f"{subtitle_html}</div>"
+            )
+
+        if not rendered_tiles:
+            return "<div style=\"color:#9CA3AF;\">No summary metrics</div>"
+
+        return "<div style=\"margin-right:-1.5%;\">" + "".join(rendered_tiles) + "</div>"
+
     def build_detail_card(self, title, body_html, accent_color="#2F80ED", margin_top=12):
 
         return (
             f"<div style=\"margin-top:{margin_top}px; padding:12px 14px; "
             f"background-color:#10161E; border:1px solid #253243; "
-            f"border-left:3px solid {accent_color}; border-radius:8px;\">"
+            f"border-left:3px solid {accent_color}; border-radius:8px; "
+            f"box-sizing:border-box; overflow-wrap:anywhere; word-break:break-word;\">"
             f"<div style=\"color:#FFFFFF; font-weight:700; margin-bottom:8px;\">"
             f"{html.escape(title)}</div>{body_html}</div>"
         )
@@ -444,9 +966,11 @@ class MainWindow(QMainWindow):
 
             rendered_rows.append(
                 "<tr>"
-                f"<td valign=\"top\" style=\"color:#FFFFFF; font-weight:600; padding:3px 12px 3px 0; width:38%;\">"
+                f"<td valign=\"top\" style=\"color:#FFFFFF; font-weight:600; padding:3px 12px 3px 0; width:38%; "
+                f"white-space:normal; overflow-wrap:anywhere; word-break:break-word;\">"
                 f"{html.escape(str(label))}</td>"
-                f"<td valign=\"top\" style=\"color:{row_color}; padding:3px 0;\">"
+                f"<td valign=\"top\" style=\"color:{row_color}; padding:3px 0; "
+                f"white-space:normal; overflow-wrap:anywhere; word-break:break-word;\">"
                 f"{html.escape(display_value)}</td>"
                 "</tr>"
             )
@@ -455,7 +979,8 @@ class MainWindow(QMainWindow):
             return "<div style=\"color:#9CA3AF;\">No data</div>"
 
         return (
-            "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;\">"
+            "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" "
+            "style=\"border-collapse:collapse; table-layout:fixed; width:100%;\">"
             + "".join(rendered_rows) +
             "</table>"
         )
@@ -470,11 +995,46 @@ class MainWindow(QMainWindow):
 
         for item in items:
             lines.append(
-                f"<div style=\"color:{color}; margin:0 0 4px 0;\">"
+                f"<div style=\"color:{color}; margin:0 0 6px 0; white-space:normal; "
+                f"overflow-wrap:anywhere; word-break:break-word; line-height:1.45;\">"
                 f"{html.escape(bullet)} {html.escape(self.format_detail_value(item))}</div>"
             )
 
         return self.build_detail_card(title, "".join(lines), accent_color=accent)
+
+    def build_issue_breakdown_section(self, title, issue_groups, color, accent_color=None, bullet="⚠"):
+
+        if not issue_groups:
+            return ""
+
+        accent = accent_color or color
+        detail_color = "#F7C2C2" if color == "#EB5757" else "#F8E7A1"
+        groups_html = []
+
+        for group in issue_groups:
+            if isinstance(group, dict):
+                group_title = self.format_detail_value(group.get("title"))
+                details = list(group.get("details") or [])
+            else:
+                group_title = self.format_detail_value(group)
+                details = []
+
+            detail_lines = []
+            for detail in details:
+                detail_lines.append(
+                    f"<div style=\"color:{detail_color}; margin:4px 0 0 22px; white-space:normal; "
+                    f"overflow-wrap:anywhere; word-break:break-word; line-height:1.4;\">"
+                    f"• {html.escape(self.format_detail_value(detail))}</div>"
+                )
+
+            groups_html.append(
+                f"<div style=\"margin:0 0 8px 0;\">"
+                f"<div style=\"color:{color}; white-space:normal; overflow-wrap:anywhere; "
+                f"word-break:break-word; line-height:1.45;\">{html.escape(bullet)} {html.escape(group_title)}</div>"
+                f"{''.join(detail_lines)}</div>"
+            )
+
+        return self.build_detail_card(title, "".join(groups_html), accent_color=accent)
 
     def build_html_grid_table(self, headers, rows, column_colors=None):
 
@@ -1009,6 +1569,181 @@ class MainWindow(QMainWindow):
 
         return sections
 
+    def build_condensed_advanced_intel_sections(self, result):
+
+        intel = self.intel_payload(result)
+        evidence = intel.get("evidence_intelligence", {}) or {}
+        clinical = intel.get("clinical_intelligence", {}) or {}
+        human_loop = intel.get("human_in_the_loop_intelligence", {}) or {}
+        memory = intel.get("memory_intelligence", {}) or {}
+        triage = intel.get("triage_intelligence", {}) or {}
+        insight = intel.get("insight_intelligence", {}) or {}
+        benchmark = intel.get("benchmark_intelligence", {}) or {}
+        orchestration = intel.get("orchestration_intelligence", {}) or {}
+        recovery = intel.get("recovery_intelligence", {}) or {}
+        policy = intel.get("policy_intelligence", {}) or {}
+        deployment = intel.get("deployment_intelligence", {}) or {}
+        validation = intel.get("validation_intelligence", {}) or {}
+
+        sections = []
+
+        evidence_rows = [
+            ("Support Level", self.format_packet_display_value("Support Level", self.get_nested_value(evidence, "evidence_sufficiency_modeling", "support_level"))),
+            ("Evidence Rating", self.format_evidence_rating(self.get_nested_value(evidence, "evidence_sufficiency_modeling", "score"))),
+            ("Freshness", self.format_packet_display_value("Freshness", self.get_nested_value(evidence, "evidence_freshness_validation", "status"))),
+            ("Escalation", self.format_packet_display_value("Escalation", self.get_nested_value(evidence, "evidence_escalation_recommendation", "level"))),
+        ]
+        if any(value not in (None, "", [], {}) for _, value in evidence_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Evidence Intelligence",
+                    self.build_detail_table(evidence_rows, value_color="#57B6FF", show_missing=False),
+                    accent_color="#57B6FF",
+                )
+            )
+
+        clinical_rows = [
+            ("Coherence", self.format_packet_display_value("Coherence", self.get_nested_value(clinical, "clinical_coherence_scoring", "band"))),
+            ("Coherence Score", self.get_nested_value(clinical, "clinical_coherence_scoring", "score")),
+            ("Severity", self.format_packet_display_value("Severity", self.get_nested_value(clinical, "severity_inference_engine", "level"))),
+            ("Conservative Care", self.format_packet_display_value("Conservative Care", self.get_nested_value(clinical, "conservative_care_verification", "status"))),
+            ("Specialty Alignment", self.format_packet_display_value("Specialty Alignment", self.get_nested_value(clinical, "specialty_alignment_validation", "status"))),
+        ]
+        if any(value not in (None, "", [], {}) for _, value in clinical_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Clinical Intelligence",
+                    self.build_detail_table(clinical_rows, value_color="#57B6FF", show_missing=False),
+                    accent_color="#57B6FF",
+                )
+            )
+
+        clinical_gaps = self.get_nested_value(clinical, "clinical_gap_detection", "gaps", default=[])
+        if clinical_gaps:
+            sections.append(
+                self.build_bullet_section(
+                    "Clinical Gaps",
+                    clinical_gaps[:3],
+                    color="#F2C94C",
+                    accent_color="#F2994A",
+                )
+            )
+
+        operations_rows = [
+            ("Trust Score", self.format_packet_display_value("Trust Score", self.get_nested_value(human_loop, "trust_score_modeling", "trust_score"))),
+            ("Provider History", self.format_packet_display_value("Provider History", self.get_nested_value(memory, "provider_relationship_memory", "quality_trend"))),
+            ("Benchmark Standing", self.format_packet_display_value("Benchmark Standing", self.get_nested_value(benchmark, "internal_benchmark_engine", "standing"))),
+        ]
+        if any(value not in (None, "", [], {}) for _, value in operations_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Operational Snapshot",
+                    self.build_detail_table(operations_rows, value_color="#9B8CFF", show_missing=False),
+                    accent_color="#9B8CFF",
+                )
+            )
+
+        insight_actions = self.get_nested_value(insight, "insight_action_recommendation", "actions", default=[])
+        if insight_actions:
+            sections.append(
+                self.build_bullet_section(
+                    "Insight Actions",
+                    insight_actions[:3],
+                    color="#9B8CFF",
+                    accent_color="#9B8CFF",
+                )
+            )
+
+        system_rows = [
+            ("Verification Score", self.get_nested_value(validation, "deep_verification_score", "score")),
+            ("Verification Band", self.format_packet_display_value("Verification Band", self.get_nested_value(validation, "deep_verification_score", "band"))),
+            ("Pipeline State", self.format_packet_display_value("Pipeline State", self.get_nested_value(orchestration, "pipeline_health_state_machine", "state"))),
+            ("Reliability", self.format_packet_display_value("Reliability", self.get_nested_value(recovery, "reliability_scoring", "band"))),
+            ("Policy Confidence", self.format_packet_display_value("Policy Confidence", self.get_nested_value(policy, "policy_compliance_confidence", "band"))),
+        ]
+        if any(value not in (None, "", [], {}) for _, value in system_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Review Controls",
+                    self.build_detail_table(system_rows, value_color="#56CCF2", show_missing=False),
+                    accent_color="#56CCF2",
+                )
+            )
+
+        concept_links = list(self.get_nested_value(validation, "concept_evidence_tracebacks", default=[]) or [])
+        concept_items = []
+        for item in concept_links[:4]:
+            rendered = self.format_concept_evidence_item(item)
+            if rendered:
+                concept_items.append(rendered)
+
+        if concept_items:
+            sections.append(
+                self.build_bullet_section(
+                    "Concept Evidence",
+                    concept_items,
+                    color="#57B6FF",
+                    accent_color="#57B6FF",
+                )
+            )
+
+        traceback_links = list(self.get_nested_value(validation, "evidence_traceback_links", default=[]) or [])
+        field_priority = {
+            "diagnosis": 0,
+            "icd_codes": 1,
+            "reason_for_request": 2,
+            "ordering_provider": 3,
+            "ordering_doctor": 3,
+            "provider": 4,
+            "authorization_number": 5,
+            "va_icn": 6,
+            "patient_name": 7,
+            "name": 7,
+            "dob": 8,
+        }
+        sorted_traceback_links = sorted(
+            traceback_links,
+            key=lambda item: (
+                field_priority.get(str(item.get("field") or "").strip().lower(), 99),
+                item.get("page_number") or 999,
+            ),
+        )
+        seen_fields = set()
+        traceback_items = []
+        for item in sorted_traceback_links:
+            field_key = str(item.get("field") or "").strip().lower()
+            if not field_key or field_key in seen_fields:
+                continue
+            seen_fields.add(field_key)
+            field_name = self.format_field(item.get("field"))
+            value = self.format_detail_value(item.get("value"))
+            document_type = str(item.get("document_type") or "").strip()
+            page_number = item.get("page_number") or "?"
+            source_role = item.get("source_role")
+            metadata_parts = []
+            if document_type and document_type.lower() != "unknown":
+                metadata_parts.append(self.format_field(document_type))
+            if source_role:
+                metadata_parts.append(self.format_field(source_role))
+            metadata_text = f" | {' | '.join(metadata_parts)}" if metadata_parts else ""
+            traceback_items.append(
+                f"{field_name}: {value}{metadata_text} | page {page_number}"
+            )
+            if len(traceback_items) >= 4:
+                break
+
+        if traceback_items:
+            sections.append(
+                self.build_bullet_section(
+                    "Source Traceback Highlights",
+                    traceback_items,
+                    color="#56CCF2",
+                    accent_color="#56CCF2",
+                )
+            )
+
+        return sections
+
     def build_export_summary(self, result):
 
         intel = self.intel_payload(result)
@@ -1323,7 +2058,327 @@ class MainWindow(QMainWindow):
         self.log(f"Recorded outcome for {os.path.basename(file_path)}: {outcome}")
         QMessageBox.information(self, "Record Outcome", f"Saved outcome: {outcome}")
 
+    def build_packet_details_html_condensed(self, file, result):
+
+        score = result.get("score", 0)
+        forms = result.get("forms", [])
+        fields = result.get("fields", {})
+        issues = result.get("issues", [])
+        fixes = result.get("fixes", [])
+        intel_display = result.get("intel", {}).get("display", {})
+        issue_items = intel_display.get("issue_details") or issues
+        issue_groups = intel_display.get("issue_breakdowns") or [{"title": item, "details": []} for item in issue_items]
+        fix_items = intel_display.get("priority_fixes") or fixes
+        review_rationale = (
+            intel_display.get("review_rationale")
+            or intel_display.get("why_weak")
+            or intel_display.get("approval_rationale")
+            or []
+        )
+        review_rationale = self.polish_review_rationale(review_rationale, max_items=5)
+        issue_palette = self.get_issue_display_palette(intel_display)
+
+        score_color = "#27AE60" if score >= 90 else "#F2C94C" if score >= 70 else "#EB5757"
+
+        summary_rows = [
+            ("Packet", os.path.basename(file)),
+            ("Score", score),
+        ]
+        decision_rows = []
+
+        if intel_display:
+            summary_rows.extend(
+                [
+                    ("Packet Strength", intel_display.get("packet_strength")),
+                    ("Submission Readiness", intel_display.get("submission_readiness")),
+                    ("Approval Probability", intel_display.get("approval_probability")),
+                    ("Next Action", intel_display.get("next_action")),
+                ]
+            )
+            decision_rows = [
+                ("Packet Confidence", intel_display.get("packet_confidence")),
+                ("Denial Risk", intel_display.get("denial_risk")),
+                ("Workflow Queue", intel_display.get("workflow_queue")),
+                ("Review Priority", intel_display.get("review_priority")),
+            ]
+
+        sections = [
+            self.build_detail_card(
+                "Packet Summary",
+                self.build_detail_table(summary_rows, value_color="#57B6FF", show_missing=False),
+                accent_color="#57B6FF",
+                margin_top=0,
+            ),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in decision_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Decision Snapshot",
+                    self.build_detail_table(decision_rows, value_color="#57B6FF", show_missing=False),
+                    accent_color="#57B6FF",
+                )
+            )
+
+        sections.extend(
+            [
+                self.build_bullet_section(
+                    "Forms Detected",
+                    forms,
+                    color="#6FCF97",
+                    accent_color="#27AE60",
+                    bullet="✓",
+                ),
+                self.build_detail_card(
+                    "Fields",
+                    self.build_detail_table(
+                        [(self.format_field(key), value) for key, value in fields.items()],
+                        value_color="#DCE6F2",
+                    ),
+                    accent_color="#5B8DEF",
+                ),
+                self.build_bullet_section(
+                    "Issues",
+                    issue_items,
+                    color="#EB5757",
+                    accent_color="#EB5757",
+                    bullet="⚠",
+                ),
+                self.build_bullet_section(
+                    "Missing Items",
+                    intel_display.get("missing_items", []),
+                    color="#EB5757",
+                    accent_color="#EB5757",
+                ),
+                self.build_bullet_section(
+                    "Priority Fixes",
+                    fix_items,
+                    color="#F2C94C",
+                    accent_color="#F2C94C",
+                ),
+                self.build_bullet_section(
+                    "Review Flags",
+                    [self.format_review_flag(flag) for flag in intel_display.get("review_flags", [])],
+                    color="#F2994A",
+                    accent_color="#F2994A",
+                ),
+                self.build_bullet_section(
+                    "Review Rationale",
+                    review_rationale,
+                    color="#57B6FF",
+                    accent_color="#57B6FF",
+                ),
+            ]
+        )
+
+        if intel_display:
+            sections.extend(self.build_condensed_advanced_intel_sections(result))
+
+        rendered_sections = "".join(section for section in sections if section)
+
+        return (
+            "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+            "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+            f"{rendered_sections}</body></html>"
+        )
+
+    def build_packet_details_html_v2(self, file, result):
+
+        score = result.get("score", 0)
+        forms = result.get("forms", [])
+        fields = result.get("fields", {})
+        issues = result.get("issues", [])
+        fixes = result.get("fixes", [])
+        intel_display = result.get("intel", {}).get("display", {})
+        issue_items = intel_display.get("issue_details") or issues
+        issue_groups = intel_display.get("issue_breakdowns") or [{"title": item, "details": []} for item in issue_items]
+        fix_items = intel_display.get("priority_fixes") or fixes
+        review_rationale = (
+            intel_display.get("review_rationale")
+            or intel_display.get("why_weak")
+            or intel_display.get("approval_rationale")
+            or []
+        )
+        review_rationale = self.polish_review_rationale(review_rationale, max_items=5)
+        issue_palette = self.get_issue_display_palette(intel_display)
+
+        key_field_order = [
+            "patient_name",
+            "dob",
+            "authorization_number",
+            "va_icn",
+            "ordering_doctor",
+            "referring_doctor",
+            "provider",
+            "facility",
+            "clinic_name",
+            "service_date_range",
+            "npi",
+            "signature_present",
+        ]
+        clinical_field_order = [
+            "reason_for_request",
+            "diagnosis",
+            "icd_codes",
+            "symptom",
+            "location",
+            "procedure",
+        ]
+
+        score_color = "#27AE60" if score >= 90 else "#F2C94C" if score >= 70 else "#EB5757"
+
+        summary_rows = [
+            ("Packet", os.path.basename(file)),
+            ("Score", score),
+        ]
+        decision_rows = []
+
+        if intel_display:
+            summary_rows.extend(
+                [
+                    ("Packet Strength", self.format_packet_display_value("Packet Strength", intel_display.get("packet_strength"))),
+                    ("Submission Readiness", self.format_packet_display_value("Submission Readiness", intel_display.get("submission_readiness"))),
+                    ("Approval Probability", self.format_packet_display_value("Approval Probability", intel_display.get("approval_probability"))),
+                    ("Next Action", self.format_packet_display_value("Next Action", intel_display.get("next_action"))),
+                ]
+            )
+            decision_rows = [
+                ("Packet Confidence", self.format_packet_display_value("Packet Confidence", intel_display.get("packet_confidence"))),
+                ("Packet Profile", self.format_packet_display_value("Packet Profile", intel_display.get("packet_profile"))),
+                ("Denial Risk", self.format_packet_display_value("Denial Risk", intel_display.get("denial_risk"))),
+                ("Workflow Queue", self.format_packet_display_value("Workflow Queue", intel_display.get("workflow_queue"))),
+                ("Review Priority", self.format_packet_display_value("Review Priority", intel_display.get("review_priority"))),
+            ]
+
+        key_rows = []
+        clinical_rows = []
+        remaining_fields = dict(fields or {})
+
+        for field_name in key_field_order:
+            if field_name in remaining_fields:
+                key_rows.append(
+                    (
+                        self.format_packet_field_label(field_name),
+                        self.format_packet_display_value(field_name, remaining_fields.pop(field_name)),
+                    )
+                )
+
+        for field_name in clinical_field_order:
+            if field_name in remaining_fields:
+                clinical_rows.append(
+                    (
+                        self.format_packet_field_label(field_name),
+                        self.format_packet_display_value(field_name, remaining_fields.pop(field_name)),
+                    )
+                )
+
+        for field_name, value in remaining_fields.items():
+            key_rows.append(
+                (
+                    self.format_packet_field_label(field_name),
+                    self.format_packet_display_value(field_name, value),
+                )
+            )
+
+        sections = [
+            self.build_detail_card(
+                "Packet Summary",
+                self.build_detail_table(summary_rows, value_color=score_color, show_missing=False),
+                accent_color=score_color,
+                margin_top=0,
+            ),
+        ]
+
+        if any(value not in (None, "", [], {}) for _, value in decision_rows):
+            sections.append(
+                self.build_detail_card(
+                    "Decision Snapshot",
+                    self.build_detail_table(decision_rows, value_color="#57B6FF", show_missing=False),
+                    accent_color="#57B6FF",
+                )
+            )
+
+        sections.extend(
+            [
+                self.build_bullet_section(
+                    "Documents Found",
+                    forms,
+                    color="#6FCF97",
+                    accent_color="#27AE60",
+                    bullet="✓",
+                ),
+                self.build_bullet_section(
+                    "Expected Documents",
+                    intel_display.get("expected_documents", []),
+                    color="#6FCF97",
+                    accent_color="#27AE60",
+                    bullet="•",
+                ),
+                self.build_detail_card(
+                    "Key Packet Fields",
+                    self.build_detail_table(
+                        key_rows,
+                        value_color="#DCE6F2",
+                        show_missing=False,
+                    ),
+                    accent_color="#5B8DEF",
+                ),
+                self.build_detail_card(
+                    "Clinical Fields",
+                    self.build_detail_table(
+                        clinical_rows,
+                        value_color="#DCE6F2",
+                        show_missing=False,
+                    ),
+                    accent_color="#5B8DEF",
+                ),
+                self.build_issue_breakdown_section(
+                    "Issues",
+                    issue_groups,
+                    color=issue_palette["color"],
+                    accent_color=issue_palette["accent"],
+                ),
+                self.build_bullet_section(
+                    "Missing Items",
+                    intel_display.get("missing_items", []),
+                    color="#EB5757",
+                    accent_color="#EB5757",
+                ),
+                self.build_bullet_section(
+                    "Priority Fixes",
+                    fix_items,
+                    color="#F2C94C",
+                    accent_color="#F2C94C",
+                ),
+                self.build_bullet_section(
+                    "Review Flags",
+                    [self.format_review_flag(flag) for flag in intel_display.get("review_flags", [])],
+                    color=issue_palette["color"],
+                    accent_color=issue_palette["accent"],
+                ),
+                self.build_bullet_section(
+                    "Review Rationale",
+                    review_rationale,
+                    color="#57B6FF",
+                    accent_color="#57B6FF",
+                ),
+            ]
+        )
+
+        if intel_display:
+            sections.extend(self.build_condensed_advanced_intel_sections(result))
+
+        rendered_sections = "".join(section for section in sections if section)
+
+        return (
+            "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+            "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+            f"{rendered_sections}</body></html>"
+        )
+
     def build_packet_details_html(self, file, result):
+
+        return self.build_packet_details_html_v2(file, result)
 
         score = result.get("score", 0)
         forms = result.get("forms", [])
@@ -1451,74 +2506,160 @@ class MainWindow(QMainWindow):
         log_event("files_loaded", f"{len(files)} files")
 
     # -------------------------------------------------
-    # ANALYZE
+    # ANALYZE (LEGACY BLOCKING PATH)
     # -------------------------------------------------
 
-    def analyze_packets(self):
+    def analyze_packets_legacy_blocking(self):
 
         icon_base=resource_path("ui/pyside_gui/assets/icons/")
         self.table.setRowCount(0)
+        self.results = {}
 
-        for file in self.files:
+        if not self.files:
+            self.log("No packets loaded for analysis.")
+            return
 
-            result=process_packet(file)
+        total = len(self.files)
+        self.btn_analyze.setEnabled(False)
+        self.btn_folder.setEnabled(False)
 
-            score=result.get("score",0)
-            intel_display=result.get("intel",{}).get("display",{})
-            workbook_summary=self.build_export_summary(result)
-            workbook_summary.update({
-                "packet_confidence": intel_display.get("packet_confidence"),
-                "approval_probability": intel_display.get("approval_probability"),
-                "submission_readiness": intel_display.get("submission_readiness"),
-                "workflow_queue": intel_display.get("workflow_queue"),
-                "next_action": intel_display.get("next_action"),
-                "denial_risk": intel_display.get("denial_risk"),
-            })
+        try:
+            for index, file in enumerate(self.files, start=1):
+                basename = os.path.basename(file)
+                self.log(f"Analyzing {index}/{total}: {basename}")
+                QApplication.processEvents()
 
-            self.results[file]=result
+                try:
+                    result = process_packet(file)
+                except Exception as exc:
+                    error_text = str(exc)
+                    log_event("packet_processing_error", f"{basename} | {error_text}")
+                    self.log(f"Packet processing failed for {basename}: {error_text}")
+                    result = {
+                        "_processing_error": True,
+                        "file": file,
+                        "score": 0,
+                        "fields": {},
+                        "forms": [],
+                        "issues": [f"Packet processing failed: {error_text}"],
+                        "fixes": ["Retry packet analysis after reviewing the packet and logs."],
+                        "intel": {
+                            "display": {
+                                "packet_strength": "error",
+                                "submission_readiness": "needs_review",
+                                "review_priority": "high",
+                                "denial_risk": "high",
+                                "workflow_queue": "review_queue",
+                                "next_action": "retry_analysis",
+                                "issue_details": [f"Packet processing failed: {error_text}"],
+                                "priority_fixes": ["Retry packet analysis after reviewing the packet and logs."],
+                                "review_rationale": ["The packet could not be fully analyzed."],
+                                "review_flags": ["manual_review_required"],
+                            }
+                        },
+                    }
 
-            row=self.table.rowCount()
-            self.table.insertRow(row)
+                score=result.get("score",0)
+                intel_display=result.get("intel",{}).get("display",{})
+                workbook_summary=self.build_export_summary(result)
+                workbook_summary.update({
+                    "packet_confidence": intel_display.get("packet_confidence"),
+                    "approval_probability": intel_display.get("approval_probability"),
+                    "submission_readiness": intel_display.get("submission_readiness"),
+                    "workflow_queue": intel_display.get("workflow_queue"),
+                    "next_action": intel_display.get("next_action"),
+                    "denial_risk": intel_display.get("denial_risk"),
+                })
 
-            file_item=QTableWidgetItem(os.path.basename(file))
-            file_item.setIcon(QIcon(icon_base+"folder.svg"))
-            self.table.setItem(row,0,file_item)
+                self.results[file]=result
 
-            score_item=QTableWidgetItem(str(score))
-            score_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(row,1,score_item)
+                row=self.table.rowCount()
+                self.table.insertRow(row)
 
-            status=QTableWidgetItem()
+                file_item=QTableWidgetItem(basename)
+                file_item.setIcon(QIcon(icon_base+"folder.svg"))
+                self.table.setItem(row,0,file_item)
 
-            if score>=90:
-                status.setText("Approved")
-                status.setIcon(QIcon(icon_base+"check.svg"))
-                status.setForeground(QColor("#27AE60"))
-                export_patient(result.get("fields",{}), file, workbook_summary)
-                self.log(
-                    f"Approved packet exported → {os.path.basename(file)}",
-                    action="packet_processed"
-                )
+                score_item=QTableWidgetItem(str(score))
+                score_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row,1,score_item)
 
-            elif score>=70:
-                status.setText("Needs Review")
-                status.setIcon(QIcon(icon_base+"warning.svg"))
-                status.setForeground(QColor("#F2C94C"))
+                status=QTableWidgetItem()
 
-            else:
-                status.setText("Rejected")
-                status.setIcon(QIcon(icon_base+"error.svg"))
-                status.setForeground(QColor("#EB5757"))
+                if result.get("_processing_error"):
+                    status.setText("Error")
+                    status.setIcon(QIcon(icon_base+"error.svg"))
+                    status.setForeground(QColor("#EB5757"))
+                elif score>=90:
+                    status.setText("Approved")
+                    status.setIcon(QIcon(icon_base+"check.svg"))
+                    status.setForeground(QColor("#27AE60"))
+                    export_patient(result.get("fields",{}), file, workbook_summary)
+                    self.log(
+                        f"Approved packet exported → {basename}",
+                        action="packet_processed"
+                    )
+                elif score>=70:
+                    status.setText("Needs Review")
+                    status.setIcon(QIcon(icon_base+"warning.svg"))
+                    status.setForeground(QColor("#F2C94C"))
+                else:
+                    status.setText("Rejected")
+                    status.setIcon(QIcon(icon_base+"error.svg"))
+                    status.setForeground(QColor("#EB5757"))
 
-            self.table.setItem(row,2,status)
+                self.table.setItem(row,2,status)
 
-            triage_packet(file, score, result=result)
+                if not result.get("_processing_error"):
+                    triage_packet(file, score, result=result)
 
-        if self.table.rowCount() > 0:
+                if row == 0:
+                    self.table.selectRow(0)
+                    self.load_packet_details()
+
+                QApplication.processEvents()
+        finally:
+            self.btn_analyze.setEnabled(True)
+            self.btn_folder.setEnabled(True)
+
+        if self.table.rowCount() > 0 and self.table.currentRow() < 0:
             self.table.selectRow(0)
+            self.load_packet_details()
 
         self.update_scan_diagnostics_button()
         self.log("Packet analysis complete.")
+
+    def analyze_packets(self):
+
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            self.log("Packet analysis is already running.")
+            return
+
+        self.table.setRowCount(0)
+        self.results = {}
+        self.details.clear()
+
+        if not self.files:
+            self.log("No packets loaded for analysis.")
+            return
+
+        self.update_scan_diagnostics_button()
+        self.set_analysis_controls_enabled(False)
+
+        self.analysis_thread = QThread(self)
+        self.analysis_worker = PacketAnalysisWorker(list(self.files))
+        self.analysis_worker.moveToThread(self.analysis_thread)
+
+        self.analysis_thread.started.connect(self.analysis_worker.run)
+        self.analysis_worker.packet_started.connect(self.on_analysis_packet_started)
+        self.analysis_worker.packet_finished.connect(self.on_analysis_packet_finished)
+        self.analysis_worker.finished.connect(self.on_analysis_finished)
+        self.analysis_worker.finished.connect(self.analysis_thread.quit)
+        self.analysis_worker.finished.connect(self.analysis_worker.deleteLater)
+        self.analysis_thread.finished.connect(self.analysis_thread.deleteLater)
+        self.analysis_thread.finished.connect(self.cleanup_analysis_thread)
+
+        self.analysis_thread.start()
 
     # -------------------------------------------------
     # PACKET DETAILS
@@ -1538,7 +2679,18 @@ class MainWindow(QMainWindow):
             self.update_scan_diagnostics_button()
             return
 
-        self.details.setHtml(self.build_packet_details_html(file, result))
+        try:
+            self.details.setHtml(self.build_packet_details_html(file, result))
+        except Exception as exc:
+            self.details.setHtml(
+                "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+                "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+                "<div style=\"color:#EB5757; font-weight:700; margin-bottom:8px;\">"
+                "Packet Details failed to render</div>"
+                f"<div style=\"color:#F7C2C2;\">{html.escape(str(exc))}</div>"
+                "</body></html>"
+            )
+            self.log(f"Packet Details render failed for {os.path.basename(file)}: {exc}")
         self.update_scan_diagnostics_button()
 
         if self.scan_diagnostics_dialog and self.scan_diagnostics_dialog.isVisible():
@@ -1737,19 +2889,109 @@ class MainWindow(QMainWindow):
         self.log("Results cleared.")
 
     # -------------------------------------------------
+    # ADMIN AUTH
+    # -------------------------------------------------
+
+    def prompt_admin_password(self):
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Admin Access")
+        dialog.setModal(True)
+        dialog.resize(420, 190)
+        dialog.setStyleSheet(
+            """
+            QDialog {
+                background-color: #11161E;
+                color: #E5E7EB;
+            }
+            QLabel#adminTitle {
+                color: #FFFFFF;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            QLabel#adminSubtitle {
+                color: #9CA3AF;
+                font-size: 12px;
+            }
+            QLineEdit {
+                background-color: #0B1017;
+                color: #E5E7EB;
+                border: 1px solid #2B3A4D;
+                border-radius: 6px;
+                padding: 10px 12px;
+                selection-background-color: #2F80ED;
+            }
+            QPushButton {
+                background-color: #1A2430;
+                color: #E5E7EB;
+                border: 1px solid #2B3A4D;
+                border-radius: 6px;
+                padding: 9px 16px;
+                min-width: 92px;
+            }
+            QPushButton:hover {
+                background-color: #223247;
+            }
+            QPushButton#primaryButton {
+                background-color: #2F80ED;
+                border: 1px solid #2F80ED;
+                color: #FFFFFF;
+                font-weight: 600;
+            }
+            QPushButton#primaryButton:hover {
+                background-color: #3B8FFF;
+            }
+            """
+        )
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("Admin Panel Access")
+        title.setObjectName("adminTitle")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Enter the admin password to open system controls and diagnostics.")
+        subtitle.setWordWrap(True)
+        subtitle.setObjectName("adminSubtitle")
+        layout.addWidget(subtitle)
+
+        password_input = QLineEdit()
+        password_input.setEchoMode(QLineEdit.Password)
+        password_input.setPlaceholderText("Admin password")
+        layout.addWidget(password_input)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+
+        cancel_button = QPushButton("Cancel")
+        unlock_button = QPushButton("Unlock")
+        unlock_button.setObjectName("primaryButton")
+        unlock_button.setDefault(True)
+
+        cancel_button.clicked.connect(dialog.reject)
+        unlock_button.clicked.connect(dialog.accept)
+        password_input.returnPressed.connect(dialog.accept)
+
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(unlock_button)
+        layout.addLayout(button_row)
+
+        password_input.setFocus()
+
+        accepted = dialog.exec() == QDialog.Accepted
+        return password_input.text(), accepted
+
+    # -------------------------------------------------
     # ADMIN PANEL
     # -------------------------------------------------
 
     def open_admin_panel(self):
 
-        password,ok=QInputDialog.getText(
-            self,
-            "Admin Access",
-            "Enter Admin Password:",
-            QLineEdit.Password
-        )
+        password,ok = self.prompt_admin_password()
 
-        if not ok or password != ADMIN_PASSWORD:
+        if not ok or not verify_admin_password(password):
             QMessageBox.warning(self,"Access Denied","Incorrect password.")
             return
 
@@ -1789,14 +3031,15 @@ class MainWindow(QMainWindow):
                     activity_lines = [line.rstrip() for line in f.readlines() if line.strip()]
 
             totals = memory_totals()
-            recent_runs = get_recent_packet_runs(8)
-            recent_events = get_recent_packet_events(10)
+            recent_runs = get_recent_packet_runs(20)
+            recent_events = get_recent_packet_events(12)
             recent_activity = [mask_phi(line) for line in activity_lines[-80:]]
 
             unmasked_dob_count = len(re.findall(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", "\n".join(recent_activity)))
             unmasked_va_count = len(re.findall(r"\bVA\d{6,}\b", "\n".join(recent_activity), flags=re.IGNORECASE))
             unmasked_email_count = len(re.findall(r"\b[\w.\-]+@[\w.\-]+\.\w+\b", "\n".join(recent_activity)))
             unmasked_phone_count = len(re.findall(r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b", "\n".join(recent_activity)))
+            phi_audit_clean = not any([unmasked_dob_count, unmasked_va_count, unmasked_email_count, unmasked_phone_count])
 
             blocks = changelog.split("VERSION:")
             blocks = [b.strip() for b in blocks if b.strip()]
@@ -1808,18 +3051,178 @@ class MainWindow(QMainWindow):
                 for block in blocks
             ) or "<div style=\"color:#9CA3AF;\">No changelog entries found.</div>"
 
+            def average(values):
+                cleaned = [float(value) for value in values if value not in (None, "", [], {})]
+                if not cleaned:
+                    return None
+                return round(sum(cleaned) / len(cleaned), 2)
+
+            def safe_issue_list(run):
+                try:
+                    return list(json.loads(run.get("issues_json") or "[]") or [])
+                except Exception:
+                    return []
+
+            scores = [run.get("score") for run in recent_runs if run.get("score") not in (None, "")]
+            packet_confidences = [run.get("packet_confidence") for run in recent_runs if run.get("packet_confidence") not in (None, "")]
+            runtimes = [run.get("runtime_seconds") for run in recent_runs if run.get("runtime_seconds") not in (None, "")]
+            intel_runtimes = [run.get("intel_runtime_seconds") for run in recent_runs if run.get("intel_runtime_seconds") not in (None, "")]
+            host_runtimes = [run.get("host_runtime_seconds") for run in recent_runs if run.get("host_runtime_seconds") not in (None, "")]
+            ocr_confidences = [run.get("ocr_confidence") for run in recent_runs if run.get("ocr_confidence") not in (None, "")]
+            intel_summaries = [parse_intel_summary(run) for run in recent_runs]
+
+            avg_score = average(scores)
+            avg_confidence = average(packet_confidences)
+            avg_runtime = average(runtimes)
+            avg_intel_runtime = average(intel_runtimes)
+            avg_host_runtime = average(host_runtimes)
+            avg_ocr_confidence = average(ocr_confidences)
+
+            engine_metric_averages = {}
+            for key in [
+                "intake_seconds",
+                "primary_pipeline_seconds",
+                "retry_evaluation_seconds",
+                "fallback_reload_seconds",
+                "fallback_pipeline_seconds",
+                "pipeline_total_seconds",
+                "process_path_total_seconds",
+            ]:
+                engine_metric_averages[key] = average(
+                    [
+                        (summary.get("engine_metrics", {}) or {}).get(key)
+                        for summary in intel_summaries
+                    ]
+                )
+
+            pipeline_stage_averages = {}
+            for stage_name in [
+                "detection",
+                "extraction",
+                "validation",
+                "intelligence",
+                "review",
+                "post_review_intelligence",
+                "learning",
+            ]:
+                pipeline_stage_averages[stage_name] = average(
+                    [
+                        (summary.get("pipeline_stage_timings", {}) or {}).get(stage_name)
+                        for summary in intel_summaries
+                    ]
+                )
+
+            status_counts = {"approved": 0, "needs_review": 0, "rejected": 0}
+            high_risk_count = 0
+            slow_packet_count = 0
+            analysis_mode_counts = {}
+            recurring_issue_counter = {}
+
+            for run in recent_runs:
+                status = str(run.get("status") or "").strip().lower()
+                if status in status_counts:
+                    status_counts[status] += 1
+
+                risk = str(run.get("denial_risk") or "").strip().lower()
+                if risk in {"high", "critical"}:
+                    high_risk_count += 1
+
+                runtime_value = run.get("runtime_seconds")
+                try:
+                    if runtime_value is not None and float(runtime_value) >= 30:
+                        slow_packet_count += 1
+                except Exception:
+                    pass
+
+                analysis_mode = str(run.get("analysis_mode") or "unknown").strip().lower()
+                analysis_mode_counts[analysis_mode] = analysis_mode_counts.get(analysis_mode, 0) + 1
+
+                for issue in safe_issue_list(run):
+                    recurring_issue_counter[issue] = recurring_issue_counter.get(issue, 0) + 1
+
+            recurring_issues = [
+                f"{issue} ({count})"
+                for issue, count in sorted(
+                    recurring_issue_counter.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:6]
+            ]
+
+            dominant_mode = "-"
+            if analysis_mode_counts:
+                dominant_mode = max(analysis_mode_counts.items(), key=lambda item: item[1])[0]
+                dominant_mode = self.format_field(dominant_mode)
+
+            overview_tiles = [
+                {
+                    "title": "Packets Remembered",
+                    "value": totals.get("packet_count", 0),
+                    "subtitle": f"{totals.get('case_count', 0)} cases | {totals.get('provider_count', 0)} providers",
+                    "accent": "#57B6FF",
+                },
+                {
+                    "title": "Recent Avg Score",
+                    "value": "—" if avg_score is None else int(round(avg_score)),
+                    "subtitle": "Last 20 packet runs",
+                    "accent": "#F2C94C",
+                },
+                {
+                    "title": "Avg Runtime",
+                    "value": self.format_runtime_value(avg_runtime),
+                    "subtitle": f"Mode: {dominant_mode}",
+                    "accent": "#9B8CFF",
+                },
+                {
+                    "title": "Slow Packets",
+                    "value": slow_packet_count,
+                    "subtitle": "Recent runs over 30s",
+                    "accent": "#F2994A" if slow_packet_count else "#27AE60",
+                },
+                {
+                    "title": "High Risk Packets",
+                    "value": high_risk_count,
+                    "subtitle": "Recent high / critical denial risk",
+                    "accent": "#EB5757" if high_risk_count else "#27AE60",
+                },
+                {
+                    "title": "PHI Audit",
+                    "value": "Clean" if phi_audit_clean else "Review",
+                    "subtitle": "Recent activity log masking",
+                    "accent": "#27AE60" if phi_audit_clean else "#EB5757",
+                },
+            ]
+
             run_rows = [
                 [
                     self.format_admin_value(run.get("file_name"), missing="Unknown"),
-                    self.format_admin_value(run.get("patient_name"), missing="Unknown"),
                     run.get("score"),
+                    self.format_runtime_value(run.get("runtime_seconds")),
                     self.format_field(run.get("status") or "unknown"),
                     self.format_field(run.get("denial_risk") or "unknown"),
-                    run.get("triage_priority") or "-",
+                    self.format_field(run.get("analysis_mode") or "unknown"),
                     self.format_field(run.get("scan_quality_band") or "unknown"),
                     self.format_admin_value(run.get("provider_name"), missing="Unknown"),
                 ]
                 for run in recent_runs
+            ]
+
+            slowest_runs = sorted(
+                recent_runs,
+                key=lambda run: float(run.get("runtime_seconds") or 0.0),
+                reverse=True,
+            )[:6]
+
+            slow_run_rows = [
+                [
+                    self.format_admin_value(run.get("file_name"), missing="Unknown"),
+                    self.format_runtime_value(run.get("runtime_seconds")),
+                    run.get("score"),
+                    self.format_field(run.get("analysis_mode") or "unknown"),
+                    self.format_field(run.get("denial_risk") or "unknown"),
+                    self.format_field(run.get("scan_quality_band") or "unknown"),
+                ]
+                for run in slowest_runs
             ]
 
             event_rows = [
@@ -1839,7 +3242,43 @@ class MainWindow(QMainWindow):
                 + "</div>"
             ) if recent_activity else "<div style=\"color:#9CA3AF;\">No activity log entries found.</div>"
 
+            performance_rows = [
+                ("Average Total Runtime", self.format_runtime_value(avg_runtime)),
+                ("Average Intel Runtime", self.format_runtime_value(avg_intel_runtime)),
+                ("Average Host Runtime", self.format_runtime_value(avg_host_runtime)),
+                ("Average Intake Runtime", self.format_runtime_value(engine_metric_averages.get("intake_seconds"))),
+                ("Average Pipeline Runtime", self.format_runtime_value(engine_metric_averages.get("pipeline_total_seconds"))),
+                ("Average OCR Confidence", "—" if avg_ocr_confidence is None else f"{avg_ocr_confidence:.2f}"),
+                ("Slow Packets (>30s)", slow_packet_count),
+                ("Dominant Analysis Mode", dominant_mode),
+            ]
+
+            pipeline_stage_rows = [
+                ("Detection", self.format_runtime_value(pipeline_stage_averages.get("detection"))),
+                ("Extraction", self.format_runtime_value(pipeline_stage_averages.get("extraction"))),
+                ("Validation", self.format_runtime_value(pipeline_stage_averages.get("validation"))),
+                ("Intelligence", self.format_runtime_value(pipeline_stage_averages.get("intelligence"))),
+                ("Review", self.format_runtime_value(pipeline_stage_averages.get("review"))),
+                ("Post Review", self.format_runtime_value(pipeline_stage_averages.get("post_review_intelligence"))),
+                ("Learning", self.format_runtime_value(pipeline_stage_averages.get("learning"))),
+            ]
+
+            quality_rows = [
+                ("Recent Average Score", "—" if avg_score is None else int(round(avg_score))),
+                ("Average Packet Confidence", "—" if avg_confidence is None else f"{int(round(avg_confidence * 100))}%"),
+                ("Approved", status_counts["approved"]),
+                ("Needs Review", status_counts["needs_review"]),
+                ("Rejected", status_counts["rejected"]),
+                ("High / Critical Risk", high_risk_count),
+            ]
+
             sections = [
+                self.build_detail_card(
+                    "Operations Overview",
+                    self.build_metric_tiles(overview_tiles),
+                    accent_color="#57B6FF",
+                    margin_top=0,
+                ),
                 self.build_detail_card(
                     "System Summary",
                     self.build_detail_table(
@@ -1847,6 +3286,7 @@ class MainWindow(QMainWindow):
                             ("Engine Version", self.version),
                             ("Build Time", self.build_timestamp or "Unknown"),
                             ("PHI Masking", "Active"),
+                            ("Threaded Analysis", "Enabled"),
                             ("Activity Log Path", activity_path if os.path.exists(activity_path) else "Missing"),
                             ("Legacy Log Mirror", LEGACY_LOG_FILE if os.path.exists(LEGACY_LOG_FILE) else "Missing"),
                             ("Packets Remembered", totals.get("packet_count", 0)),
@@ -1857,7 +3297,57 @@ class MainWindow(QMainWindow):
                         value_color="#57B6FF",
                     ),
                     accent_color="#57B6FF",
-                    margin_top=0,
+                ),
+                self.build_detail_card(
+                    "Performance Snapshot",
+                    self.build_detail_table(
+                        performance_rows,
+                        value_color="#9B8CFF",
+                        show_missing=False,
+                    ),
+                    accent_color="#9B8CFF",
+                ),
+                self.build_detail_card(
+                    "Intel Stage Timings",
+                    self.build_detail_table(
+                        pipeline_stage_rows,
+                        value_color="#9B8CFF",
+                        show_missing=False,
+                    ),
+                    accent_color="#9B8CFF",
+                ),
+                self.build_detail_card(
+                    "Quality Snapshot",
+                    self.build_detail_table(
+                        quality_rows,
+                        value_color="#57B6FF",
+                        show_missing=False,
+                    ),
+                    accent_color="#57B6FF",
+                ),
+                self.build_bullet_section(
+                    "Top Recurring Issues",
+                    recurring_issues,
+                    color="#F2C94C",
+                    accent_color="#F2994A",
+                ),
+                self.build_detail_card(
+                    "Slowest Recent Packets",
+                    self.build_html_grid_table(
+                        ["File", "Runtime", "Score", "Mode", "Risk", "Scan"],
+                        slow_run_rows,
+                        column_colors=["#DCE6F2", "#9B8CFF", "#F2C94C", "#57B6FF", "#EB5757", "#DCE6F2"],
+                    ),
+                    accent_color="#9B8CFF",
+                ),
+                self.build_detail_card(
+                    "Recent Packet Runs",
+                    self.build_html_grid_table(
+                        ["File", "Score", "Runtime", "Status", "Risk", "Mode", "Scan", "Provider"],
+                        run_rows,
+                        column_colors=["#DCE6F2", "#F2C94C", "#9B8CFF", "#DCE6F2", "#EB5757", "#57B6FF", "#DCE6F2", "#57B6FF"],
+                    ),
+                    accent_color="#57B6FF",
                 ),
                 self.build_detail_card(
                     "PHI Masking Audit",
@@ -1868,18 +3358,9 @@ class MainWindow(QMainWindow):
                             ("Raw Email Tokens In Recent Log", unmasked_email_count),
                             ("Raw Phone Tokens In Recent Log", unmasked_phone_count),
                         ],
-                        value_color="#6FCF97" if not any([unmasked_dob_count, unmasked_va_count, unmasked_email_count, unmasked_phone_count]) else "#EB5757",
+                        value_color="#6FCF97" if phi_audit_clean else "#EB5757",
                     ),
-                    accent_color="#27AE60" if not any([unmasked_dob_count, unmasked_va_count, unmasked_email_count, unmasked_phone_count]) else "#EB5757",
-                ),
-                self.build_detail_card(
-                    "Recent Packet Runs",
-                    self.build_html_grid_table(
-                        ["File", "Patient", "Score", "Status", "Risk", "Priority", "Scan", "Provider"],
-                        run_rows,
-                        column_colors=["#DCE6F2", "#57B6FF", "#F2C94C", "#DCE6F2", "#EB5757", "#6FCF97", "#DCE6F2", "#57B6FF"],
-                    ),
-                    accent_color="#57B6FF",
+                    accent_color="#27AE60" if phi_audit_clean else "#EB5757",
                 ),
                 self.build_detail_card(
                     "Recent Events",

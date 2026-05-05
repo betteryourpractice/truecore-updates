@@ -68,6 +68,8 @@ FORM_NAME_MAP = {
     "lomn": "Letter of Medical Necessity",
     "rfs": "VA Form 10-10172",
     "clinical_notes": "Clinical Notes",
+    "imaging_report": "MRI / Imaging Report",
+    "conservative_care_summary": "Conservative Care Summary",
 }
 
 FORM_ORDER = {
@@ -78,6 +80,60 @@ FORM_ORDER = {
     "Letter of Medical Necessity": 50,
     "Virtual Consent Form": 60,
     "Clinical Notes": 70,
+    "Conservative Care Summary": 80,
+    "MRI / Imaging Report": 90,
+}
+
+PACKET_PROFILE_LABELS = {
+    "full_submission": "Full Submission",
+    "authorization_request": "Authorization Request",
+    "clinical_minimal": "Clinical Minimal",
+}
+
+PACKET_PROFILE_EXPECTED_DOCUMENTS = {
+    "full_submission": [
+        "Submission Cover Sheet",
+        "VA Form 10-10172",
+        "Consultation & Treatment Request",
+        "SEOC",
+        "Letter of Medical Necessity",
+        "Virtual Consent Form",
+        "Clinical Notes",
+    ],
+    "authorization_request": [
+        "Consultation & Treatment Request",
+        "Clinical Notes",
+        "VA Form 10-10172",
+    ],
+    "clinical_minimal": [
+        "Clinical Notes",
+    ],
+}
+
+CONCEPT_LABEL_MAP = {
+    "request_intent": "request intent",
+    "diagnostic_basis": "diagnostic basis",
+    "clinical_justification": "clinical justification",
+    "routing_admin": "routing and admin support",
+}
+
+FIELD_CONCEPT_FAMILY = {
+    "reason_for_request": "request_intent",
+    "procedure": "request_intent",
+    "service_date_range": "request_intent",
+    "diagnosis": "diagnostic_basis",
+    "icd_codes": "diagnostic_basis",
+    "symptom": "diagnostic_basis",
+    "ordering_provider": "routing_admin",
+    "ordering_doctor": "routing_admin",
+    "referring_provider": "routing_admin",
+    "referring_doctor": "routing_admin",
+    "provider": "routing_admin",
+    "authorization_number": "routing_admin",
+    "va_icn": "routing_admin",
+    "claim_number": "routing_admin",
+    "facility": "routing_admin",
+    "clinic_name": "routing_admin",
 }
 
 TEXT_REPLACEMENTS = {
@@ -304,7 +360,80 @@ def _rewrite_unfilled_document_language(text, packet):
             "Required supporting documents are missing or incomplete",
         )
 
+    rewritten = _rewrite_document_gap_language(rewritten, packet)
     return rewritten
+
+
+def _get_concept_tracebacks(packet):
+    validation = dict(getattr(packet, "validation_intelligence", {}) or {})
+    return list(
+        validation.get("concept_evidence_tracebacks", [])
+        or getattr(packet, "links", {}).get("concept_evidence_tracebacks", [])
+        or []
+    )
+
+
+def _get_concept_entry(packet, concept_name):
+    concept_name = str(concept_name or "").strip().lower()
+    for entry in _get_concept_tracebacks(packet):
+        if str(entry.get("concept") or "").strip().lower() == concept_name:
+            return dict(entry)
+    return {}
+
+
+def _format_human_label(value):
+    return str(value or "").replace("_", " ").strip().title()
+
+
+def _describe_concept_source(entry):
+    if not entry:
+        return None
+
+    document_type = str(entry.get("document_type") or "").strip()
+    page_number = entry.get("page_number")
+    primary_section_role = str(entry.get("primary_section_role") or "").strip()
+
+    if document_type and document_type.lower() != "unknown":
+        label = _format_document_type_name(document_type)
+        return f"{label} on page {page_number}" if page_number else label
+
+    if primary_section_role:
+        label = f"{str(primary_section_role).replace('_', ' ')} section"
+        return f"{label} on page {page_number}" if page_number else label
+
+    if page_number:
+        return f"page {page_number}"
+
+    return None
+
+
+def _rewrite_document_gap_language(text, packet):
+    rewritten = str(text or "")
+    match = re.fullmatch(
+        r"\s*(?P<doc>[A-Za-z0-9_& ]+?)\s+document\s+is\s+present\s+but\s+missing\s+expected\s+field:\s*(?P<field>[A-Za-z0-9_]+)\.?\s*",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return rewritten
+
+    doc = str(match.group("doc") or "").strip()
+    field = str(match.group("field") or "").strip().lower()
+    concept_name = FIELD_CONCEPT_FAMILY.get(field)
+    field_label = FIELD_LABEL_MAP.get(field, field.replace("_", " "))
+    pretty_doc = FORM_NAME_MAP.get(doc.lower(), _format_human_label(doc))
+
+    if not concept_name:
+        return f"{pretty_doc} does not show an explicit {field_label}."
+
+    concept_entry = _get_concept_entry(packet, concept_name)
+    concept_label = CONCEPT_LABEL_MAP.get(concept_name, concept_name.replace("_", " "))
+    source_text = _describe_concept_source(concept_entry)
+
+    if source_text:
+        return f"{pretty_doc} does not show an explicit {field_label}; related {concept_label} appears in {source_text}."
+
+    return f"{pretty_doc} does not show an explicit {field_label}."
 
 
 def _filter_icd_codes(icd_codes, approved_icd_codes=None):
@@ -442,12 +571,329 @@ def _build_fixes(packet, packet_output, legacy_result=None):
     return fixes
 
 
+def _format_page_ranges(pages):
+    cleaned = sorted({int(page) for page in pages if str(page).isdigit()})
+    if not cleaned:
+        return ""
+
+    ranges = []
+    start = cleaned[0]
+    end = cleaned[0]
+
+    for page in cleaned[1:]:
+        if page == end + 1:
+            end = page
+            continue
+
+        ranges.append(f"{start}-{end}" if start != end else str(start))
+        start = end = page
+
+    ranges.append(f"{start}-{end}" if start != end else str(start))
+    return ", ".join(ranges)
+
+
+def _infer_region_from_text(text):
+    cleaned = str(text or "").lower()
+    if not cleaned:
+        return None
+
+    if any(marker in cleaned for marker in ["cervical", "cervicalgia", "neck pain", "c-spine", "c spine"]):
+        return "cervical"
+
+    if any(marker in cleaned for marker in ["lumbar", "lumbago", "low back", "back pain", "sciatica"]):
+        return "lumbar"
+
+    if "migraine" in cleaned or "headache" in cleaned:
+        return "head"
+
+    if "radiculopathy" in cleaned:
+        return "spine"
+
+    return None
+
+
+def _infer_region_from_icds(value):
+    regions = set()
+    for code in value if isinstance(value, list) else []:
+        normalized = str(code).strip().upper()
+        if normalized.startswith(("M54.2", "M47.812")):
+            regions.add("cervical")
+        elif normalized.startswith(("M54.5", "M54.50", "M54.4", "M51")):
+            regions.add("lumbar")
+        elif normalized.startswith("G43"):
+            regions.add("head")
+    return regions
+
+
+def _get_field_observations(packet, field_name):
+    return list((getattr(packet, "field_observations", {}) or {}).get(field_name, []) or [])
+
+
+def _describe_region_split(packet, field_name):
+    observations = _get_field_observations(packet, field_name)
+    region_pages = {}
+
+    for observation in observations:
+        if field_name == "icd_codes":
+            regions = _infer_region_from_icds(observation.get("value"))
+        else:
+            regions = set()
+            region = _infer_region_from_text(observation.get("value"))
+            if region:
+                regions.add(region)
+
+        page_number = observation.get("page_number")
+        for region in regions:
+            region_pages.setdefault(region, set()).add(page_number)
+
+    return _render_region_history(region_pages)
+
+
+def _collect_region_history(packet, field_name):
+    observations = _get_field_observations(packet, field_name)
+    region_pages = {}
+
+    for observation in observations:
+        if field_name == "icd_codes":
+            regions = _infer_region_from_icds(observation.get("value"))
+        else:
+            regions = set()
+            region = _infer_region_from_text(observation.get("value"))
+            if region:
+                regions.add(region)
+
+        page_number = observation.get("page_number")
+        for region in regions:
+            region_pages.setdefault(region, set()).add(page_number)
+
+    return region_pages
+
+
+def _render_region_history(region_pages):
+    if len(region_pages) < 2:
+        return None
+
+    preferred_order = ["lumbar", "cervical", "head", "spine"]
+    parts = []
+    for region in preferred_order:
+        pages = region_pages.get(region)
+        if not pages:
+            continue
+        parts.append(f"{region} pages {_format_page_ranges(pages)}")
+
+    if len(parts) < 2:
+        return None
+
+    if "lumbar" in region_pages and "cervical" in region_pages:
+        prefix = "Mixed lumbar and cervical history"
+    else:
+        prefix = "Mixed episode history"
+
+    return prefix + ": " + "; ".join(parts[:3])
+
+
+def _build_issue_breakdowns(packet):
+    breakdowns = []
+    review_flags = set(getattr(packet, "review_flags", []) or [])
+
+    if "diagnosis_icd_mismatch" in review_flags:
+        region_pages = (
+            _collect_region_history(packet, "diagnosis")
+            or _collect_region_history(packet, "reason_for_request")
+            or _collect_region_history(packet, "icd_codes")
+        )
+        details = []
+        for region in ["lumbar", "cervical", "head", "spine"]:
+            pages = (region_pages or {}).get(region)
+            if pages:
+                details.append(f"{region.title()} history on pages {_format_page_ranges(pages)}")
+        breakdowns.append({
+            "title": "Diagnosis / ICD mismatch",
+            "details": details,
+        })
+
+    return breakdowns
+
+
+def _build_concept_review_notes(packet):
+    notes = []
+    concept_tracebacks = _get_concept_tracebacks(packet)
+    lead_text = {
+        "request_intent": "Request intent appears in",
+        "diagnostic_basis": "Diagnostic basis appears in",
+        "clinical_justification": "Clinical justification appears in",
+        "routing_admin": "Routing and admin details appear in",
+    }
+
+    for concept_name in ("request_intent", "diagnostic_basis", "clinical_justification", "routing_admin"):
+        entry = next(
+            (
+                item
+                for item in concept_tracebacks
+                if str(item.get("concept") or "").strip().lower() == concept_name
+            ),
+            None,
+        )
+        if not entry:
+            continue
+        source_text = _describe_concept_source(entry)
+        if not source_text:
+            continue
+        notes.append(f"{lead_text.get(concept_name, 'Relevant support appears in')} {source_text}.")
+
+    return _merge_unique_strings(notes, _issue_key)
+
+
+def _describe_npi_context(packet):
+    observations = _get_field_observations(packet, "npi")
+    if not observations:
+        return None
+
+    page_buckets = {}
+    for observation in observations:
+        page = observation.get("page_number")
+        snippet = str(observation.get("snippet") or "").lower()
+        if any(marker in snippet for marker in ["pcp", "primary care provider", "care team", "patient's care team"]):
+            label = "PCP/care-team context"
+        else:
+            label = "other provider context"
+        page_buckets.setdefault(label, set()).add(page)
+
+    if len(page_buckets) < 2:
+        return None
+
+    parts = [
+        f"{label} on pages {_format_page_ranges(pages)}"
+        for label, pages in page_buckets.items()
+    ]
+    return "Multiple provider contexts: " + " vs ".join(parts[:2])
+
+
+def _describe_clinic_name_context(packet):
+    observations = _get_field_observations(packet, "clinic_name")
+    if not observations:
+        return None
+
+    cover_sheet_pages = sorted({
+        observation.get("page_number")
+        for observation in observations
+        if observation.get("document_type") == "cover_sheet"
+    })
+    if cover_sheet_pages:
+        return f"Mostly the same clinic; cover-sheet formatting variant on page {_format_page_ranges(cover_sheet_pages)}"
+
+    return None
+
+
+def _describe_conflict_context(packet, field_name):
+    if field_name in {"diagnosis", "reason_for_request", "icd_codes"}:
+        return _describe_region_split(packet, field_name)
+
+    if field_name == "npi":
+        return _describe_npi_context(packet)
+
+    if field_name == "clinic_name":
+        return _describe_clinic_name_context(packet)
+
+    observations = _get_field_observations(packet, field_name)
+    pages = [observation.get("page_number") for observation in observations if observation.get("page_number")]
+    if not pages:
+        return None
+
+    return f"Seen on pages {_format_page_ranges(pages)}"
+
+
+def _format_conflict_value(value):
+    if isinstance(value, list):
+        value = ", ".join(str(item).strip() for item in value if str(item).strip())
+    elif isinstance(value, tuple):
+        value = ", ".join(str(item).strip() for item in value if str(item).strip())
+    else:
+        value = str(value or "").strip()
+
+    value = re.sub(r"\s+", " ", value).strip(" ,.-")
+    if len(value) > 80:
+        value = value[:77].rstrip() + "..."
+    return value or None
+
+
+def _summarize_conflict_values(conflict):
+    values = list((conflict or {}).get("values", []) or [])
+    rendered = []
+    seen = set()
+    for value in values:
+        formatted = _format_conflict_value(value)
+        if not formatted:
+            continue
+        key = formatted.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        rendered.append(formatted)
+    if len(rendered) < 2:
+        return None
+    return " vs ".join(rendered[:2])
+
+
+def _build_issue_details(packet, packet_output):
+    details = []
+    template_markers = list(getattr(packet, "template_markers", []) or [])
+
+    if template_markers:
+        pages = sorted({int(entry.get("page_number")) for entry in template_markers if entry.get("page_number")})
+        if pages:
+            page_text = ", ".join(str(page) for page in pages[:6])
+            if len(pages) > 6:
+                page_text += ", ..."
+            details.append(f"Template or training-example text detected on pages {page_text}")
+
+    for field_name in getattr(packet, "missing_fields", []) or []:
+        label = FIELD_LABEL_MAP.get(field_name, field_name.replace("_", " "))
+        details.append(f"Missing {label}")
+
+    for document_type in getattr(packet, "missing_documents", []) or []:
+        details.append(_clean_issue(_rewrite_unfilled_document_language(
+            f"Missing {_rewrite_terms(document_type)}",
+            packet,
+        )))
+
+    for issue_text, _fix_text in _unfilled_document_entries(packet):
+        details.append(_clean_issue(issue_text))
+
+    for conflict in getattr(packet, "conflicts", []) or []:
+        message = _clean_issue(_rewrite_unfilled_document_language(conflict.get("message") or "", packet))
+        context = _describe_conflict_context(packet, conflict.get("field"))
+        value_summary = _summarize_conflict_values(conflict)
+        context_parts = [part for part in [value_summary, context] if part]
+        details.append(f"{message} ({'; '.join(context_parts)})" if context_parts else message)
+
+    if "diagnosis_icd_mismatch" in set(getattr(packet, "review_flags", []) or []):
+        context = (
+            _describe_region_split(packet, "diagnosis")
+            or _describe_region_split(packet, "reason_for_request")
+            or _describe_region_split(packet, "icd_codes")
+        )
+        text = "Diagnosis / ICD mismatch"
+        details.append(f"{text}: {context}" if context else text)
+
+    if not details:
+        review_summary = packet_output.get("review_summary", {})
+        details.extend([_clean_issue(item) for item in review_summary.get("why_weak", [])])
+
+    return _merge_unique_strings(details, _issue_key)
+
+
 def _build_intel_display(packet, packet_output):
     review_summary = packet_output.get("review_summary", {})
     workflow_route = packet_output.get("workflow_route", {})
     next_action = packet_output.get("recommended_next_action", {})
     denial_risk = packet_output.get("denial_risk", {})
+    decision_intelligence = dict(packet_output.get("decision_intelligence", {}) or {})
+    success_pattern = dict(packet_output.get("success_pattern_match", {}) or {})
     true_conflict_fields = _true_conflict_fields(packet)
+    packet_profile = decision_intelligence.get("packet_type") or success_pattern.get("profile")
+    expected_documents = list(PACKET_PROFILE_EXPECTED_DOCUMENTS.get(packet_profile, []) or [])
+    template_markers = list(getattr(packet, "template_markers", []) or [])
 
     priority_fixes = []
 
@@ -479,16 +925,58 @@ def _build_intel_display(packet, packet_output):
     for _issue_text, fix_text in _unfilled_document_entries(packet):
         priority_fixes.append(_clean_fix(fix_text))
 
+    issue_details = _build_issue_details(packet, packet_output)
+    issue_breakdowns = _build_issue_breakdowns(packet)
+    concept_review_notes = _build_concept_review_notes(packet)
+    review_rationale = _merge_unique_strings(
+        why_weak + approval_rationale,
+        _issue_key,
+    )
+    review_flags = set(getattr(packet, "review_flags", []) or [])
+    if "diagnosis_icd_mismatch" in review_flags:
+        alignment_summary = "Mixed clinical history still needs reviewer alignment"
+        if packet_output.get("packet_strength", getattr(packet, "packet_strength", None)) == "strong":
+            alignment_summary = "Strong packet overall, but mixed clinical history still needs reviewer alignment"
+        review_rationale = [alignment_summary] + [
+            item for item in review_rationale
+            if "diagnosis and icd coding do not appear clinically aligned" not in str(item).lower()
+        ]
+        review_rationale = _merge_unique_strings(review_rationale, _issue_key)
+
+    if packet_profile and expected_documents:
+        profile_label = PACKET_PROFILE_LABELS.get(packet_profile, str(packet_profile).replace("_", " ").title())
+        profile_summary = f"Inferred packet profile: {profile_label}. Expected document family: {', '.join(expected_documents)}."
+        review_rationale = _merge_unique_strings([profile_summary] + review_rationale, _issue_key)
+
+    if concept_review_notes:
+        review_rationale = _merge_unique_strings(concept_review_notes + review_rationale, _issue_key)
+
+    if template_markers:
+        pages = sorted({int(entry.get("page_number")) for entry in template_markers if entry.get("page_number")})
+        if pages:
+            page_text = ", ".join(str(page) for page in pages[:6])
+            if len(pages) > 6:
+                page_text += ", ..."
+            template_summary = f"Training or template scaffolding detected on pages {page_text}; reviewer should treat placeholder content cautiously."
+            review_rationale = _merge_unique_strings([template_summary] + review_rationale, _issue_key)
+
     return {
         "packet_confidence": packet_output.get("packet_confidence", getattr(packet, "packet_confidence", None)),
         "approval_probability": packet_output.get("approval_probability", getattr(packet, "approval_probability", None)),
         "packet_strength": packet_output.get("packet_strength", getattr(packet, "packet_strength", None)),
         "submission_readiness": packet_output.get("submission_readiness"),
+        "packet_profile": PACKET_PROFILE_LABELS.get(packet_profile, str(packet_profile).replace("_", " ").title()) if packet_profile else None,
+        "profile_confidence": success_pattern.get("confidence"),
+        "expected_documents": expected_documents,
+        "template_markers": template_markers,
         "workflow_queue": workflow_route.get("queue") if isinstance(workflow_route, dict) else None,
         "next_action": next_action.get("action") if isinstance(next_action, dict) else None,
         "denial_risk": denial_risk.get("level") if isinstance(denial_risk, dict) else None,
         "review_priority": getattr(packet, "review_priority", None),
-        "review_flags": _unique(list(getattr(packet, "review_flags", []) or [])),
+        "review_flags": _unique(list(review_flags or [])),
+        "issue_details": issue_details,
+        "issue_breakdowns": issue_breakdowns,
+        "concept_review_notes": concept_review_notes,
         "why_weak": _merge_unique_strings(
             why_weak,
             _issue_key,
@@ -502,6 +990,7 @@ def _build_intel_display(packet, packet_output):
             _issue_key,
         ),
         "priority_fixes": _merge_unique_strings(priority_fixes, _fix_key),
+        "review_rationale": review_rationale,
         "approval_rationale": _merge_unique_strings(
             approval_rationale,
             _issue_key,
@@ -630,6 +1119,22 @@ def _apply_host_packet_rules(result, packet=None):
         "missing_fields": [],
         "missing_forms": [],
     }
+
+    intel_backed = packet is not None and bool(getattr(packet, "output", {}) or {})
+
+    if intel_backed:
+        compatibility["missing_fields"] = list(getattr(packet, "missing_fields", []) or [])
+        compatibility["missing_forms"] = [
+            FORM_NAME_MAP.get(document_type, _rewrite_terms(document_type))
+            for document_type in (getattr(packet, "missing_documents", []) or [])
+        ]
+
+        result["score"] = max(score, 0)
+        result["issues"] = _merge_unique_strings(issues, _issue_key)
+        result["fixes"] = _merge_unique_strings(fixes, _fix_key)
+        result.setdefault("intel", {})
+        result["intel"]["host_compatibility"] = compatibility
+        return result
 
     for field_name, penalty, issue_text, fix_text in HOST_REQUIRED_FIELDS:
         value = fields.get(field_name)

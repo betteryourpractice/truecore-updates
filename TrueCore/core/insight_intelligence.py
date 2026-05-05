@@ -6,6 +6,7 @@ from TrueCore.core.case_memory import (
     get_recent_packet_runs,
     parse_issues,
 )
+from TrueCore.core.statistical_scoring import empirical_bayes_average
 
 
 def _manual_outcomes(events):
@@ -82,35 +83,57 @@ def build_provider_network_insight(fields, all_runs, provider_history):
     provider_rows = list(provider_history or [])
 
     provider_averages = defaultdict(list)
+    all_scores = []
     for row in all_runs:
         provider_key = row.get("provider_key")
         if not provider_key or provider_key == "unknown_provider":
             continue
-        provider_averages[provider_key].append(int(row.get("score") or 0))
+        score = int(row.get("score") or 0)
+        all_scores.append(score)
+        provider_averages[provider_key].append(score)
+
+    global_average = round(sum(all_scores) / max(len(all_scores), 1), 1) if all_scores else 0.0
 
     provider_rankings = []
     for provider_key, scores in provider_averages.items():
         provider_rankings.append(
-            (provider_key, round(sum(scores) / max(len(scores), 1), 1))
+            (
+                provider_key,
+                round(sum(scores) / max(len(scores), 1), 1),
+                empirical_bayes_average(scores, global_average, prior_weight=6.0),
+                len(scores),
+            )
         )
 
-    provider_rankings.sort(key=lambda item: item[1], reverse=True)
+    provider_rankings.sort(key=lambda item: (item[2], item[3], item[1]), reverse=True)
     current_rank = None
     current_avg = None
-    for index, (provider_key, average_score) in enumerate(provider_rankings, start=1):
+    current_shrunk_average = None
+    current_sample_size = 0
+    for index, (provider_key, average_score, shrunk_average, sample_size) in enumerate(provider_rankings, start=1):
         if provider_key == current_provider:
             current_rank = index
             current_avg = average_score
+            current_shrunk_average = shrunk_average
+            current_sample_size = sample_size
             break
 
     if current_avg is None and provider_rows:
         current_avg = round(sum(int(row.get("score") or 0) for row in provider_rows) / max(len(provider_rows), 1), 1)
+        current_shrunk_average = empirical_bayes_average(
+            [int(row.get("score") or 0) for row in provider_rows],
+            global_average,
+            prior_weight=6.0,
+        )
+        current_sample_size = len(provider_rows)
 
     return {
         "current_provider": current_provider,
         "provider_average_score": current_avg,
+        "provider_shrunk_average_score": current_shrunk_average,
         "provider_rank": current_rank,
         "provider_count": len(provider_rankings),
+        "provider_sample_size": current_sample_size,
     }
 
 
@@ -203,8 +226,9 @@ def build_strategic_summary(hidden_trend, failure_concentration, provider_networ
         summary.append(f"Top failure source right now: {top_failures[0]}.")
 
     if provider_network.get("provider_rank") and provider_network.get("provider_count"):
+        average_label = "smoothed provider score" if provider_network.get("provider_sample_size", 0) < 6 else "average packet score"
         summary.append(
-            f"Current provider stands at rank {provider_network.get('provider_rank')} of {provider_network.get('provider_count')} by average packet score."
+            f"Current provider stands at rank {provider_network.get('provider_rank')} of {provider_network.get('provider_count')} by {average_label}."
         )
 
     if process_variance.get("status") != "stable":

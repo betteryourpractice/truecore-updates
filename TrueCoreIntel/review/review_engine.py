@@ -7,6 +7,12 @@ from TrueCoreIntel.review.security_engine import SecurityIntelligenceBuilder
 from TrueCoreIntel.review.simulation_engine import SimulationIntelligenceBuilder
 from TrueCoreIntel.review.strategy_engine import StrategicIntelligenceBuilder
 from TrueCoreIntel.review.ux_engine import UXIntelligenceBuilder
+from TrueCore.core.statistical_scoring import (
+    build_outcome_model,
+    build_packet_feature_map,
+    predict_outcome_probability,
+    summarize_outcome_model,
+)
 
 
 class ReviewEngine:
@@ -183,6 +189,68 @@ class ReviewEngine:
             if flag != "manual_review_required" and flag not in self.NON_BLOCKING_REVIEW_FLAGS
         ]
 
+    def apply_statistical_outcome_model(self, packet):
+        heuristic_probability = packet.approval_probability if packet.approval_probability is not None else 0.5
+        model = build_outcome_model()
+        model_summary = summarize_outcome_model(model)
+        feature_map = build_packet_feature_map(packet)
+        prediction = predict_outcome_probability(model, feature_map)
+
+        if not prediction.get("available"):
+            modeling = {
+                "available": False,
+                "heuristic_probability": round(heuristic_probability, 2),
+                "final_probability": round(heuristic_probability, 2),
+                "blend_weight": 0.0,
+                "reason": model_summary.get("reason") or "insufficient_labeled_history",
+                "model_summary": model_summary,
+                "feature_map": feature_map,
+            }
+            packet.metrics["statistical_outcome_modeling"] = modeling
+            packet.output["statistical_probability_model"] = modeling
+            return modeling
+
+        model_probability = prediction.get("calibrated_probability")
+        if model_probability is None:
+            model_probability = prediction.get("raw_probability")
+        if model_probability is None:
+            model_probability = heuristic_probability
+
+        reliability = float(prediction.get("reliability_score") or 0.0)
+        sample_size = int(model_summary.get("sample_size") or 0)
+        sample_factor = min(sample_size / 80.0, 1.0)
+        blend_weight = round(min(0.72, reliability * sample_factor * 0.72), 2)
+        if reliability >= 0.45 and sample_size >= 12:
+            blend_weight = max(blend_weight, 0.18)
+
+        blended_probability = ((1.0 - blend_weight) * heuristic_probability) + (blend_weight * float(model_probability))
+        blended_probability = round(max(0.01, min(blended_probability, 0.99)), 2)
+        packet.approval_probability = blended_probability
+
+        modeling = {
+            "available": True,
+            "heuristic_probability": round(heuristic_probability, 2),
+            "raw_probability": prediction.get("raw_probability"),
+            "calibrated_probability": prediction.get("calibrated_probability"),
+            "final_probability": blended_probability,
+            "blend_weight": blend_weight,
+            "reliability_score": prediction.get("reliability_score"),
+            "reliability_band": prediction.get("reliability_band"),
+            "sample_size": sample_size,
+            "positive_count": model_summary.get("positive_count"),
+            "negative_count": model_summary.get("negative_count"),
+            "brier_score": model_summary.get("brier_score"),
+            "roc_auc": model_summary.get("roc_auc"),
+            "ece": model_summary.get("ece"),
+            "model_type": model_summary.get("model_type"),
+            "evaluation_basis": model_summary.get("evaluation_basis"),
+            "feature_map": feature_map,
+        }
+        packet.metrics["statistical_outcome_modeling"] = modeling
+        packet.output["statistical_probability_model"] = modeling
+        packet.output["approval_probability"] = blended_probability
+        return modeling
+
     def build_review_summary(self, packet):
         why_weak = []
         missing_items = []
@@ -301,6 +369,7 @@ class ReviewEngine:
             why_weak.append("Overall packet strength is weak based on missing support, conflicts, and justification gaps.")
 
         compressed_why = self.compress_why_weak(why_weak)
+        self.apply_statistical_outcome_model(packet)
 
         packet.output["review_summary"] = {
             "why_weak": compressed_why,
@@ -2102,6 +2171,7 @@ class ReviewEngine:
         }
 
     def build_approval_outcome_prediction(self, packet, submission_decision, denial_risk, success_pattern, case_complexity):
+        modeling = dict((packet.metrics or {}).get("statistical_outcome_modeling", {}) or {})
         forecast_probability = packet.approval_probability if packet.approval_probability is not None else 0.5
         forecast_probability += (success_pattern.get("match_score", 0.5) - 0.5) * 0.14
         forecast_probability += ((packet.packet_confidence or 0.8) - 0.7) * 0.2
@@ -2144,6 +2214,12 @@ class ReviewEngine:
             drivers.append("Missing required documents still materially suppress approval likelihood.")
         if case_complexity.get("level") in {"high", "critical"}:
             drivers.append("Higher case complexity lowers forecast certainty.")
+        if modeling.get("available") and modeling.get("reliability_band") in {"moderate", "high"}:
+            calibrated_probability = modeling.get("calibrated_probability")
+            if calibrated_probability is not None and calibrated_probability >= 0.7:
+                drivers.append("Historical outcome modeling supports approval likelihood for similar packets.")
+            elif calibrated_probability is not None and calibrated_probability <= 0.4:
+                drivers.append("Historical outcome modeling still sees lower approval odds for similar packets.")
 
         return {
             "level": level,
@@ -2151,6 +2227,19 @@ class ReviewEngine:
             "confidence": confidence,
             "drivers": self.unique_preserve_order(drivers),
             "summary": f"Forecasted approval likelihood is {level.replace('_', ' ')} based on readiness, denial risk, packet confidence, and successful-pattern similarity.",
+            "statistical_modeling": {
+                "available": bool(modeling.get("available")),
+                "heuristic_probability": modeling.get("heuristic_probability"),
+                "calibrated_probability": modeling.get("calibrated_probability"),
+                "final_probability": modeling.get("final_probability"),
+                "blend_weight": modeling.get("blend_weight"),
+                "reliability_band": modeling.get("reliability_band"),
+                "reliability_score": modeling.get("reliability_score"),
+                "sample_size": modeling.get("sample_size"),
+                "brier_score": modeling.get("brier_score"),
+                "roc_auc": modeling.get("roc_auc"),
+                "ece": modeling.get("ece"),
+            },
         }
 
     def build_turnaround_time_prediction(self, packet, submission_decision, workflow_route, denial_risk, case_complexity, bottleneck_detection):
@@ -2894,6 +2983,7 @@ class ReviewEngine:
         }
 
     def build_denial_risk_prediction(self, packet, submission_decision, procedure_fit, success_pattern, escalation):
+        modeling = dict((packet.metrics or {}).get("statistical_outcome_modeling", {}) or {})
         base_score = 1.0 - (packet.approval_probability if packet.approval_probability is not None else 0.5)
         risk_score = max(0.05, min(base_score, 0.95))
         drivers = []
@@ -2950,6 +3040,13 @@ class ReviewEngine:
             risk_score += 0.08
             drivers.append("Escalation signals indicate elevated operational risk.")
 
+        if modeling.get("available") and modeling.get("reliability_band") in {"moderate", "high"}:
+            calibrated_probability = modeling.get("calibrated_probability")
+            if calibrated_probability is not None and calibrated_probability <= 0.4:
+                drivers.append("Historical outcome modeling suggests elevated denial likelihood for similar packets.")
+            elif calibrated_probability is not None and calibrated_probability >= 0.7:
+                drivers.append("Historical outcome modeling remains supportive for similar packets.")
+
         if (
             pattern_confidence < 0.6
             and submission_decision["readiness"] == "requires_review"
@@ -2974,6 +3071,17 @@ class ReviewEngine:
             "risk_score": risk_score,
             "drivers": self.unique_preserve_order(drivers),
             "historical_pattern_match": success_pattern["similarity"],
+            "historical_model_signal": (
+                "supportive"
+                if modeling.get("available") and (modeling.get("calibrated_probability") or 0.0) >= 0.7
+                else "elevated"
+                if modeling.get("available") and (modeling.get("calibrated_probability") or 1.0) <= 0.4
+                else "neutral"
+                if modeling.get("available")
+                else "unavailable"
+            ),
+            "model_reliability_band": modeling.get("reliability_band"),
+            "model_sample_size": modeling.get("sample_size"),
         }
 
     def build_workflow_decision_routing(self, packet, submission_decision, denial_risk, escalation, recommended_next_action):

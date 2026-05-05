@@ -237,6 +237,27 @@ def run_quality_score(ocr_run):
     return confidence + min(text_length / 6.0, 24.0)
 
 
+def build_header_only_layout(lines, image_size):
+    header_lines = sorted(
+        list(lines or []),
+        key=lambda line: (line.get("bbox") or [0, 0, 0, 0])[1],
+    )
+    return {
+        "header_text": normalize_text("\n".join(line.get("text", "") for line in header_lines[:8])),
+        "footer_text": "",
+        "left_column_text": "",
+        "right_column_text": "",
+        "table_regions": [],
+        "signature_regions": [],
+        "handwritten_regions": [],
+        "field_zone_count": len(build_field_zones(header_lines, image_size)),
+        "structured_line_count": sum(
+            1 for line in header_lines
+            if any(pattern.search(line.get("text", "")) for pattern in FIELD_LABEL_PATTERNS)
+        ),
+    }
+
+
 def run_rapidocr_ocr(image, zone_name="full_page"):
     engine = get_rapidocr_engine()
     if engine is None or np is None:
@@ -598,6 +619,46 @@ def preprocess_image_object_for_ocr(image, log_fn=None):
         "deskew_angle": round(angle, 2),
         "size": [image.width, image.height],
         "threshold": threshold,
+    }
+
+
+def preprocess_image_object_for_discovery(image, log_fn=None):
+    if Image is None or ImageOps is None:
+        return image, {"steps": [], "deskew_angle": 0.0}
+
+    steps = []
+    image = ImageOps.exif_transpose(image)
+    steps.append("exif_transpose")
+    image = image.convert("L")
+    steps.append("grayscale")
+
+    min_dimension = min(image.size) if image.size else 0
+    if min_dimension and min_dimension < 1200:
+        scale = 1200 / float(min_dimension)
+        image = image.resize(
+            (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
+            getattr(Image, "Resampling", Image).LANCZOS,
+        )
+        steps.append("upscale")
+
+    image = ImageOps.autocontrast(image, cutoff=1)
+    steps.append("autocontrast")
+
+    if ImageEnhance is not None:
+        image = ImageEnhance.Contrast(image).enhance(1.2)
+        steps.append("contrast_boost")
+        image = ImageEnhance.Sharpness(image).enhance(1.2)
+        steps.append("sharpen")
+
+    image = ImageOps.expand(image, border=8, fill=255)
+    steps.append("border")
+
+    emit(log_fn, f"[DEBUG] OCR discovery preprocessing steps: {', '.join(steps)}")
+    return image, {
+        "steps": steps,
+        "deskew_angle": 0.0,
+        "size": [image.width, image.height],
+        "threshold": None,
     }
 
 
@@ -1049,6 +1110,145 @@ def ocr_image_with_layout(image, log_fn=None):
     return page_results
 
 
+def ocr_image_header_only(image, log_fn=None):
+    if Image is None:
+        return None
+
+    if not layout_ocr_available():
+        return None
+
+    providers = provider_order()
+    rescue_providers = provider_order(include_rescue=True)
+    if not providers and not rescue_providers:
+        return None
+
+    processed, preprocessing = preprocess_image_object_for_discovery(image, log_fn=log_fn)
+    regions_by_name = {region.get("zone_name"): region for region in build_region_crops(processed)}
+    header_region = regions_by_name.get("page_header")
+
+    if header_region is None:
+        return None
+
+    best_run = None
+    best_provider = None
+    best_score = -1.0
+    tried = []
+
+    for provider_name in list(dict.fromkeys(list(providers) + list(rescue_providers))):
+        candidate_run = run_provider_ocr(provider_name, header_region["image"], zone_name="page_header")
+        if not candidate_run or not candidate_run.get("text"):
+            continue
+
+        tried.append({
+            "provider": provider_name,
+            "confidence": candidate_run.get("confidence"),
+            "text_length": len(candidate_run.get("text", "")),
+        })
+        score = run_quality_score(candidate_run)
+        if score <= best_score:
+            continue
+        best_score = score
+        best_run = candidate_run
+        best_provider = provider_name
+        if score >= 95.0:
+            break
+
+    if not best_run:
+        return None
+
+    adjusted_lines = []
+    for line in best_run.get("lines", []):
+        bbox = list(line.get("bbox") or [0, 0, 0, 0])
+        bbox[0] += header_region["bbox"][0]
+        bbox[1] += header_region["bbox"][1]
+        bbox[2] += header_region["bbox"][0]
+        bbox[3] += header_region["bbox"][1]
+        adjusted_line = dict(line)
+        adjusted_line["bbox"] = bbox
+        adjusted_line["zone_name"] = "page_header"
+        adjusted_lines.append(adjusted_line)
+
+    best_run["lines"] = adjusted_lines
+    best_run["image_size"] = processed.size
+    best_run["providers"] = [best_provider] if best_provider else list(best_run.get("providers", []) or [])
+    region_runs = [{
+        "zone_name": "page_header",
+        "provider": best_provider,
+        "confidence": best_run.get("confidence"),
+        "text_length": len(best_run.get("text", "")),
+    }]
+
+    header_text = normalize_text(best_run.get("text"))
+    weak_header = (
+        float(best_run.get("confidence") or 0.0) < 86.0
+        or len(header_text) < 220
+        or not any(term in header_text.lower() for term in (
+            "request",
+            "medical",
+            "consent",
+            "diagnosis",
+            "clinical",
+            "episode",
+            "necessity",
+            "imaging",
+        ))
+    )
+
+    center_region = regions_by_name.get("center_form")
+    if weak_header and center_region is not None:
+        center_best_run = None
+        center_best_provider = None
+        center_best_score = -1.0
+        center_providers = list(dict.fromkeys(
+            [provider for provider in (providers[:1] + ["rapidocr"]) if provider]
+        ))
+        for provider_name in center_providers:
+            center_run = run_provider_ocr(provider_name, center_region["image"], zone_name="center_form")
+            if not center_run or not center_run.get("text"):
+                continue
+            score = run_quality_score(center_run)
+            if score <= center_best_score:
+                continue
+            center_best_score = score
+            center_best_run = center_run
+            center_best_provider = provider_name
+            if score >= 92.0:
+                break
+
+        if center_best_run:
+            center_lines = []
+            for line in center_best_run.get("lines", []):
+                bbox = list(line.get("bbox") or [0, 0, 0, 0])
+                bbox[0] += center_region["bbox"][0]
+                bbox[1] += center_region["bbox"][1]
+                bbox[2] += center_region["bbox"][0]
+                bbox[3] += center_region["bbox"][1]
+                adjusted_line = dict(line)
+                adjusted_line["bbox"] = bbox
+                adjusted_line["zone_name"] = "center_form"
+                center_lines.append(adjusted_line)
+
+            center_best_run["lines"] = center_lines
+            center_best_run["image_size"] = processed.size
+            best_run = merge_ocr_runs(best_run, center_best_run)
+            region_runs.append({
+                "zone_name": "center_form",
+                "provider": center_best_provider,
+                "confidence": center_best_run.get("confidence"),
+                "text_length": len(center_best_run.get("text", "")),
+            })
+
+    lines = list(best_run.get("lines", []))
+    best_run["field_zones"] = build_field_zones(lines, processed.size)
+    best_run["layout"] = build_layout_summary(best_run.get("words", []), lines, processed.size)
+    if not best_run["layout"].get("header_text"):
+        best_run["layout"] = build_header_only_layout(lines, processed.size)
+    best_run["region_runs"] = region_runs
+    best_run["provider_runs"] = tried
+    best_run["preprocessing"] = preprocessing
+    return best_run
+
+
 def collect_text_field_zones(text):
     zones = []
     seen = set()
@@ -1154,6 +1354,7 @@ __all__ = [
     "layout_ocr_available",
     "normalize_label",
     "normalize_text",
+    "ocr_image_header_only",
     "ocr_image_with_layout",
     "preprocess_image_object_for_ocr",
     "render_pdf_pages_as_images",

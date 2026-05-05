@@ -27,6 +27,7 @@ from TrueCoreIntel.intake.ocr_layout import (
     build_hybrid_page_metadata,
     layout_ocr_available,
     normalize_label,
+    ocr_image_header_only,
     ocr_image_with_layout,
     preprocess_image_object_for_ocr,
     render_pdf_pages_as_images,
@@ -243,7 +244,7 @@ def run_text_capture_command(arguments, log_fn=None, timeout=240):
         completed = subprocess.run(
             arguments,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=timeout,
             env=build_execution_env(),
             check=False,
@@ -253,12 +254,12 @@ def run_text_capture_command(arguments, log_fn=None, timeout=240):
         return None
 
     if completed.returncode != 0:
-        stderr = normalize_pdf_text(completed.stderr)
+        stderr = normalize_pdf_text((completed.stderr or b"").decode("utf-8", errors="replace"))
         if stderr:
             emit(log_fn, f"[DEBUG] Text capture command failed: {stderr}")
         return None
 
-    return completed.stdout
+    return (completed.stdout or b"").decode("utf-8", errors="replace")
 
 
 def split_pages_from_formfeed(text):
@@ -315,7 +316,7 @@ def build_searchable_pdf_with_ocrmypdf(pdf_path, log_fn=None):
         completed = subprocess.run(
             command,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=900,
             env=build_execution_env(),
             check=False,
@@ -326,7 +327,7 @@ def build_searchable_pdf_with_ocrmypdf(pdf_path, log_fn=None):
         return None
 
     if completed.returncode != 0 or not output_pdf.exists():
-        stderr = normalize_pdf_text(completed.stderr)
+        stderr = normalize_pdf_text((completed.stderr or b"").decode("utf-8", errors="replace"))
         if stderr:
             emit(log_fn, f"[DEBUG] OCRmyPDF failed: {stderr}")
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -510,6 +511,23 @@ def merge_page_metadata(primary_metadata, secondary_metadata):
     merged = dict(primary_metadata or {})
     secondary_metadata = dict(secondary_metadata or {})
 
+    if secondary_metadata.get("ocr_mode") == "discovery":
+        discovery_text = normalize_pdf_text(secondary_metadata.get("ocr_text"))
+        if discovery_text:
+            existing_discovery = normalize_pdf_text(merged.get("document_discovery_text"))
+            if discovery_text.lower() not in existing_discovery.lower():
+                merged["document_discovery_text"] = normalize_pdf_text(
+                    f"{existing_discovery}\n{discovery_text}" if existing_discovery else discovery_text
+                )
+        merged["document_discovery_confidence"] = max(
+            float(merged.get("document_discovery_confidence") or 0.0),
+            float(secondary_metadata.get("ocr_confidence") or 0.0),
+        )
+        merged["document_discovery_provider"] = secondary_metadata.get("ocr_provider") or merged.get("document_discovery_provider")
+        merged["layout"] = merge_layout_maps(merged.get("layout"), secondary_metadata.get("layout"))
+        merged["ocr_segments"] = list(merged.get("ocr_segments", []) or []) + list(secondary_metadata.get("ocr_segments", []) or [])
+        return merged
+
     if secondary_metadata.get("native_text") and not merged.get("native_text"):
         merged["native_text"] = secondary_metadata.get("native_text")
 
@@ -592,11 +610,15 @@ def select_pdf_ocr_candidate_pages(pages, metadata, max_candidates=6):
     for index, page_text in enumerate(pages or [], start=1):
         page_metadata = dict((metadata or [])[index - 1] or {}) if index - 1 < len(metadata or []) else {}
         field_zones = list(page_metadata.get("field_zones", []) or [])
+        layout = dict(page_metadata.get("layout", {}) or {})
         native_zone_count = sum(
             1
             for zone in field_zones
             if str(zone.get("zone_name") or "").lower() == "native_text"
         )
+        field_zone_count = len(field_zones)
+        structured_line_count = int(layout.get("structured_line_count", 0) or 0)
+        has_header = bool(normalize_pdf_text(layout.get("header_text")))
         signal_count = count_pattern_matches(page_text, OCR_PAGE_EXCERPT_SIGNAL_PATTERNS)
         sparse = is_sparse_page_text(page_text)
         priority = 0
@@ -607,8 +629,14 @@ def select_pdf_ocr_candidate_pages(pages, metadata, max_candidates=6):
             priority += 3
         if native_zone_count <= 1:
             priority += 2
-        if index <= 12:
+        if field_zone_count <= 1 and structured_line_count <= 1:
             priority += 1
+        if not has_header and field_zone_count <= 2:
+            priority += 1
+        if has_header and field_zone_count >= 4 and signal_count >= 2:
+            priority -= 2
+        elif field_zone_count >= 4 and structured_line_count >= 6:
+            priority -= 1
 
         if priority > 0:
             fingerprint = normalize_pdf_text(page_text)[:240].lower()
@@ -648,24 +676,147 @@ def select_pdf_ocr_candidate_pages(pages, metadata, max_candidates=6):
     return selected
 
 
-def extract_pdf_page_ocr_metadata(pdf_path, log_fn=None, page_numbers=None):
+def select_pdf_title_ocr_candidate_pages(pages, metadata, max_candidates=14):
+    runs = []
+    run_start = None
+
+    for index, page_text in enumerate(pages or [], start=1):
+        page_metadata = dict((metadata or [])[index - 1] or {}) if index - 1 < len(metadata or []) else {}
+        field_zones = list(page_metadata.get("field_zones", []) or [])
+        layout = dict(page_metadata.get("layout", {}) or {})
+        field_zone_count = len(field_zones)
+        structured_line_count = int(layout.get("structured_line_count", 0) or 0)
+        has_doc_hint = count_pattern_matches(page_text, OCR_PAGE_DOC_HINT_PATTERNS) > 0
+        sparse = is_sparse_page_text(page_text)
+        header_text = normalize_pdf_text(layout.get("header_text"))
+
+        looks_like_low_info_form_page = (
+            sparse
+            and field_zone_count <= 1
+            and structured_line_count <= 1
+            and not has_doc_hint
+            and len(header_text) <= 180
+        )
+
+        if looks_like_low_info_form_page:
+            if run_start is None:
+                run_start = index
+            continue
+
+        if run_start is not None:
+            runs.append((run_start, index - 1))
+            run_start = None
+
+    if run_start is not None:
+        runs.append((run_start, len(pages or [])))
+
+    selected = []
+    for run_start, run_end in runs:
+        run_length = (run_end - run_start) + 1
+        if run_length < 2:
+            continue
+
+        for page_number in range(run_start, run_end + 1):
+            selected.append(page_number)
+            if len(selected) >= max_candidates:
+                return selected
+
+    return selected
+
+
+def select_pdf_promoted_full_ocr_pages(metadata, candidate_pages, max_candidates=10):
+    promoted = []
+    seen = set()
+
+    for page_number in candidate_pages or []:
+        if page_number in seen:
+            continue
+
+        page_metadata = dict((metadata or [])[page_number - 1] or {}) if page_number - 1 < len(metadata or []) else {}
+        layout = dict(page_metadata.get("layout", {}) or {})
+        header_text = normalize_pdf_text(layout.get("header_text"))
+        ocr_confidence = float(page_metadata.get("ocr_confidence") or 0.0)
+
+        if len(header_text) < 180:
+            continue
+
+        exact_hint_hits = count_pattern_matches(header_text, OCR_PAGE_DOC_HINT_PATTERNS)
+        structured_hint_hits = count_pattern_matches(header_text, OCR_STRUCTURED_LINE_PATTERNS)
+        lexical_header_signals = [
+            "medical necessity",
+            "treatment request",
+            "requested services",
+            "reason for consultation",
+            "single episode of care",
+            "seoc",
+            "virtual consent",
+            "consent form",
+            "clinical documentation",
+            "imaging findings",
+            "chief complaint",
+            "history of present illness",
+            "despite appropriate",
+            "to whom it may concern",
+            "attorney full name",
+        ]
+        has_dense_header_signal = (
+            exact_hint_hits >= 1
+            or structured_hint_hits >= 2
+            or any(term in header_text.lower() for term in lexical_header_signals)
+        )
+
+        if not has_dense_header_signal:
+            continue
+
+        if ocr_confidence > 89.0 and exact_hint_hits == 0 and structured_hint_hits < 3:
+            continue
+
+        seen.add(page_number)
+        promoted.append(page_number)
+        if len(promoted) >= max_candidates:
+            break
+
+    return promoted
+
+
+def extract_pdf_page_ocr_metadata(pdf_path, log_fn=None, page_numbers=None, mode="full", page_images=None):
     if not layout_ocr_available():
         emit(log_fn, "[DEBUG] Layout OCR backend unavailable; skipping pdfium/tesseract OCR stage")
         return {}
 
-    page_images = render_pdf_pages_as_images(pdf_path, page_numbers=page_numbers, log_fn=log_fn)
+    if page_images is None:
+        page_images = render_pdf_pages_as_images(pdf_path, page_numbers=page_numbers, log_fn=log_fn)
+    else:
+        selected_pages = {int(number) for number in (page_numbers or []) if int(number) >= 1}
+        filtered_images = []
+        for page_number, image in page_images or []:
+            try:
+                normalized_page_number = int(page_number)
+            except Exception:
+                continue
+            if selected_pages and normalized_page_number not in selected_pages:
+                continue
+            filtered_images.append((normalized_page_number, image))
+        page_images = sorted(filtered_images, key=lambda item: item[0])
     metadata = {}
     if not page_images:
         return metadata
 
     for index, image in page_images:
-        page_results = ocr_image_with_layout(image, log_fn=log_fn) or []
-        metadata[index] = build_hybrid_page_metadata(
+        if mode == "header_only":
+            header_result = ocr_image_header_only(image, log_fn=log_fn)
+            page_results = [header_result] if header_result else []
+        else:
+            page_results = ocr_image_with_layout(image, log_fn=log_fn) or []
+        page_metadata = build_hybrid_page_metadata(
             page_number=index,
             source_type="pdf",
             ocr_results=page_results,
             source_file=str(pdf_path),
         )
+        if mode == "header_only":
+            page_metadata["ocr_mode"] = "discovery"
+        metadata[index] = page_metadata
 
     return metadata
 
@@ -1312,10 +1463,86 @@ def extract_pdf_pages_with_fallback(pdf_path, log_fn=None, return_metadata=False
         metadata = list(base_metadata or [])
     else:
         pages, metadata = extract_pdf_pages(pdf_path, log_fn=log_fn, return_metadata=True)
+
+    title_page_images = []
+    title_candidate_pages = select_pdf_title_ocr_candidate_pages(pages, metadata)
+    if title_candidate_pages:
+        emit(log_fn, f"[DEBUG] Title-zone OCR candidate pages: {', '.join(str(page) for page in title_candidate_pages[:20])}")
+        title_page_images = render_pdf_pages_as_images(
+            pdf_path,
+            dpi=220,
+            page_numbers=title_candidate_pages,
+            log_fn=log_fn,
+        )
+        title_ocr_metadata = extract_pdf_page_ocr_metadata(
+            pdf_path,
+            log_fn=log_fn,
+            page_numbers=title_candidate_pages,
+            mode="header_only",
+            page_images=title_page_images,
+        )
+        if title_ocr_metadata:
+            refreshed_pages = []
+            refreshed_metadata = []
+            for index in range(max(len(pages), len(metadata))):
+                primary_metadata = metadata[index] if index < len(metadata) else build_hybrid_page_metadata(
+                    page_number=index + 1,
+                    source_type="pdf",
+                    source_file=str(pdf_path),
+                )
+                secondary_metadata = title_ocr_metadata.get(index + 1, {})
+                merged_page_metadata = merge_page_metadata(primary_metadata, secondary_metadata)
+                merged_text, merged_page_metadata = finalize_page_text_from_metadata(merged_page_metadata)
+                refreshed_pages.append(merged_text)
+                refreshed_metadata.append(merged_page_metadata)
+            pages = refreshed_pages
+            metadata = refreshed_metadata
+
     candidate_pages = select_pdf_ocr_candidate_pages(pages, metadata)
+    promoted_pages = select_pdf_promoted_full_ocr_pages(metadata, title_candidate_pages)
+    if promoted_pages:
+        for page_number in promoted_pages:
+            if page_number not in candidate_pages:
+                candidate_pages.append(page_number)
     if candidate_pages:
         emit(log_fn, f"[DEBUG] Selective OCR candidate pages: {', '.join(str(page) for page in candidate_pages[:20])}")
-    ocr_metadata = extract_pdf_page_ocr_metadata(pdf_path, log_fn=log_fn, page_numbers=candidate_pages)
+
+    cached_full_images = []
+    missing_full_pages = []
+    candidate_page_set = {int(page_number) for page_number in (candidate_pages or []) if int(page_number) >= 1}
+
+    if candidate_page_set:
+        title_page_image_index = {
+            int(page_number): image
+            for page_number, image in title_page_images or []
+            if int(page_number) in candidate_page_set
+        }
+        cached_full_images = sorted(title_page_image_index.items(), key=lambda item: item[0])
+        missing_full_pages = sorted(candidate_page_set.difference(title_page_image_index.keys()))
+
+    if cached_full_images and missing_full_pages:
+        emit(
+            log_fn,
+            f"[DEBUG] Reusing {len(cached_full_images)} rendered title page(s) for full OCR; rendering {len(missing_full_pages)} additional page(s)",
+        )
+    elif cached_full_images:
+        emit(log_fn, f"[DEBUG] Reusing {len(cached_full_images)} rendered title page(s) for full OCR")
+
+    additional_full_images = (
+        render_pdf_pages_as_images(pdf_path, page_numbers=missing_full_pages, log_fn=log_fn)
+        if missing_full_pages else []
+    )
+    full_ocr_page_images = sorted(
+        list(cached_full_images) + list(additional_full_images),
+        key=lambda item: item[0],
+    )
+
+    ocr_metadata = extract_pdf_page_ocr_metadata(
+        pdf_path,
+        log_fn=log_fn,
+        page_numbers=candidate_pages,
+        page_images=full_ocr_page_images,
+    )
     searchable_copy = None
 
     if not any(page_metadata_has_real_ocr_content(item) for item in (ocr_metadata or {}).values()):
