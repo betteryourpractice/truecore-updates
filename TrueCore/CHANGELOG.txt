@@ -448,3 +448,12 @@ CHANGES
 
 * Frameless compact launcher redesign with updated launcher support and program sync flow
 
+
+
+VERSION: 4.6
+DATE: 2026-05-10
+
+CHANGES
+
+* Launcher update summary and compact support snapshot
+
