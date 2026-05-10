@@ -200,6 +200,8 @@ class LauncherWindow(QWidget):
         self.play_button.clicked.connect(self.launch_engine)
         self.username.returnPressed.connect(self.launch_engine)
         self.password.returnPressed.connect(self.launch_engine)
+        self.username.textChanged.connect(self.update_launch_button_state)
+        self.password.textChanged.connect(self.update_launch_button_state)
 
         login_layout.addWidget(login_title)
         login_layout.addWidget(self.username)
@@ -254,6 +256,7 @@ class LauncherWindow(QWidget):
         main_layout.addLayout(footer_layout)
 
         ensure_launcher_auth_config()
+        self.update_launch_button_state()
         self.auto_update()
 
     # -------------------------------------------------
@@ -355,16 +358,33 @@ class LauncherWindow(QWidget):
     # ENGINE LAUNCH
     # -------------------------------------------------
 
+    def update_launch_button_state(self):
+
+        has_username = bool((self.username.text() or "").strip())
+        has_password = bool((self.password.text() or "").strip())
+        self.play_button.setEnabled(has_username and has_password)
+
     def launch_engine(self):
 
-        username = self.username.text()
-        password = self.password.text()
+        username = (self.username.text() or "").strip()
+        password = self.password.text() or ""
+
+        if not username or not password.strip():
+            log("Launcher sign-in blocked because required credentials were blank.")
+            self.news_box.append("\nSign-in required. Enter both username and password before launching.")
+            if not username:
+                self.username.setFocus()
+            else:
+                self.password.setFocus()
+            self.update_launch_button_state()
+            return
 
         if not verify_launcher_credentials(username, password):
             log("Launcher sign-in failed.")
             self.news_box.append("\nAccess denied. Invalid username or password.")
             self.password.clear()
             self.password.setFocus()
+            self.update_launch_button_state()
             return
 
         engine = find_engine()

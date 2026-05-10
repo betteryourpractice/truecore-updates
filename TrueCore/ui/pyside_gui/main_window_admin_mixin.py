@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -45,6 +46,38 @@ from TrueCore.core.office_rollout import (
 
 
 class MainWindowAdminMixin:
+
+    def build_admin_action_grid(self, actions, columns=3):
+
+        host = QWidget()
+        layout = QGridLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(10)
+
+        normalized_columns = max(1, int(columns or 1))
+
+        for index, action in enumerate(actions or []):
+            label = action[0]
+            handler = action[1]
+            tooltip = action[2] if len(action) > 2 else ""
+
+            button = QPushButton(str(label or "Action"))
+            button.setMinimumHeight(36)
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            if tooltip:
+                button.setToolTip(str(tooltip))
+            button.clicked.connect(handler)
+
+            row = index // normalized_columns
+            column = index % normalized_columns
+            layout.addWidget(button, row, column)
+
+        for column in range(normalized_columns):
+            layout.setColumnStretch(column, 1)
+
+        return host
 
     def admin_modal_stylesheet(self):
 

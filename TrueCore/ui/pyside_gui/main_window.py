@@ -182,7 +182,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         ensure_admin_auth_config()
 
         self.version = get_version()
-        _, self.build_timestamp = get_build_info()
+        self.build_id, self.build_timestamp = get_build_info()
 
         self.setWindowTitle(f"TrueValour Packet Auditor v{self.version}")
         self.resize(1400, 900)
@@ -3017,6 +3017,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         try:
             output_path, manifest = write_deployment_manifest()
+            self.build_id, self.build_timestamp = get_build_info()
             log_event(
                 "deployment_manifest_refreshed",
                 f"{manifest.get('platform', {}).get('version', 'unknown')} | {manifest.get('platform_readiness', {}).get('band', 'foundational')}",
@@ -3106,6 +3107,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("TrueCore Admin Panel")
         dialog.resize(1260, 820)
+        dialog.setMinimumSize(1080, 760)
         dialog.setStyleSheet(self.admin_modal_stylesheet())
 
         layout = QVBoxLayout()
@@ -3148,11 +3150,6 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         cross_office_layout.setContentsMargins(10, 10, 10, 10)
         cross_office_layout.setSpacing(10)
 
-        primary_button_row = QHBoxLayout()
-        primary_button_row.setSpacing(8)
-        secondary_button_row = QHBoxLayout()
-        secondary_button_row.setSpacing(8)
-
         primary_actions = [
             ("Export Office Snapshot", self.export_office_snapshot_action),
             ("Import Office Snapshots", self.import_cross_office_snapshots_action),
@@ -3165,24 +3162,8 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             ("Open Data Folder", self.open_cross_office_data_folder_action),
             ("Refresh", self.refresh_admin_panel),
         ]
-
-        for label, handler in primary_actions:
-            button = QPushButton(label)
-            button.setMinimumHeight(34)
-            button.clicked.connect(handler)
-            primary_button_row.addWidget(button)
-
-        primary_button_row.addStretch()
-
-        for label, handler in secondary_actions:
-            button = QPushButton(label)
-            button.setMinimumHeight(34)
-            button.clicked.connect(handler)
-            secondary_button_row.addWidget(button)
-
-        secondary_button_row.addStretch()
-        cross_office_layout.addLayout(primary_button_row)
-        cross_office_layout.addLayout(secondary_button_row)
+        cross_office_layout.addWidget(self.build_admin_action_grid(primary_actions, columns=3))
+        cross_office_layout.addWidget(self.build_admin_action_grid(secondary_actions, columns=3))
 
         cross_office_text = create_admin_text_view()
         cross_office_layout.addWidget(cross_office_text, 1)
@@ -3192,8 +3173,6 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         operations_layout.setContentsMargins(10, 10, 10, 10)
         operations_layout.setSpacing(10)
 
-        operations_button_row = QHBoxLayout()
-        operations_button_row.setSpacing(10)
         operations_actions = [
             ("Edit Office Profile", self.open_office_profile_editor, "Set the real office identity, rollout tier, and support contact for this install."),
             ("Refresh Install Profile", self.refresh_deployment_manifest_action, "Update the local record of version, build, office, and learning state."),
@@ -3202,16 +3181,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             ("Archive + Reset Local PHI", self.archive_and_reset_local_phi_action, "Create a de-identified archive, then reset local PHI-bearing storage for this install."),
             ("Refresh", self.refresh_admin_panel, "Refresh the Operations tab data."),
         ]
-
-        for label, handler, tooltip in operations_actions:
-            button = QPushButton(label)
-            button.setMinimumHeight(34)
-            button.setToolTip(tooltip)
-            button.clicked.connect(handler)
-            operations_button_row.addWidget(button)
-
-        operations_button_row.addStretch()
-        operations_layout.addLayout(operations_button_row)
+        operations_layout.addWidget(self.build_admin_action_grid(operations_actions, columns=2))
 
         operations_text = create_admin_text_view()
         operations_layout.addWidget(operations_text, 1)

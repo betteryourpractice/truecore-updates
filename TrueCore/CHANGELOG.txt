@@ -421,3 +421,12 @@ CHANGES
 
 * Core engine role extraction, admin workspace improvements, privacy hardening, and rollout support updates
 
+
+
+VERSION: 4.3
+DATE: 2026-05-09
+
+CHANGES
+
+* Launcher auth enforcement, admin build info fix, and responsive admin layout
+
