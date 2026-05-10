@@ -1,4 +1,4 @@
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QPoint, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -34,10 +34,7 @@ from TrueCore.launcher.updater import (
     install_update,
     verify_installed_engine_integrity,
 )
-from TrueCore.utils.launcher_auth import (
-    ensure_launcher_auth_config,
-    verify_launcher_credentials,
-)
+from TrueCore.utils.launcher_auth import ensure_launcher_auth_config, verify_launcher_credentials
 
 
 ENGINE_DIR = "engine"
@@ -236,17 +233,22 @@ class LauncherWindow(QWidget):
 
         ensure_launcher_auth_config()
 
-        self.setWindowTitle("TrueCore Launcher")
-        self.resize(1180, 760)
-        self.setMinimumSize(1080, 700)
-        self.setWindowIcon(QIcon(resource_path("assets/truecore_icon.ico")))
-
         self.release_info = dict(load_launcher_release_info() or {})
         self.office_profile = {}
         self.last_update_state = {}
         self.update_in_progress = False
         self.update_thread = None
         self.update_worker = None
+        self._drag_active = False
+        self._drag_offset = QPoint()
+
+        self.setWindowTitle("TrueCore Launcher")
+        self.setWindowIcon(QIcon(resource_path("assets/truecore_icon.ico")))
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.resize(1040, 700)
+        self.setMinimumSize(1040, 700)
+        self.setMaximumSize(1040, 700)
 
         self._build_ui()
         self.refresh_static_context()
@@ -259,152 +261,255 @@ class LauncherWindow(QWidget):
         self.setStyleSheet(
             """
             QWidget {
-                background-color: #0B1118;
-                color: #E5E7EB;
+                color: #E6EDF7;
                 font-family: "Segoe UI";
                 font-size: 13px;
+                background: transparent;
+            }
+            QFrame#shell {
+                background-color: rgba(10, 15, 24, 0.97);
+                border: 1px solid #21354A;
+                border-radius: 20px;
+            }
+            QFrame#titleBar {
+                background-color: rgba(12, 18, 28, 0.96);
+                border: 1px solid #1B2C3E;
+                border-radius: 14px;
+            }
+            QFrame#brandPanel {
+                background-color: rgba(15, 24, 36, 0.96);
+                border: 1px solid #21354A;
+                border-radius: 16px;
             }
             QFrame#card {
-                background-color: #111A24;
-                border: 1px solid #223246;
-                border-radius: 14px;
+                background-color: rgba(15, 24, 36, 0.96);
+                border: 1px solid #21354A;
+                border-radius: 16px;
+            }
+            QLabel#windowTitle {
+                color: #FFFFFF;
+                font-size: 15px;
+                font-weight: 700;
             }
             QLabel#heroTitle {
                 color: #FFFFFF;
-                font-size: 28px;
+                font-size: 26px;
                 font-weight: 700;
             }
             QLabel#heroSubtitle {
-                color: #9FB3C8;
-                font-size: 13px;
+                color: #9BB3CC;
+                font-size: 12px;
             }
             QLabel#sectionTitle {
                 color: #FFFFFF;
-                font-size: 16px;
+                font-size: 15px;
                 font-weight: 700;
             }
             QLabel#metricTitle {
-                color: #9FB3C8;
-                font-size: 12px;
+                color: #92A8C2;
+                font-size: 11px;
                 font-weight: 600;
             }
             QLabel#metricValue {
                 color: #FFFFFF;
-                font-size: 24px;
+                font-size: 22px;
                 font-weight: 700;
             }
             QLabel#metricSubtle {
-                color: #8EA4BB;
+                color: #8AA1BA;
                 font-size: 11px;
             }
+            QLabel#pill {
+                background-color: rgba(27, 41, 57, 0.95);
+                border: 1px solid #2A4560;
+                border-radius: 10px;
+                padding: 7px 12px;
+                color: #D5E3F4;
+                font-size: 11px;
+                font-weight: 600;
+            }
             QPushButton {
-                background-color: #1A2532;
-                color: #E5E7EB;
-                border: 1px solid #2D435B;
+                background-color: #1A2837;
+                color: #EAF2FB;
+                border: 1px solid #2E4B67;
                 border-radius: 8px;
-                padding: 10px 16px;
+                padding: 9px 14px;
                 font-weight: 600;
             }
             QPushButton:hover {
-                background-color: #213246;
+                background-color: #21354A;
             }
             QPushButton:disabled {
-                color: #738499;
-                border-color: #233242;
-                background-color: #101823;
+                color: #7188A1;
+                background-color: #121B25;
+                border-color: #223547;
             }
             QPushButton#primaryButton {
-                background-color: #1E6FDB;
-                border-color: #2F80ED;
+                background-color: #2C73D2;
+                border-color: #4A90F0;
                 color: #FFFFFF;
             }
             QPushButton#primaryButton:hover {
-                background-color: #2A7AEB;
+                background-color: #3681E8;
             }
             QPushButton#linkButton {
                 background: transparent;
                 border: 0;
-                color: #66B8FF;
+                color: #66BBFF;
                 text-align: left;
                 padding: 0;
                 font-weight: 600;
             }
             QPushButton#linkButton:hover {
-                color: #91CCFF;
+                color: #93D2FF;
                 text-decoration: underline;
             }
-            QLineEdit {
-                background-color: #0E151E;
-                color: #F3F5F7;
-                border: 1px solid #2A3B4E;
+            QPushButton#windowControl {
+                background: transparent;
+                border: 0;
+                color: #9EC7F4;
+                font-size: 18px;
+                font-weight: 700;
+                padding: 2px 8px;
+            }
+            QPushButton#windowControl:hover {
+                color: #FFFFFF;
+                background-color: rgba(34, 53, 74, 0.9);
                 border-radius: 8px;
-                padding: 10px 12px;
+            }
+            QLineEdit {
+                background-color: rgba(11, 18, 27, 0.96);
+                color: #F3F7FB;
+                border: 1px solid #2B445C;
+                border-radius: 10px;
+                padding: 11px 12px;
             }
             QTextEdit {
-                background-color: #0E151E;
-                color: #E5E7EB;
-                border: 1px solid #223246;
-                border-radius: 10px;
+                background-color: rgba(11, 18, 27, 0.96);
+                color: #E6EDF7;
+                border: 1px solid #21354A;
+                border-radius: 12px;
                 padding: 10px;
             }
             """
         )
 
-        root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(22, 22, 22, 22)
-        root_layout.setSpacing(16)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(12, 12, 12, 12)
+        outer_layout.setSpacing(0)
 
-        hero = QFrame()
-        hero.setObjectName("card")
-        hero_layout = QHBoxLayout(hero)
-        hero_layout.setContentsMargins(20, 18, 20, 18)
-        hero_layout.setSpacing(18)
+        shell = QFrame()
+        shell.setObjectName("shell")
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(14, 14, 14, 14)
+        shell_layout.setSpacing(14)
+        outer_layout.addWidget(shell)
+
+        title_bar = QFrame()
+        title_bar.setObjectName("titleBar")
+        title_bar.setFixedHeight(48)
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(12, 6, 12, 6)
+        title_layout.setSpacing(10)
+
+        icon_label = QLabel()
+        icon_pixmap = QPixmap(resource_path("assets/truecore_icon.ico"))
+        icon_label.setPixmap(icon_pixmap.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        title_layout.addWidget(icon_label)
+
+        title_text = QLabel("TrueCore Launcher")
+        title_text.setObjectName("windowTitle")
+        title_layout.addWidget(title_text)
+
+        title_layout.addStretch()
+
+        self.launcher_version_pill = QLabel("Launcher v-")
+        self.launcher_version_pill.setObjectName("pill")
+        title_layout.addWidget(self.launcher_version_pill)
+
+        minimize_button = QPushButton("−")
+        minimize_button.setObjectName("windowControl")
+        minimize_button.setFixedSize(34, 28)
+        minimize_button.clicked.connect(self.showMinimized)
+        title_layout.addWidget(minimize_button)
+
+        close_button = QPushButton("×")
+        close_button.setObjectName("windowControl")
+        close_button.setFixedSize(34, 28)
+        close_button.clicked.connect(self.close)
+        title_layout.addWidget(close_button)
+
+        shell_layout.addWidget(title_bar)
+        self.title_bar = title_bar
+
+        hero_layout = QHBoxLayout()
+        hero_layout.setSpacing(14)
+
+        brand_panel = QFrame()
+        brand_panel.setObjectName("brandPanel")
+        brand_panel.setFixedWidth(278)
+        brand_layout = QVBoxLayout(brand_panel)
+        brand_layout.setContentsMargins(18, 18, 18, 18)
+        brand_layout.setSpacing(10)
 
         logo = QLabel()
         logo_pixmap = QPixmap(resource_path("assets/truecore_logo.png"))
-        logo.setPixmap(logo_pixmap.scaled(220, 84, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        logo.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        hero_layout.addWidget(logo, 0)
+        logo.setPixmap(logo_pixmap.scaled(205, 94, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        logo.setAlignment(Qt.AlignCenter)
+        brand_layout.addWidget(logo)
 
-        hero_text_layout = QVBoxLayout()
+        brand_tagline = QLabel("Secure local-first packet review, launch control, and office support.")
+        brand_tagline.setObjectName("heroSubtitle")
+        brand_tagline.setWordWrap(True)
+        brand_layout.addWidget(brand_tagline)
+        brand_layout.addStretch()
+
+        hero_layout.addWidget(brand_panel, 0)
+
+        summary_panel = QFrame()
+        summary_panel.setObjectName("card")
+        summary_layout = QVBoxLayout(summary_panel)
+        summary_layout.setContentsMargins(20, 18, 20, 18)
+        summary_layout.setSpacing(8)
+
         hero_title = QLabel("TrueCore Secure Launch Console")
         hero_title.setObjectName("heroTitle")
+        summary_layout.addWidget(hero_title)
+
         hero_subtitle = QLabel(
-            "The launcher now opens first, checks the latest program build in the background, "
-            "and keeps credential access, update status, and office support in one place."
+            "The new launcher keeps the update check, office identity, launch credentials, "
+            "and support snapshot tools in one compact shell."
         )
         hero_subtitle.setObjectName("heroSubtitle")
         hero_subtitle.setWordWrap(True)
-        hero_text_layout.addWidget(hero_title)
-        hero_text_layout.addWidget(hero_subtitle)
-        hero_layout.addLayout(hero_text_layout, 1)
+        summary_layout.addWidget(hero_subtitle)
 
-        hero_side_layout = QVBoxLayout()
-        hero_side_layout.setSpacing(4)
+        summary_pills = QHBoxLayout()
+        summary_pills.setSpacing(10)
+
         self.hero_office_label = QLabel("Office: Loading...")
-        self.hero_office_label.setStyleSheet("color:#FFFFFF; font-size:14px; font-weight:700;")
-        self.hero_build_label = QLabel("Launcher build: Loading...")
-        self.hero_build_label.setStyleSheet("color:#8EA4BB; font-size:12px;")
-        self.hero_it_label = QLabel("IT Contact: Loading...")
-        self.hero_it_label.setStyleSheet("color:#8EA4BB; font-size:12px;")
-        hero_side_layout.addWidget(self.hero_office_label)
-        hero_side_layout.addWidget(self.hero_build_label)
-        hero_side_layout.addWidget(self.hero_it_label)
-        hero_side_layout.addStretch()
-        hero_layout.addLayout(hero_side_layout, 0)
+        self.hero_office_label.setObjectName("pill")
+        summary_pills.addWidget(self.hero_office_label)
 
-        root_layout.addWidget(hero)
+        self.hero_build_label = QLabel("Build: Loading...")
+        self.hero_build_label.setObjectName("pill")
+        summary_pills.addWidget(self.hero_build_label)
 
-        metrics_frame = QFrame()
-        metrics_layout = QGridLayout(metrics_frame)
-        metrics_layout.setContentsMargins(0, 0, 0, 0)
+        summary_pills.addStretch()
+        summary_layout.addLayout(summary_pills)
+        summary_layout.addStretch()
+
+        hero_layout.addWidget(summary_panel, 1)
+        shell_layout.addLayout(hero_layout)
+
+        metrics_layout = QGridLayout()
         metrics_layout.setHorizontalSpacing(12)
         metrics_layout.setVerticalSpacing(12)
 
-        launcher_card, self.launcher_metric_value, self.launcher_metric_subtitle = self.build_metric_card("Launcher Build", "#57B6FF")
+        launcher_card, self.launcher_metric_value, self.launcher_metric_subtitle = self.build_metric_card("Launcher Build", "#56B7FF")
         engine_card, self.engine_metric_value, self.engine_metric_subtitle = self.build_metric_card("Installed Program", "#34D399")
         sync_card, self.sync_metric_value, self.sync_metric_subtitle = self.build_metric_card("Sync Status", "#F6C945")
-        office_card, self.office_metric_value, self.office_metric_subtitle = self.build_metric_card("Office Identity", "#A78BFA")
+        office_card, self.office_metric_value, self.office_metric_subtitle = self.build_metric_card("Office Identity", "#B28DFF")
 
         metrics_layout.addWidget(launcher_card, 0, 0)
         metrics_layout.addWidget(engine_card, 0, 1)
@@ -414,10 +519,10 @@ class LauncherWindow(QWidget):
         for column in range(4):
             metrics_layout.setColumnStretch(column, 1)
 
-        root_layout.addWidget(metrics_frame)
+        shell_layout.addLayout(metrics_layout)
 
         content_layout = QHBoxLayout()
-        content_layout.setSpacing(16)
+        content_layout.setSpacing(14)
 
         activity_card = QFrame()
         activity_card.setObjectName("card")
@@ -430,16 +535,16 @@ class LauncherWindow(QWidget):
         activity_layout.addWidget(activity_title)
 
         activity_intro = QLabel(
-            "The launcher now loads immediately and handles update checks in the background. "
-            "If a new program build exists, it will download and install it here before launch."
+            "The launcher loads immediately and checks the latest program build in the background. "
+            "If a new build exists, it installs here before launch."
         )
+        activity_intro.setObjectName("heroSubtitle")
         activity_intro.setWordWrap(True)
-        activity_intro.setStyleSheet("color:#9FB3C8;")
         activity_layout.addWidget(activity_intro)
 
         self.activity_box = QTextEdit()
         self.activity_box.setReadOnly(True)
-        self.activity_box.setMinimumHeight(320)
+        self.activity_box.setMinimumHeight(290)
         activity_layout.addWidget(self.activity_box, 1)
 
         activity_button_row = QHBoxLayout()
@@ -449,17 +554,16 @@ class LauncherWindow(QWidget):
         self.refresh_status_button.clicked.connect(self.refresh_launcher_status)
         activity_button_row.addWidget(self.refresh_status_button)
 
+        docs_button = QPushButton("Export Docs Kit")
+        docs_button.clicked.connect(self.open_docs)
+        activity_button_row.addWidget(docs_button)
+
         open_support_folder_button = QPushButton("Open Support Folder")
         open_support_folder_button.clicked.connect(self.open_support_folder)
         activity_button_row.addWidget(open_support_folder_button)
 
-        export_docs_button = QPushButton("Export Docs Kit")
-        export_docs_button.clicked.connect(self.open_docs)
-        activity_button_row.addWidget(export_docs_button)
-
         activity_button_row.addStretch()
         activity_layout.addLayout(activity_button_row)
-
         content_layout.addWidget(activity_card, 3)
 
         launch_card = QFrame()
@@ -473,11 +577,11 @@ class LauncherWindow(QWidget):
         launch_layout.addWidget(launch_title)
 
         launch_intro = QLabel(
-            "Enter the office launch credentials to open TrueCore. If the office forgets them, "
-            "use the support links below to prepare an IT help request with the right build and office details."
+            "Enter the office launch credentials to open TrueCore. "
+            "If the office forgets them, use the quick support links below."
         )
+        launch_intro.setObjectName("heroSubtitle")
         launch_intro.setWordWrap(True)
-        launch_intro.setStyleSheet("color:#9FB3C8;")
         launch_layout.addWidget(launch_intro)
 
         self.username = QLineEdit()
@@ -494,7 +598,7 @@ class LauncherWindow(QWidget):
         launch_layout.addWidget(self.password)
 
         link_row = QHBoxLayout()
-        link_row.setSpacing(10)
+        link_row.setSpacing(14)
 
         forgot_username_button = QPushButton("Forgot Username")
         forgot_username_button.setObjectName("linkButton")
@@ -518,74 +622,80 @@ class LauncherWindow(QWidget):
 
         self.launch_status_label = QLabel("Waiting for credentials.")
         self.launch_status_label.setWordWrap(True)
-        self.launch_status_label.setStyleSheet("color:#8EA4BB;")
+        self.launch_status_label.setStyleSheet("color:#8AA1BA;")
         launch_layout.addWidget(self.launch_status_label)
 
-        help_card = QFrame()
-        help_card.setObjectName("card")
-        help_card.setStyleSheet(
-            "QFrame#card { background-color:#0E151E; border:1px solid #25394F; border-radius:12px; }"
-        )
-        help_layout = QVBoxLayout(help_card)
-        help_layout.setContentsMargins(14, 14, 14, 14)
-        help_layout.setSpacing(8)
+        support_card = QFrame()
+        support_card.setObjectName("brandPanel")
+        support_layout = QVBoxLayout(support_card)
+        support_layout.setContentsMargins(14, 14, 14, 14)
+        support_layout.setSpacing(10)
 
-        help_title = QLabel("Office And Support Snapshot")
-        help_title.setStyleSheet("color:#FFFFFF; font-size:14px; font-weight:700;")
-        help_layout.addWidget(help_title)
+        support_title = QLabel("Office And Support Snapshot")
+        support_title.setStyleSheet("color:#FFFFFF; font-size:14px; font-weight:700;")
+        support_layout.addWidget(support_title)
 
         self.support_summary_label = QLabel("Loading office support profile...")
+        self.support_summary_label.setObjectName("heroSubtitle")
         self.support_summary_label.setWordWrap(True)
-        self.support_summary_label.setStyleSheet("color:#9FB3C8;")
-        help_layout.addWidget(self.support_summary_label)
+        support_layout.addWidget(self.support_summary_label)
 
         self.username_hint_label = QLabel("")
         self.username_hint_label.setWordWrap(True)
-        self.username_hint_label.setStyleSheet("color:#66B8FF; font-size:12px;")
-        help_layout.addWidget(self.username_hint_label)
+        self.username_hint_label.setStyleSheet("color:#69BCFF; font-size:12px; font-weight:600;")
+        support_layout.addWidget(self.username_hint_label)
 
-        support_button_row = QHBoxLayout()
-        support_button_row.setSpacing(10)
-
-        support_button = QPushButton("Support")
-        support_button.clicked.connect(self.open_support)
-        support_button_row.addWidget(support_button)
+        support_actions = QGridLayout()
+        support_actions.setHorizontalSpacing(8)
+        support_actions.setVerticalSpacing(8)
 
         report_button = QPushButton("Report Issue")
         report_button.clicked.connect(self.open_report)
-        support_button_row.addWidget(report_button)
+        report_button.setMinimumHeight(34)
+        support_actions.addWidget(report_button, 0, 0)
+
+        support_folder_button = QPushButton("Support Folder")
+        support_folder_button.clicked.connect(self.open_support_folder)
+        support_folder_button.setMinimumHeight(34)
+        support_actions.addWidget(support_folder_button, 0, 1)
 
         website_button = QPushButton("Website")
         website_button.clicked.connect(self.open_website)
-        support_button_row.addWidget(website_button)
+        website_button.setMinimumHeight(34)
+        support_actions.addWidget(website_button, 1, 0)
 
-        support_button_row.addStretch()
-        help_layout.addLayout(support_button_row)
-        launch_layout.addWidget(help_card)
+        support_email_button = QPushButton("Email Support")
+        support_email_button.clicked.connect(self.open_support)
+        support_email_button.setMinimumHeight(34)
+        support_actions.addWidget(support_email_button, 1, 1)
 
+        support_layout.addLayout(support_actions)
+        launch_layout.addWidget(support_card)
         launch_layout.addStretch()
         content_layout.addWidget(launch_card, 2)
 
-        root_layout.addLayout(content_layout, 1)
+        shell_layout.addLayout(content_layout, 1)
 
     def build_metric_card(self, title, accent):
         frame = QFrame()
         frame.setObjectName("card")
         frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        frame.setMinimumHeight(122)
+        frame.setMinimumHeight(112)
         frame.setStyleSheet(
-            f"QFrame#card {{ background-color:#111A24; border:1px solid #223246; "
-            f"border-top:3px solid {accent}; border-radius:14px; }}"
+            f"QFrame#card {{ background-color: rgba(15, 24, 36, 0.96); border:1px solid #21354A; "
+            f"border-top:3px solid {accent}; border-radius:16px; }}"
         )
 
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(4)
 
         title_label = QLabel(title)
         title_label.setObjectName("metricTitle")
+
         value_label = QLabel("—")
         value_label.setObjectName("metricValue")
+
         subtitle_label = QLabel("")
         subtitle_label.setObjectName("metricSubtle")
         subtitle_label.setWordWrap(True)
@@ -595,6 +705,25 @@ class LauncherWindow(QWidget):
         layout.addWidget(subtitle_label)
         layout.addStretch()
         return frame, value_label, subtitle_label
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.title_bar.geometry().contains(event.position().toPoint()):
+            self._drag_active = True
+            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_active and event.buttons() & Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_active = False
+        super().mouseReleaseEvent(event)
 
     def append_activity(self, message):
         text = str(message or "").strip()
@@ -609,27 +738,26 @@ class LauncherWindow(QWidget):
         office_id = self.office_profile.get("office_id") or "unknown"
         launcher_version = self.release_info.get("version") or "unknown"
         launcher_build_id = self.release_info.get("build_id") or "Unknown"
-        it_email = resolve_it_email()
         username_hint = (
             dict(self.office_profile.get("credential_policy") or {}).get("username_hint")
             or "No office username hint configured yet."
         )
 
+        self.launcher_version_pill.setText(f"Launcher v{launcher_version}")
         self.hero_office_label.setText(f"Office: {office_name}")
-        self.hero_build_label.setText(f"Launcher build: v{launcher_version} | {launcher_build_id}")
-        self.hero_it_label.setText(f"IT Contact: {it_email}")
+        self.hero_build_label.setText(f"Build: {launcher_build_id}")
 
         self.launcher_metric_value.setText(f"v{launcher_version}")
-        self.launcher_metric_subtitle.setText(
-            f"Build ID: {launcher_build_id} | Release channel: {self.release_info.get('release_channel') or 'Unknown'}"
-        )
+        self.launcher_metric_subtitle.setText(f"Build ID: {launcher_build_id}")
 
         self.office_metric_value.setText(office_name)
-        self.office_metric_subtitle.setText(f"Office ID: {office_id} | Install: {self.office_profile.get('install_id') or 'Unknown'}")
+        self.office_metric_subtitle.setText(
+            f"Office ID: {office_id} | Install: {self.office_profile.get('install_id') or 'Unknown'}"
+        )
 
         self.support_summary_label.setText(
             f"This launcher is tied to {office_name}. "
-            f"Support requests will be prepared for {it_email} with office identity and build details included."
+            "Support requests include launcher/program build details and office identity automatically."
         )
         self.username_hint_label.setText(f"Office username hint: {username_hint}")
 
@@ -643,14 +771,13 @@ class LauncherWindow(QWidget):
         self.engine_metric_value.setText(str(local_version))
         self.engine_metric_subtitle.setText(
             f"Integrity: {integrity_status.replace('_', ' ').title()}"
-            + (f" | Server target: v{server_version}" if server_version else "")
+            + (f" | Target: v{server_version}" if server_version else "")
         )
 
     def apply_update_state(self, state):
         state = dict(state or {})
         status = str(state.get("status") or "idle").strip().lower()
         message = str(state.get("message") or "Launcher standing by.").strip()
-        manifest_status = dict(state.get("manifest_authentication") or {}).get("status") or "unknown"
 
         label_map = {
             "checking": "Checking",
@@ -663,10 +790,7 @@ class LauncherWindow(QWidget):
 
         sync_value = label_map.get(status, status.replace("_", " ").title() if status else "Idle")
         self.sync_metric_value.setText(sync_value)
-        self.sync_metric_subtitle.setText(
-            f"{message}"
-            + (f" | Manifest: {manifest_status.replace('_', ' ')}" if manifest_status else "")
-        )
+        self.sync_metric_subtitle.setText(message)
         self.launch_status_label.setText(message)
         self.refresh_engine_snapshot(state)
 
@@ -684,14 +808,14 @@ class LauncherWindow(QWidget):
         if not engine_available:
             self.launch_button.setEnabled(False)
             self.launch_button.setText("Program Not Installed Yet")
-            self.launch_status_label.setText("No local program build is ready yet. Use Refresh Status if this does not resolve shortly.")
+            self.launch_status_label.setText("No local program build is ready yet. Wait for sync or refresh status.")
             return
 
         self.launch_button.setText("Launch TrueCore")
         self.launch_button.setEnabled(has_username and has_password)
 
         if has_username and has_password:
-            self.launch_status_label.setText("Credentials entered. Ready to launch once access is verified.")
+            self.launch_status_label.setText("Credentials entered. Ready to verify and launch.")
         else:
             self.launch_status_label.setText("Enter both username and password to unlock the program.")
 

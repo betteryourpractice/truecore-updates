@@ -439,3 +439,12 @@ CHANGES
 
 * Launcher overhaul, admin panel recovery, hidden PowerShell subprocesses, and credential support snapshots
 
+
+
+VERSION: 4.5
+DATE: 2026-05-10
+
+CHANGES
+
+* Frameless compact launcher redesign with updated launcher support and program sync flow
+

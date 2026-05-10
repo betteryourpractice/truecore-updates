@@ -1,11 +1,11 @@
 {
-    "version": "4.4",
-    "download": "https://github.com/betteryourpractice/truecore-updates/releases/download/v4.4/TrueCore_v4.4.zip",
-    "sha256": "78c534c68d796b65787b544857c4f8e1d4591df05a664a6e3927e9f73ae29c88",
-    "size": 339332154,
-    "build_id": "TC44-20260510-0007",
-    "published_at": "2026-05-10 00:07:48",
+    "version": "4.5",
+    "download": "https://github.com/betteryourpractice/truecore-updates/releases/download/v4.5/TrueCore_v4.5.zip",
+    "sha256": "045931dbddd864deef57bfddcf7dfecc31e77c816b93c4ea85aae924fb0c70fd",
+    "size": 339331923,
+    "build_id": "TC45-20260510-0045",
+    "published_at": "2026-05-10 00:45:48",
     "signature_algorithm": "ed25519",
     "signature_key_id": "d45f23a852c8fc86",
-    "signature": "C+Hs2DA/+bKojip3imE48oH9iWGoPKSEVVM8O3orixaUsPl1tQrs3/EDNFkx25TpkhNaqgSKiCVTGW4VxkLzBg=="
+    "signature": "SQ/hvVF1cRrWOfg3txRln8TTFk9dU64wilyNHH/SeaK2ON48+YPiKx1gm1tSBRqZM22UyZEkiq2MfHyu87BAAw=="
 }
