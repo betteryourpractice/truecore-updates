@@ -475,3 +475,12 @@ CHANGES
 
 * Workspace cleanup and shared office history persistence
 
+
+
+VERSION: 4.9
+DATE: 2026-05-10
+
+CHANGES
+
+* Admin history rendering hardening and local cache refresh
+

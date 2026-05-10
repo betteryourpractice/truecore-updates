@@ -33,12 +33,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from TrueCore.core.case_memory import get_recent_packet_runs
+from TrueCore.core.case_memory import get_recent_packet_runs, memory_totals
 from TrueCore.core.cross_office_benchmarking import (
+    build_local_network_rollup,
     list_imported_snapshot_files,
     load_network_rollup,
 )
-from TrueCore.core.cross_office_learning import build_cross_office_snapshot
+from TrueCore.core.cross_office_learning import build_cross_office_snapshot, export_cross_office_snapshot
 from TrueCore.core.office_rollout import (
     load_office_profile,
     record_office_profile_confirmed,
@@ -47,6 +48,42 @@ from TrueCore.core.office_rollout import (
 
 
 class MainWindowAdminMixin:
+
+    def ensure_admin_history_cache(self):
+
+        try:
+            totals = dict(memory_totals() or {})
+        except Exception:
+            totals = {}
+
+        if int(totals.get("packet_count") or 0) <= 0:
+            return
+
+        try:
+            snapshot = build_cross_office_snapshot()
+            snapshot_summary = dict(snapshot.get("summary") or {})
+            snapshot_packet_count = int(snapshot_summary.get("packet_count") or 0)
+
+            if snapshot_packet_count <= 0:
+                return
+
+            export_cross_office_snapshot()
+
+            imported_snapshot_count = len(list_imported_snapshot_files())
+            current_rollup = load_network_rollup()
+            current_rollup_packet_count = 0
+
+            if isinstance(current_rollup, dict):
+                current_rollup_packet_count = int(current_rollup.get("total_packet_count") or 0)
+
+            # Keep a local single-office rollup in sync so the dashboard never
+            # renders against a stale or empty cache when local history exists.
+            if imported_snapshot_count == 0 and current_rollup_packet_count < snapshot_packet_count:
+                build_local_network_rollup(include_current_office=True)
+
+        except Exception:
+            # Admin should stay usable even if cache regeneration fails.
+            return
 
     def build_admin_action_grid(self, actions, columns=3):
 
@@ -715,8 +752,12 @@ class MainWindowAdminMixin:
         current_summary = dict(current_snapshot.get("summary") or {})
         network_rollup = load_network_rollup()
         imported_snapshot_count = len(list_imported_snapshot_files())
+        network_office_count = 0
+        if isinstance(network_rollup, dict):
+            network_office_count = int(network_rollup.get("office_count") or 0)
 
-        active_summary = network_rollup or current_summary
+        network_live = imported_snapshot_count > 0 or network_office_count > 1
+        active_summary = network_rollup if network_live and isinstance(network_rollup, dict) else current_summary
         office_rankings = list((network_rollup or {}).get("office_rankings") or [])
 
         if office_rankings:
@@ -759,6 +800,7 @@ class MainWindowAdminMixin:
             "recent_avg_runtime": round(sum(float(value) for value in runtimes) / len(runtimes), 2) if runtimes else None,
             "high_risk_count": high_risk_count,
             "correction_required_count": correction_required_count,
+            "network_live": network_live,
             "active_summary": active_summary,
             "top_issue_distribution": dict(sorted(recurring_issue_counter.items(), key=lambda item: item[1], reverse=True)[:6]),
             "recent_score_trend": list(reversed(recent_score_trend[-8:])),
@@ -779,7 +821,7 @@ class MainWindowAdminMixin:
         network_rollup = data.get("network_rollup") or {}
         active_summary = dict(data.get("active_summary") or {})
         imported_snapshot_count = int(data.get("imported_snapshot_count") or 0)
-        network_live = bool(network_rollup)
+        network_live = bool(data.get("network_live"))
 
         summary_label = QLabel(
             "Business Intelligence Dashboard"

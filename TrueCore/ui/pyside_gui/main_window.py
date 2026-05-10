@@ -2055,6 +2055,8 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             dominant_mode = max(analysis_mode_counts.items(), key=lambda item: item[1])[0]
             dominant_mode = self.format_field(dominant_mode)
 
+        self.ensure_admin_history_cache()
+
         office_profile = load_office_profile()
         current_snapshot = build_cross_office_snapshot()
         current_snapshot_summary = dict(current_snapshot.get("summary") or {})
@@ -2085,7 +2087,9 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         network_rollup = load_network_rollup()
         network_office_rankings = list((network_rollup or {}).get("office_rankings") or [])
-        network_status = "Ready" if network_rollup else "Pending"
+        network_office_count = int((network_rollup or {}).get("office_count") or 0) if isinstance(network_rollup, dict) else 0
+        network_live = imported_office_count > 0 or network_office_count > 1
+        network_status = "Ready" if network_live else ("Local Preview" if network_rollup else "Pending")
         network_total_packets = (network_rollup or {}).get("total_packet_count")
         network_average_score = (network_rollup or {}).get("average_packet_score")
         network_average_runtime = (network_rollup or {}).get("average_runtime_seconds")
@@ -2117,25 +2121,25 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             {
                 "title": "Network Rollup",
                 "value": network_status,
-                "subtitle": network_generated_at or "Build after imports to unlock comparison",
-                "accent": "#F2C94C" if network_rollup else "#F2994A",
+                "subtitle": network_generated_at or ("Local office cache is ready" if network_rollup else "Build after imports to unlock comparison"),
+                "accent": "#F2C94C" if network_live else ("#57B6FF" if network_rollup else "#F2994A"),
             },
             {
                 "title": "Network Offices",
-                "value": network_office_count if network_rollup else imported_office_count + 1,
+                "value": network_office_count if network_live else imported_office_count + 1,
                 "subtitle": f"{network_org_count or 1} organizations in view",
                 "accent": "#9B8CFF",
             },
             {
                 "title": "Network Packets",
-                "value": network_total_packets if network_rollup else current_snapshot_summary.get("packet_count", 0),
+                "value": network_total_packets if network_live else current_snapshot_summary.get("packet_count", 0),
                 "subtitle": "Combined learning volume",
                 "accent": "#57B6FF",
             },
             {
                 "title": "Avg Network Score",
-                "value": format_score_value(network_average_score if network_rollup else current_snapshot_summary.get("average_packet_score")),
-                "subtitle": self.format_runtime_value(network_average_runtime) + " average runtime" if network_rollup else "Current office preview",
+                "value": format_score_value(network_average_score if network_live else current_snapshot_summary.get("average_packet_score")),
+                "subtitle": self.format_runtime_value(network_average_runtime) + " average runtime" if network_live else "Current office preview",
                 "accent": "#F2C94C",
             },
         ]
@@ -2549,7 +2553,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             ),
         ]
 
-        if network_rollup:
+        if network_live:
             cross_office_sections.extend(
                 [
                     self.build_detail_card(
@@ -2865,8 +2869,17 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         }
 
     def refresh_admin_panel(self):
+        dashboard_error = None
 
-        self.populate_admin_dashboard()
+        try:
+            self.ensure_admin_history_cache()
+        except Exception:
+            pass
+
+        try:
+            self.populate_admin_dashboard()
+        except Exception as exc:
+            dashboard_error = exc
 
         if not any([self.admin_cross_office_text, self.admin_operations_text, self.admin_audit_text]):
             return
@@ -2884,6 +2897,8 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 self.admin_audit_text.setHtml(views.get("audit", ""))
 
         except Exception as exc:
+            if dashboard_error is not None:
+                exc = dashboard_error
             error_html = (
                 "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
                 "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
