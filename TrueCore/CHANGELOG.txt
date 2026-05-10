@@ -457,3 +457,12 @@ CHANGES
 
 * Launcher update summary and compact support snapshot
 
+
+
+VERSION: 4.7
+DATE: 2026-05-10
+
+CHANGES
+
+* Shared runtime data path for office history persistence
+

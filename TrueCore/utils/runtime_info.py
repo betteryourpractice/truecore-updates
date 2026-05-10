@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import shutil
 
 # -------------------------------------------------
 # RESOURCE PATH
@@ -33,9 +34,110 @@ def get_runtime_project_dir():
     return os.path.join(get_runtime_root(), "TrueCore")
 
 
+_RUNTIME_DATA_READY = False
+
+
+def get_runtime_data_root():
+
+    override = str(os.environ.get("TRUECORE_DATA_DIR") or "").strip()
+    if override:
+        return override
+
+    if os.name == "nt":
+        base_dir = (
+            str(os.environ.get("LOCALAPPDATA") or "").strip()
+            or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        )
+        return os.path.join(base_dir, "TrueCore")
+
+    return os.path.join(os.path.expanduser("~"), ".truecore")
+
+
+def _copy_tree_contents(source_dir, target_dir):
+
+    if not os.path.isdir(source_dir):
+        return
+
+    os.makedirs(target_dir, exist_ok=True)
+
+    for name in os.listdir(source_dir):
+        source_path = os.path.join(source_dir, name)
+        target_path = os.path.join(target_dir, name)
+
+        if os.path.isdir(source_path):
+            shutil.copytree(source_path, target_path, dirs_exist_ok=True)
+        elif not os.path.exists(target_path):
+            shutil.copy2(source_path, target_path)
+
+
+def _legacy_runtime_project_dirs():
+
+    candidates = []
+    install_project_dir = get_runtime_project_dir()
+    candidates.append(install_project_dir)
+
+    exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", "")))
+    if getattr(sys, "frozen", False) and os.path.basename(exe_dir).strip().lower() == "engine":
+        candidates.append(os.path.join(os.path.dirname(exe_dir), "TrueCore"))
+
+    unique = []
+    seen = set()
+    for path in candidates:
+        normalized = os.path.normcase(os.path.abspath(path))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(path)
+    return unique
+
+
+def _path_has_runtime_state(project_dir):
+
+    checks = [
+        os.path.join(project_dir, "Outputs", "truecore_memory.db"),
+        os.path.join(project_dir, "dev_system", "office_profile.json"),
+        os.path.join(project_dir, "dev_system", "launcher_auth.json"),
+        os.path.join(project_dir, "logs", "activity.log"),
+    ]
+    return any(os.path.exists(path) for path in checks)
+
+
+def ensure_runtime_data_root():
+
+    global _RUNTIME_DATA_READY
+
+    target_root = get_runtime_data_root()
+    os.makedirs(target_root, exist_ok=True)
+
+    if _RUNTIME_DATA_READY:
+        return target_root
+
+    _RUNTIME_DATA_READY = True
+
+    if _path_has_runtime_state(target_root):
+        return target_root
+
+    target_norm = os.path.normcase(os.path.abspath(target_root))
+
+    for legacy_dir in _legacy_runtime_project_dirs():
+        legacy_norm = os.path.normcase(os.path.abspath(legacy_dir))
+        if legacy_norm == target_norm:
+            continue
+        if not _path_has_runtime_state(legacy_dir):
+            continue
+
+        for folder_name in ("Outputs", "logs", "dev_system"):
+            source_dir = os.path.join(legacy_dir, folder_name)
+            target_dir = os.path.join(target_root, folder_name)
+            _copy_tree_contents(source_dir, target_dir)
+        break
+
+    return target_root
+
+
 def runtime_data_path(*parts, ensure_parent=False):
 
-    path = os.path.join(get_runtime_project_dir(), *parts)
+    path = os.path.join(ensure_runtime_data_root(), *parts)
 
     if ensure_parent:
         os.makedirs(os.path.dirname(path), exist_ok=True)
