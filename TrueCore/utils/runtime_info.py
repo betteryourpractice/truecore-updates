@@ -70,6 +70,32 @@ def _copy_tree_contents(source_dir, target_dir):
             shutil.copy2(source_path, target_path)
 
 
+def _copy_file_if_missing(source_path, target_path):
+
+    if not os.path.isfile(source_path) or os.path.exists(target_path):
+        return False
+
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    shutil.copy2(source_path, target_path)
+    return True
+
+
+def _copy_file_if_richer(source_path, target_path):
+
+    if not os.path.isfile(source_path):
+        return False
+
+    source_size = os.path.getsize(source_path)
+    target_size = os.path.getsize(target_path) if os.path.isfile(target_path) else -1
+
+    if source_size <= target_size:
+        return False
+
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    shutil.copy2(source_path, target_path)
+    return True
+
+
 def _legacy_runtime_project_dirs():
 
     candidates = []
@@ -114,9 +140,6 @@ def ensure_runtime_data_root():
 
     _RUNTIME_DATA_READY = True
 
-    if _path_has_runtime_state(target_root):
-        return target_root
-
     target_norm = os.path.normcase(os.path.abspath(target_root))
 
     for legacy_dir in _legacy_runtime_project_dirs():
@@ -126,10 +149,31 @@ def ensure_runtime_data_root():
         if not _path_has_runtime_state(legacy_dir):
             continue
 
-        for folder_name in ("Outputs", "logs", "dev_system"):
+        source_db = os.path.join(legacy_dir, "Outputs", "truecore_memory.db")
+        target_db = os.path.join(target_root, "Outputs", "truecore_memory.db")
+        _copy_file_if_richer(source_db, target_db)
+
+        for folder_name in ("logs",):
             source_dir = os.path.join(legacy_dir, folder_name)
             target_dir = os.path.join(target_root, folder_name)
             _copy_tree_contents(source_dir, target_dir)
+
+        for folder_name in ("Outputs", "dev_system"):
+            source_dir = os.path.join(legacy_dir, folder_name)
+            target_dir = os.path.join(target_root, folder_name)
+            if not os.path.isdir(source_dir):
+                continue
+            os.makedirs(target_dir, exist_ok=True)
+            for name in os.listdir(source_dir):
+                source_path = os.path.join(source_dir, name)
+                target_path = os.path.join(target_dir, name)
+                if os.path.isdir(source_path):
+                    if not os.path.exists(target_path):
+                        shutil.copytree(source_path, target_path, dirs_exist_ok=True)
+                    continue
+                if os.path.normcase(os.path.abspath(source_path)) == os.path.normcase(os.path.abspath(source_db)):
+                    continue
+                _copy_file_if_missing(source_path, target_path)
         break
 
     return target_root

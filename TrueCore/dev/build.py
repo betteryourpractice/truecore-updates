@@ -189,6 +189,15 @@ def post_build_clean():
 
     print("\nRunning post-build cleanup...")
 
+    build_dir = os.path.join(ROOT_DIR, "build")
+    if os.path.exists(build_dir):
+        shutil.rmtree(build_dir)
+
+    for spec_name in ("TrueCoreEngine.spec", "TrueCoreLauncher.spec"):
+        spec_path = os.path.join(ROOT_DIR, spec_name)
+        if os.path.exists(spec_path):
+            os.remove(spec_path)
+
     for root, dirs, files in os.walk(ROOT_DIR):
 
         for d in dirs:

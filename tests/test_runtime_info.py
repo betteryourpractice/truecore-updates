@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -28,6 +30,34 @@ class RuntimeInfoTests(unittest.TestCase):
             with mock.patch.object(runtime_info.sys, "executable", r"C:\Deploy\engine\TrueCoreEngine.exe"):
                 self.assertEqual(runtime_info.get_runtime_root(), r"C:\Deploy")
                 self.assertEqual(runtime_info.get_runtime_project_dir(), r"C:\Deploy\TrueCore")
+
+    def test_runtime_data_root_migrates_richer_legacy_memory_db(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_root = os.path.join(temp_dir, "appdata_truecore")
+            legacy_root = os.path.join(temp_dir, "legacy_truecore")
+
+            os.makedirs(os.path.join(target_root, "Outputs"), exist_ok=True)
+            os.makedirs(os.path.join(legacy_root, "Outputs"), exist_ok=True)
+
+            target_db = os.path.join(target_root, "Outputs", "truecore_memory.db")
+            legacy_db = os.path.join(legacy_root, "Outputs", "truecore_memory.db")
+
+            with open(target_db, "wb") as handle:
+                handle.write(b"tiny")
+            with open(legacy_db, "wb") as handle:
+                handle.write(b"legacy-history-data")
+
+            original_ready = runtime_info._RUNTIME_DATA_READY
+            try:
+                runtime_info._RUNTIME_DATA_READY = False
+                with mock.patch("TrueCore.utils.runtime_info.get_runtime_data_root", return_value=target_root):
+                    with mock.patch("TrueCore.utils.runtime_info._legacy_runtime_project_dirs", return_value=[legacy_root]):
+                        resolved = runtime_info.ensure_runtime_data_root()
+                        self.assertEqual(resolved, target_root)
+                        with open(target_db, "rb") as handle:
+                            self.assertEqual(handle.read(), b"legacy-history-data")
+            finally:
+                runtime_info._RUNTIME_DATA_READY = original_ready
 
 
 if __name__ == "__main__":
