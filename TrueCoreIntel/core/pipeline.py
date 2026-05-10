@@ -46,6 +46,27 @@ class TrueCorePipeline:
 
         packet.output["packet_label"] = self.build_packet_label(packet)
         packet.output["packet_score"] = packet.packet_score
+        packet.output["packet_evidence_score"] = getattr(packet, "packet_evidence_score", None)
+        packet.output["packet_evidence_band"] = getattr(packet, "packet_evidence_band", None)
+        packet.output["packet_assembly_score"] = getattr(packet, "packet_assembly_score", None)
+        packet.output["packet_assembly_band"] = getattr(packet, "packet_assembly_band", None)
+        packet.output["packet_profile"] = getattr(packet, "packet_profile", None)
+        packet.output["packet_profile_label"] = getattr(packet, "packet_profile_label", None)
+        packet.output["packet_archetype"] = getattr(packet, "packet_archetype", None)
+        packet.output["packet_archetype_label"] = getattr(packet, "packet_archetype_label", None)
+        packet.output["packet_archetype_description"] = getattr(packet, "packet_archetype_description", None)
+        packet.output["packet_archetype_signals"] = list(getattr(packet, "packet_archetype_signals", []) or [])
+        packet.output["packet_invariants"] = dict(getattr(packet, "packet_invariants", {}) or {})
+        packet.output["packet_invariant_coverage_score"] = getattr(packet, "packet_invariant_coverage_score", None)
+        packet.output["packet_invariant_coverage_band"] = getattr(packet, "packet_invariant_coverage_band", None)
+        packet.output["packet_variability"] = dict(getattr(packet, "packet_variability", {}) or {})
+        packet.output["packet_format_variability"] = getattr(packet, "packet_format_variability", None)
+        packet.output["packet_variability_reasons"] = list(getattr(packet, "packet_variability_reasons", []) or [])
+        packet.output["packet_failure_modes"] = list(getattr(packet, "packet_failure_modes", []) or [])
+        packet.output["packet_failure_mode_labels"] = list(getattr(packet, "packet_failure_mode_labels", []) or [])
+        packet.output["packet_failure_mode_summaries"] = list(getattr(packet, "packet_failure_mode_summaries", []) or [])
+        packet.output["packet_classification_caution"] = bool(getattr(packet, "packet_classification_caution", False))
+        packet.output["packet_confidence_penalty"] = getattr(packet, "packet_confidence_penalty", 0.0)
         packet.output["packet_confidence"] = packet.packet_confidence
         packet.output["packet_strength"] = packet.packet_strength
         packet.output["approval_probability"] = packet.approval_probability

@@ -1,19 +1,24 @@
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QMainWindow,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
+    QSplitter,
+    QTabWidget,
     QTableWidget,
     QTextEdit,
     QFrame,
     QFileDialog,
-    QInputDialog,
     QDialog,
     QMessageBox,
     QLineEdit,
+    QComboBox,
     QTableWidgetItem,
     QHeaderView,
     QGraphicsOpacityEffect
@@ -29,7 +34,7 @@ import json
 import re
 from datetime import datetime
 
-from TrueCore.utils.logging_system import LOG_FILE, LEGACY_LOG_FILE, log_event, mask_phi
+from TrueCore.utils.logging_system import LOG_FILE, log_event, mask_phi
 from TrueCore.utils.admin_auth import ensure_admin_auth_config, verify_admin_password
 from TrueCore.utils.runtime_info import (
     ensure_runtime_environment,
@@ -42,14 +47,64 @@ from TrueCore.utils.runtime_info import (
 from TrueCore.core.packet_processor import process_packet
 from TrueCore.core.packet_triage import triage_packet
 from TrueCore.core.host_intelligence import record_manual_outcome
+from TrueCore.core.office_rollout import (
+    build_rollout_summary,
+    load_office_profile,
+)
 from TrueCore.core.case_memory import (
     get_recent_packet_events,
     get_recent_packet_runs,
     memory_totals,
+    parse_issues,
     parse_intel_summary,
 )
-from TrueCore.export.workbook_export import export_patient
+from TrueCore.core.cross_office_learning import (
+    OFFICE_PROFILE_PATH,
+    SNAPSHOT_OUTPUT_PATH,
+    build_cross_office_snapshot,
+    export_cross_office_snapshot,
+)
+from TrueCore.core.cross_office_benchmarking import (
+    IMPORTED_SNAPSHOT_DIR,
+    NETWORK_ROLLUP_OUTPUT_PATH,
+    build_local_network_rollup,
+    import_cross_office_snapshot_files,
+    list_imported_snapshot_files,
+    load_cross_office_snapshot,
+    load_network_rollup,
+)
+from TrueCore.core.cross_office_intelligence import build_local_cross_office_intelligence
+from TrueCore.core.hybrid_sync import (
+    ACTIVE_NETWORK_INTELLIGENCE_PACKAGE_PATH,
+    OFFICE_SYNC_PACKAGE_PATH,
+    build_local_network_intelligence_package,
+    export_office_sync_package,
+    import_network_intelligence_package,
+    load_active_network_intelligence_package,
+)
+from TrueCore.core.outcome_learning_intelligence import build_predictive_learning_snapshot
+from TrueCore.core.platform_scaling import (
+    DEPLOYMENT_MANIFEST_PATH,
+    SUPPORT_BUNDLE_OUTPUT_PATH,
+    build_deployment_manifest,
+    export_support_bundle,
+    write_deployment_manifest,
+)
+from TrueCore.core.privacy_controls import (
+    build_local_phi_storage_status,
+    export_local_phi_reset_archive,
+    purge_local_phi_storage,
+)
 from TrueCore.medical.icd_lookup import load_icd_codes
+from TrueCore.ui.pyside_gui.packet_details_renderer import (
+    render_build_advanced_intel_sections,
+    render_build_condensed_advanced_intel_sections,
+    render_build_export_summary,
+    render_build_packet_details_html_condensed,
+    render_build_scan_diagnostics_html,
+)
+from TrueCore.ui.pyside_gui.main_window_admin_mixin import MainWindowAdminMixin
+from TrueCore.ui.pyside_gui.main_window_packet_ui_mixin import MainWindowPacketUiMixin
 
 
 def build_processing_error_result(file_path, error_text):
@@ -109,7 +164,16 @@ class PacketAnalysisWorker(QObject):
         self.finished.emit()
 
 
-class MainWindow(QMainWindow):
+class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
+    OUTCOME_OPTION_DETAILS = {
+        "Approved": "Use when the packet was accepted in the real world without needing more correction.",
+        "Denied": "Use when the packet was formally denied or rejected downstream.",
+        "Corrected": "Use when the packet needed corrections and was sent back for fixes, but not yet resubmitted.",
+        "Resubmitted": "Use when the corrected packet was sent back into the workflow.",
+        "Reviewer Override": "Use when a human reviewer intentionally disagreed with the system's recommendation.",
+        "Deferred": "Use when the packet is still waiting on outside action and the final disposition is not known yet.",
+    }
+    OUTCOME_NOTE_REQUIRED = {"Reviewer Override", "Deferred"}
 
     def __init__(self):
         super().__init__()
@@ -130,6 +194,13 @@ class MainWindow(QMainWindow):
         self.results = {}
         self.scan_diagnostics_dialog = None
         self.scan_diagnostics_view = None
+        self.admin_dialog = None
+        self.admin_dashboard_host = None
+        self.admin_dashboard_focus = None
+        self.admin_panel_text = None
+        self.admin_cross_office_text = None
+        self.admin_operations_text = None
+        self.admin_audit_text = None
         self.analysis_thread = None
         self.analysis_worker = None
 
@@ -209,9 +280,12 @@ class MainWindow(QMainWindow):
         self.btn_scan_diagnostics.setEnabled(False)
         self.btn_record_outcome = QPushButton(
             QIcon(icon_base + "file-text.svg"),
-            "Record Outcome"
+            "Record Real Outcome"
         )
         self.btn_record_outcome.setEnabled(False)
+        self.btn_record_outcome.setToolTip(
+            "Save what actually happened to the selected packet after human review."
+        )
 
         self.btn_close = QPushButton("Exit")
         self.btn_close.setObjectName("closeButton")
@@ -303,10 +377,15 @@ class MainWindow(QMainWindow):
 
         results_layout = QVBoxLayout()
 
-        title = QLabel("Packet Results")
-        title.setObjectName("sectionTitle")
+        self.results_title_label = QLabel("Packet Results")
+        self.results_title_label.setObjectName("sectionTitle")
 
-        results_layout.addWidget(title)
+        results_layout.addWidget(self.results_title_label)
+
+        self.results_hint_label = QLabel("Load packets, analyze them, then select a row to review details.")
+        self.results_hint_label.setWordWrap(True)
+        self.results_hint_label.setStyleSheet("color:#9CA3AF; font-size:12px; margin-top:-4px; margin-bottom:4px;")
+        results_layout.addWidget(self.results_hint_label)
 
         self.table = QTableWidget()
         self.table.setColumnCount(3)
@@ -316,7 +395,10 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(QHeaderView.Stretch)
 
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        self.table.setSortingEnabled(False)
 
         self.table.itemSelectionChanged.connect(self.load_packet_details)
 
@@ -384,6 +466,7 @@ class MainWindow(QMainWindow):
         self.btn_record_outcome.clicked.connect(self.open_record_outcome)
         self.btn_admin.clicked.connect(self.open_admin_panel)
         self.btn_close.clicked.connect(self.close)
+        self.show_reviewer_empty_state("startup")
 
 
     # ----------------------------------------------
@@ -449,17 +532,8 @@ class MainWindow(QMainWindow):
 
         icon_base = resource_path("ui/pyside_gui/assets/icons/")
         basename = os.path.basename(file)
-        score = result.get("score", 0)
+        score = self.get_result_score(result)
         intel_display = result.get("intel", {}).get("display", {})
-        workbook_summary = self.build_export_summary(result)
-        workbook_summary.update({
-            "packet_confidence": intel_display.get("packet_confidence"),
-            "approval_probability": intel_display.get("approval_probability"),
-            "submission_readiness": intel_display.get("submission_readiness"),
-            "workflow_queue": intel_display.get("workflow_queue"),
-            "next_action": intel_display.get("next_action"),
-            "denial_risk": intel_display.get("denial_risk"),
-        })
 
         self.results[file] = result
 
@@ -468,13 +542,16 @@ class MainWindow(QMainWindow):
 
         file_item = QTableWidgetItem(basename)
         file_item.setIcon(QIcon(icon_base + "folder.svg"))
+        file_item.setData(Qt.UserRole, file)
         self.table.setItem(row, 0, file_item)
 
-        score_item = QTableWidgetItem(str(score))
+        score_item = QTableWidgetItem()
+        score_item.setData(Qt.DisplayRole, int(score or 0))
         score_item.setTextAlignment(Qt.AlignCenter)
         self.table.setItem(row, 1, score_item)
 
         status = QTableWidgetItem()
+        status.setData(Qt.UserRole, file)
 
         if result.get("_processing_error"):
             status.setText("Error")
@@ -486,9 +563,8 @@ class MainWindow(QMainWindow):
             status.setText("Approved")
             status.setIcon(QIcon(icon_base + "check.svg"))
             status.setForeground(QColor("#27AE60"))
-            export_patient(result.get("fields", {}), file, workbook_summary)
             self.log(
-                f"Approved packet exported → {basename}",
+                f"Approved packet ready → {basename}",
                 action="packet_processed"
             )
         elif score >= 70:
@@ -521,9 +597,18 @@ class MainWindow(QMainWindow):
 
         self.set_analysis_controls_enabled(True)
 
-        if self.table.rowCount() > 0 and self.table.currentRow() < 0:
+        if self.table.rowCount() > 0:
+            self.table.setSortingEnabled(True)
+            self.table.sortByColumn(1, Qt.DescendingOrder)
             self.table.selectRow(0)
             self.load_packet_details()
+            self.update_results_hint(
+                f"{self.table.rowCount()} packet result{'s' if self.table.rowCount() != 1 else ''} ready. "
+                "Sorted by score. Select any row to review details."
+            )
+        else:
+            self.show_reviewer_empty_state("post_analysis")
+            self.update_results_hint("Analysis finished, but no packet rows were returned.")
 
         self.update_scan_diagnostics_button()
         self.log("Packet analysis complete.")
@@ -551,6 +636,148 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def update_results_hint(self, message=None):
+
+        if not hasattr(self, "results_hint_label") or not self.results_hint_label:
+            return
+
+        default_message = "Load packets, analyze them, then select a row to review details."
+        self.results_hint_label.setText(str(message or default_message))
+
+    def build_reviewer_empty_state_html(self, state="startup"):
+
+        file_count = len(self.files or [])
+        result_count = self.table.rowCount() if hasattr(self, "table") else 0
+
+        states = {
+            "startup": {
+                "title": "Start a packet review",
+                "subtitle": "Use Select Packets or Analyze Folder to load work into the reviewer.",
+                "steps": [
+                    "Load one or more packet files.",
+                    "Click Analyze Packets to run TrueCore intelligence.",
+                    "Select a result row to review the packet story and fixes.",
+                    "Record a real outcome later when you know what happened operationally.",
+                ],
+            },
+            "files_loaded": {
+                "title": f"{file_count} packet{'s' if file_count != 1 else ''} loaded",
+                "subtitle": "The files are ready. The next step is to analyze them so the reviewer can score and explain each packet.",
+                "steps": [
+                    "Click Analyze Packets to start processing.",
+                    "The results table will fill in as each packet finishes.",
+                    "When analysis is done, click any row to open the full packet review.",
+                ],
+            },
+            "no_files": {
+                "title": "No packets are loaded yet",
+                "subtitle": "There is nothing to analyze right now.",
+                "steps": [
+                    "Click Select Packets to choose individual files.",
+                    "Or click Analyze Folder to load a whole folder of packets.",
+                ],
+            },
+            "analyzing": {
+                "title": "Analysis is running",
+                "subtitle": f"TrueCore is processing {file_count} packet{'s' if file_count != 1 else ''}.",
+                "steps": [
+                    "Scores will populate in the results table as packets finish.",
+                    "When the first row appears, you can select it to review the packet details.",
+                ],
+            },
+            "no_selection": {
+                "title": "Select a packet result",
+                "subtitle": "The reviewer detail view opens from the results table on the left.",
+                "steps": [
+                    "Click a packet row to open its quick read, packet summary, and issues.",
+                    "Use Record Real Outcome after review when you know the real disposition.",
+                ],
+            },
+            "cleared": {
+                "title": "Results cleared",
+                "subtitle": "The last review session has been removed from the screen.",
+                "steps": [
+                    "Load new packets to start another review cycle.",
+                    "Analyze them to repopulate the results table and detail view.",
+                ],
+            },
+            "no_result": {
+                "title": "No packet details are ready for this row",
+                "subtitle": "The selected result does not currently have a renderable packet payload.",
+                "steps": [
+                    "Try selecting a different row.",
+                    "If the issue persists, review the Audit Console for processing errors.",
+                ],
+            },
+            "post_analysis": {
+                "title": "Review complete results",
+                "subtitle": f"{result_count} packet result{'s' if result_count != 1 else ''} are ready.",
+                "steps": [
+                    "Rows are sorted by score so the highest packet scores sit at the top.",
+                    "Select any row to see the quick read, decision snapshot, and review guidance.",
+                ],
+            },
+        }
+
+        payload = states.get(state, states["startup"])
+        steps_html = "".join(
+            f"<li style=\"margin-bottom:8px;\">{html.escape(str(step))}</li>"
+            for step in payload["steps"]
+        )
+
+        return (
+            "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+            "font-family:'Segoe UI'; font-size:13px; line-height:1.5; margin:0;\">"
+            "<div style=\"margin:8px 0 0 0; padding:20px 22px; background:#151C26; "
+            "border:1px solid #243244; border-radius:14px;\">"
+            f"<div style=\"font-size:20px; font-weight:700; color:#FFFFFF; margin-bottom:8px;\">{html.escape(payload['title'])}</div>"
+            f"<div style=\"color:#A9B6C7; margin-bottom:14px;\">{html.escape(payload['subtitle'])}</div>"
+            "<div style=\"display:inline-block; padding:6px 10px; border-radius:999px; "
+            "background:#0F1824; border:1px solid #2F80ED; color:#7EC8FF; font-size:11px; "
+            "font-weight:600; margin-bottom:14px;\">Reviewer Workflow</div>"
+            "<ol style=\"margin:0 0 0 18px; padding:0; color:#DCE6F2;\">"
+            f"{steps_html}"
+            "</ol>"
+            "</div></body></html>"
+        )
+
+    def show_reviewer_empty_state(self, state="startup"):
+
+        if hasattr(self, "details") and self.details:
+            self.details.setHtml(self.build_reviewer_empty_state_html(state))
+
+    def get_selected_table_file(self):
+
+        if not hasattr(self, "table") or not self.table:
+            return None
+
+        selected = self.table.currentRow()
+        if selected < 0:
+            return None
+
+        file_item = self.table.item(selected, 0)
+        if not file_item:
+            return None
+
+        return file_item.data(Qt.UserRole)
+
+    def get_result_score(self, result):
+
+        intel = dict((result or {}).get("intel", {}) or {})
+        display = dict(intel.get("display", {}) or {})
+
+        for candidate in (
+            display.get("core_packet_score"),
+            intel.get("core_packet_score"),
+            (result or {}).get("score"),
+        ):
+            try:
+                return int(float(candidate))
+            except Exception:
+                continue
+
+        return 0
+
     def format_field(self,name):
 
         return name.replace("_"," ").title()
@@ -575,6 +802,10 @@ class MainWindow(QMainWindow):
             "icd_codes": "ICD Codes",
             "va_icn": "VA ICN",
             "npi": "NPI",
+            "treating_provider": "Treating Provider",
+            "followup_provider": "Follow-Up Provider",
+            "clinic_name": "Community Facility",
+            "location": "Treating Location",
         }
 
         return mapping.get(str(name or "").strip().lower(), self.format_field(str(name or "")))
@@ -637,6 +868,7 @@ class MainWindow(QMainWindow):
             "seoc": "SEOC",
             "lomn": "Letter of Medical Necessity",
             "rfs": "VA Form 10-10172",
+            "approved_referral": "VA Form 10-7080",
             "clinical_notes": "Clinical Notes",
             "imaging_report": "MRI / Imaging Report",
             "conservative_care_summary": "Conservative Care Summary",
@@ -645,241 +877,6 @@ class MainWindow(QMainWindow):
         normalized = str(document_type or "").strip().lower()
         if not normalized:
             return ""
-
-        return mapping.get(normalized, self.format_field(normalized))
-
-    def format_source_role_label(self, role):
-
-        mapping = {
-            "va_clinic": "VA",
-            "community_provider": "community provider",
-            "shared": "shared",
-            "patient": "patient",
-        }
-
-        normalized = str(role or "").strip().lower()
-        if not normalized:
-            return ""
-
-        return mapping.get(normalized, self.format_field(normalized))
-
-    def format_concept_source_phrase(self, item):
-
-        concept_key = str((item or {}).get("concept") or "").strip().lower()
-        document_type = str((item or {}).get("document_type") or "").strip()
-        primary_section_role = str((item or {}).get("primary_section_role") or "").strip().lower()
-        role_label = self.format_source_role_label((item or {}).get("source_role"))
-        page_number = (item or {}).get("page_number")
-        page_text = f" on page {page_number}" if page_number not in (None, "", [], {}) else ""
-
-        if document_type and document_type.lower() != "unknown":
-            return f"{self.format_document_type_label(document_type)}{page_text}"
-
-        if concept_key == "request_intent":
-            lead = f"{role_label} request content".strip() if role_label else "request content"
-            return f"{lead}{page_text}"
-
-        if concept_key == "diagnostic_basis":
-            lead = f"{role_label} diagnostic content".strip() if role_label else "diagnostic content"
-            return f"{lead}{page_text}"
-
-        if concept_key == "clinical_justification":
-            if primary_section_role == "imaging_support":
-                lead = f"{role_label} imaging support".strip() if role_label else "imaging support"
-            elif primary_section_role == "justification":
-                lead = f"{role_label} clinical justification".strip() if role_label else "clinical justification"
-            else:
-                lead = f"{role_label} clinical support".strip() if role_label else "clinical support"
-            return f"{lead}{page_text}"
-
-        if concept_key == "routing_admin":
-            lead = f"{role_label} facility and admin content".strip() if role_label else "facility and admin content"
-            return f"{lead}{page_text}"
-
-        if primary_section_role:
-            return f"{self.format_field(primary_section_role)}{page_text}"
-
-        if role_label:
-            return f"{role_label} packet content{page_text}"
-
-        return f"page {page_number}" if page_text else ""
-
-    def format_concept_evidence_item(self, item):
-
-        concept_label = self.format_field((item or {}).get("concept_label") or (item or {}).get("concept"))
-        source_phrase = self.format_concept_source_phrase(item)
-
-        if not concept_label:
-            return ""
-
-        if source_phrase:
-            return f"{concept_label}: Supported by {source_phrase}"
-
-        return concept_label
-
-    def polish_review_rationale_item(self, item):
-
-        text = self.format_detail_value(item)
-
-        concept_patterns = [
-            (r"^Request intent appears in (.+)\.$", "Request intent is supported by {source}."),
-            (r"^Diagnostic basis appears in (.+)\.$", "Diagnostic basis is supported by {source}."),
-            (r"^Clinical justification appears in (.+)\.$", "Clinical justification is supported by {source}."),
-            (r"^Routing and admin details appear in (.+)\.$", "Routing and admin details are supported by {source}."),
-        ]
-
-        for pattern, template in concept_patterns:
-            match = re.match(pattern, text, flags=re.IGNORECASE)
-            if not match:
-                continue
-            source = str(match.group(1) or "").strip()
-            source = re.sub(r"\brequest intent section\b", "request content", source, flags=re.IGNORECASE)
-            source = re.sub(r"\bdiagnostic basis section\b", "diagnostic content", source, flags=re.IGNORECASE)
-            source = re.sub(r"\bclinical justification section\b", "clinical support", source, flags=re.IGNORECASE)
-            source = re.sub(r"\bidentity admin section\b", "admin content", source, flags=re.IGNORECASE)
-            source = re.sub(r"\brouting followup section\b", "routing follow-up content", source, flags=re.IGNORECASE)
-            return template.format(source=source)
-
-        text = re.sub(r"^Inferred packet profile:\s*", "Packet profile: ", text, flags=re.IGNORECASE)
-        text = re.sub(r"\bExpected document family:\s*", "Expected documents: ", text, flags=re.IGNORECASE)
-        return text
-
-    def classify_review_rationale_item(self, item):
-
-        text = self.polish_review_rationale_item(item)
-        normalized = str(text or "").strip().lower()
-
-        if not normalized:
-            return ""
-
-        if normalized.startswith("training or template scaffolding detected"):
-            return "template"
-        if "packet may contain mixed patient or case identifiers" in normalized or "multiple identity signals suggest" in normalized:
-            return "integrity"
-        if "mixed clinical history still needs reviewer alignment" in normalized:
-            return "clinical_alignment"
-        if "diagnosis and icd" in normalized and "aligned" in normalized:
-            return "clinical_alignment"
-        if normalized.startswith("packet profile:"):
-            return "packet_profile"
-        if "critical required fields are missing" in normalized or normalized.startswith("missing required fields"):
-            return "missing_fields"
-        if "required supporting documents are missing" in normalized or normalized.startswith("missing required documents"):
-            return "missing_documents"
-        if normalized.startswith("request intent "):
-            return "concept_request"
-        if normalized.startswith("diagnostic basis "):
-            return "concept_diagnostic"
-        if normalized.startswith("clinical justification "):
-            return "concept_justification"
-        if normalized.startswith("routing and admin details "):
-            return "concept_routing"
-        if "packet has " in normalized or "overall packet strength is weak" in normalized or "packet is weak due" in normalized:
-            return "overall_support"
-        if "field conflicts still require reviewer confirmation" in normalized or "conflicts were found" in normalized:
-            return "conflicts"
-
-        return f"other:{normalized}"
-
-    def polish_review_rationale(self, items, max_items=5):
-
-        if not items:
-            return []
-
-        ordered_categories = [
-            "template",
-            "integrity",
-            "clinical_alignment",
-            "missing_fields",
-            "missing_documents",
-            "overall_support",
-            "packet_profile",
-            "concept_diagnostic",
-            "concept_justification",
-            "concept_request",
-            "concept_routing",
-            "conflicts",
-        ]
-
-        buckets = {}
-        category_order = []
-
-        for raw_item in items:
-            polished = self.polish_review_rationale_item(raw_item)
-            if not polished or polished == "Missing":
-                continue
-
-            category = self.classify_review_rationale_item(polished)
-            if category in buckets:
-                continue
-
-            buckets[category] = polished
-            category_order.append(category)
-
-        sorted_categories = [
-            category
-            for category in ordered_categories
-            if category in buckets
-        ]
-        sorted_categories.extend(
-            category for category in category_order
-            if category not in sorted_categories
-        )
-
-        return [buckets[category] for category in sorted_categories[:max_items]]
-
-    def format_evidence_rating(self, score):
-
-        if score in (None, "", [], {}):
-            return score
-
-        try:
-            numeric_score = float(score)
-        except (TypeError, ValueError):
-            return score
-
-        if numeric_score >= 95:
-            band = "Very strong"
-        elif numeric_score >= 85:
-            band = "Strong"
-        elif numeric_score >= 70:
-            band = "Moderate"
-        else:
-            band = "Limited"
-
-        return f"{band} ({int(round(numeric_score))})"
-
-    def get_issue_display_palette(self, intel_display):
-
-        missing_items = list((intel_display or {}).get("missing_items", []) or [])
-        denial_risk = str((intel_display or {}).get("denial_risk") or "").strip().lower()
-        readiness = str((intel_display or {}).get("submission_readiness") or "").strip().lower()
-
-        if missing_items or denial_risk in {"high", "critical"} or readiness == "not_ready":
-            return {
-                "color": "#EB5757",
-                "accent": "#EB5757",
-            }
-
-        return {
-            "color": "#F2C94C",
-            "accent": "#F2994A",
-        }
-
-    def format_scan_mode(self, mode):
-
-        normalized = str(mode or "").strip().lower()
-
-        mapping = {
-            "native_text": "Native Text",
-            "native_text_structured": "Native Text + Field Zones",
-            "ocr_text": "OCR Text",
-            "layout_ocr": "Layout OCR",
-            "fallback_ocr": "OCR Fallback",
-        }
-
-        if not normalized:
-            return "Unknown"
 
         return mapping.get(normalized, self.format_field(normalized))
 
@@ -907,913 +904,22 @@ class MainWindow(QMainWindow):
 
         return f"{numeric_value:.1f}s"
 
-    def build_metric_tiles(self, tiles):
-
-        rendered_tiles = []
-
-        for tile in tiles:
-            if not isinstance(tile, dict):
-                continue
-
-            title = str(tile.get("title") or "").strip()
-            value = self.format_detail_value(tile.get("value"))
-            accent = str(tile.get("accent") or "#57B6FF")
-            subtitle = str(tile.get("subtitle") or "").strip()
-
-            if not title:
-                continue
-
-            subtitle_html = (
-                f"<div style=\"color:#9CA3AF; font-size:11px; margin-top:4px;\">{html.escape(subtitle)}</div>"
-                if subtitle else ""
-            )
-
-            rendered_tiles.append(
-                "<div style=\"display:inline-block; width:31%; min-width:180px; vertical-align:top; "
-                "margin:0 1.5% 12px 0; padding:12px 14px; background-color:#10161E; "
-                f"border:1px solid #253243; border-top:3px solid {accent}; border-radius:8px; box-sizing:border-box;\">"
-                f"<div style=\"color:#FFFFFF; font-size:12px; font-weight:600;\">{html.escape(title)}</div>"
-                f"<div style=\"color:{accent}; font-size:24px; font-weight:700; margin-top:6px;\">{html.escape(value)}</div>"
-                f"{subtitle_html}</div>"
-            )
-
-        if not rendered_tiles:
-            return "<div style=\"color:#9CA3AF;\">No summary metrics</div>"
-
-        return "<div style=\"margin-right:-1.5%;\">" + "".join(rendered_tiles) + "</div>"
-
-    def build_detail_card(self, title, body_html, accent_color="#2F80ED", margin_top=12):
-
-        return (
-            f"<div style=\"margin-top:{margin_top}px; padding:12px 14px; "
-            f"background-color:#10161E; border:1px solid #253243; "
-            f"border-left:3px solid {accent_color}; border-radius:8px; "
-            f"box-sizing:border-box; overflow-wrap:anywhere; word-break:break-word;\">"
-            f"<div style=\"color:#FFFFFF; font-weight:700; margin-bottom:8px;\">"
-            f"{html.escape(title)}</div>{body_html}</div>"
-        )
-
-    def build_detail_table(self, rows, value_color="#DCE6F2", show_missing=True):
-
-        rendered_rows = []
-
-        for label, value in rows:
-            if not show_missing and value in (None, "", [], {}):
-                continue
-
-            display_value = self.format_detail_value(value)
-            row_color = "#EB5757" if display_value == "Missing" else value_color
-
-            rendered_rows.append(
-                "<tr>"
-                f"<td valign=\"top\" style=\"color:#FFFFFF; font-weight:600; padding:3px 12px 3px 0; width:38%; "
-                f"white-space:normal; overflow-wrap:anywhere; word-break:break-word;\">"
-                f"{html.escape(str(label))}</td>"
-                f"<td valign=\"top\" style=\"color:{row_color}; padding:3px 0; "
-                f"white-space:normal; overflow-wrap:anywhere; word-break:break-word;\">"
-                f"{html.escape(display_value)}</td>"
-                "</tr>"
-            )
-
-        if not rendered_rows:
-            return "<div style=\"color:#9CA3AF;\">No data</div>"
-
-        return (
-            "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" "
-            "style=\"border-collapse:collapse; table-layout:fixed; width:100%;\">"
-            + "".join(rendered_rows) +
-            "</table>"
-        )
-
-    def build_bullet_section(self, title, items, color, accent_color=None, bullet="•"):
-
-        if not items:
-            return ""
-
-        accent = accent_color or color
-        lines = []
-
-        for item in items:
-            lines.append(
-                f"<div style=\"color:{color}; margin:0 0 6px 0; white-space:normal; "
-                f"overflow-wrap:anywhere; word-break:break-word; line-height:1.45;\">"
-                f"{html.escape(bullet)} {html.escape(self.format_detail_value(item))}</div>"
-            )
-
-        return self.build_detail_card(title, "".join(lines), accent_color=accent)
-
-    def build_issue_breakdown_section(self, title, issue_groups, color, accent_color=None, bullet="⚠"):
-
-        if not issue_groups:
-            return ""
-
-        accent = accent_color or color
-        detail_color = "#F7C2C2" if color == "#EB5757" else "#F8E7A1"
-        groups_html = []
-
-        for group in issue_groups:
-            if isinstance(group, dict):
-                group_title = self.format_detail_value(group.get("title"))
-                details = list(group.get("details") or [])
-            else:
-                group_title = self.format_detail_value(group)
-                details = []
-
-            detail_lines = []
-            for detail in details:
-                detail_lines.append(
-                    f"<div style=\"color:{detail_color}; margin:4px 0 0 22px; white-space:normal; "
-                    f"overflow-wrap:anywhere; word-break:break-word; line-height:1.4;\">"
-                    f"• {html.escape(self.format_detail_value(detail))}</div>"
-                )
-
-            groups_html.append(
-                f"<div style=\"margin:0 0 8px 0;\">"
-                f"<div style=\"color:{color}; white-space:normal; overflow-wrap:anywhere; "
-                f"word-break:break-word; line-height:1.45;\">{html.escape(bullet)} {html.escape(group_title)}</div>"
-                f"{''.join(detail_lines)}</div>"
-            )
-
-        return self.build_detail_card(title, "".join(groups_html), accent_color=accent)
-
-    def build_html_grid_table(self, headers, rows, column_colors=None):
-
-        if not rows:
-            return "<div style=\"color:#9CA3AF;\">No data</div>"
-
-        header_html = "".join(
-            f"<td style=\"color:#FFFFFF; font-weight:700; padding:6px 8px;\">{html.escape(str(header))}</td>"
-            for header in headers
-        )
-
-        rendered_rows = []
-        column_colors = list(column_colors or [])
-
-        for row in rows:
-            cells = []
-            for index, value in enumerate(row):
-                color = column_colors[index] if index < len(column_colors) else "#DCE6F2"
-                cells.append(
-                    f"<td style=\"color:{color}; padding:6px 8px; vertical-align:top;\">"
-                    f"{html.escape(self.format_detail_value(value))}</td>"
-                )
-            rendered_rows.append("<tr>" + "".join(cells) + "</tr>")
-
-        return (
-            "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;\">"
-            f"<tr>{header_html}</tr>"
-            + "".join(rendered_rows) +
-            "</table>"
-        )
-
     def intel_payload(self, result):
 
         return result.get("intel", {}) if isinstance(result, dict) else {}
 
-    def get_nested_value(self, data, *keys, default=None):
-
-        current = data
-
-        for key in keys:
-            if not isinstance(current, dict):
-                return default
-
-            current = current.get(key)
-
-            if current is None:
-                return default
-
-        return current
-
     def build_advanced_intel_sections(self, result):
-
-        intel = self.intel_payload(result)
-
-        evidence = intel.get("evidence_intelligence", {}) or {}
-        clinical = intel.get("clinical_intelligence", {}) or {}
-        denial = intel.get("denial_intelligence", {}) or {}
-        human_loop = intel.get("human_in_the_loop_intelligence", {}) or {}
-        memory = intel.get("memory_intelligence", {}) or {}
-        triage = intel.get("triage_intelligence", {}) or {}
-        operator = intel.get("operator_intelligence", {}) or {}
-        learning = intel.get("learning_intelligence", {}) or {}
-        insight = intel.get("insight_intelligence", {}) or {}
-        benchmark = intel.get("benchmark_intelligence", {}) or {}
-        orchestration = intel.get("orchestration_intelligence", {}) or {}
-        architecture = intel.get("architecture_intelligence", {}) or {}
-        recovery = intel.get("recovery_intelligence", {}) or {}
-        policy = intel.get("policy_intelligence", {}) or {}
-        deployment = intel.get("deployment_intelligence", {}) or {}
-        validation = intel.get("validation_intelligence", {}) or {}
-
-        sections = []
-
-        evidence_rows = [
-            ("Sufficiency", self.get_nested_value(evidence, "evidence_sufficiency_modeling", "status")),
-            ("Support Level", self.get_nested_value(evidence, "evidence_sufficiency_modeling", "support_level")),
-            ("Freshness", self.get_nested_value(evidence, "evidence_freshness_validation", "status")),
-            ("Escalation", self.get_nested_value(evidence, "evidence_escalation_recommendation", "level")),
-            ("Evidence Score", self.get_nested_value(evidence, "evidence_sufficiency_modeling", "score")),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in evidence_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Evidence Intelligence",
-                    self.build_detail_table(evidence_rows, value_color="#57B6FF", show_missing=False),
-                    accent_color="#57B6FF",
-                )
-            )
-
-        evidence_actions = self.get_nested_value(evidence, "evidence_escalation_recommendation", "recommendations", default=[])
-        if evidence_actions:
-            sections.append(
-                self.build_bullet_section(
-                    "Evidence Actions",
-                    evidence_actions[:5],
-                    color="#57B6FF",
-                    accent_color="#57B6FF",
-                )
-            )
-
-        clinical_rows = [
-            ("Coherence Score", self.get_nested_value(clinical, "clinical_coherence_scoring", "score")),
-            ("Coherence Band", self.get_nested_value(clinical, "clinical_coherence_scoring", "band")),
-            ("Consistency", self.get_nested_value(clinical, "clinical_consistency_analysis", "status")),
-            ("Severity", self.get_nested_value(clinical, "severity_inference_engine", "level")),
-            ("Conservative Care", self.get_nested_value(clinical, "conservative_care_verification", "status")),
-            ("Specialty Alignment", self.get_nested_value(clinical, "specialty_alignment_validation", "status")),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in clinical_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Clinical Intelligence",
-                    self.build_detail_table(clinical_rows, value_color="#57B6FF", show_missing=False),
-                    accent_color="#57B6FF",
-                )
-            )
-
-        clinical_gaps = self.get_nested_value(clinical, "clinical_gap_detection", "gaps", default=[])
-        if clinical_gaps:
-            sections.append(
-                self.build_bullet_section(
-                    "Clinical Gaps",
-                    clinical_gaps[:5],
-                    color="#EB5757",
-                    accent_color="#EB5757",
-                )
-            )
-
-        denial_rows = [
-            ("Primary Category", self.get_nested_value(denial, "denial_taxonomy_engine", "primary_category")),
-            ("Appeal Disposition", self.get_nested_value(denial, "appeal_opportunity_detection", "disposition")),
-            ("Recovery Score", self.get_nested_value(denial, "failure_recovery_scoring", "score")),
-            ("Recovery Band", self.get_nested_value(denial, "failure_recovery_scoring", "band")),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in denial_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Denial Intelligence",
-                    self.build_detail_table(denial_rows, value_color="#F2994A", show_missing=False),
-                    accent_color="#F2994A",
-                )
-            )
-
-        denial_actions = self.get_nested_value(denial, "countermeasure_recommendation_engine", "recommended_actions", default=[])
-        if denial_actions:
-            sections.append(
-                self.build_bullet_section(
-                    "Denial Countermeasures",
-                    denial_actions[:5],
-                    color="#F2994A",
-                    accent_color="#F2994A",
-                )
-            )
-
-        human_rows = [
-            ("Trust Score", self.get_nested_value(human_loop, "trust_score_modeling", "trust_score")),
-            ("Trust Band", self.get_nested_value(human_loop, "trust_score_modeling", "band")),
-            ("Threshold", self.get_nested_value(human_loop, "review_threshold_engine", "status")),
-            ("Gate Open", self.get_nested_value(human_loop, "confidence_gated_automation", "gate_open")),
-            ("Checkpoint Required", self.get_nested_value(human_loop, "approval_checkpoint_layer", "checkpoint_required")),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in human_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Human-In-The-Loop",
-                    self.build_detail_table(human_rows, value_color="#F2C94C", show_missing=False),
-                    accent_color="#F2C94C",
-                )
-            )
-
-        human_points = self.get_nested_value(human_loop, "reviewer_attention_guidance", "attention_points", default=[])
-        if human_points:
-            sections.append(
-                self.build_bullet_section(
-                    "Reviewer Attention Guidance",
-                    human_points[:5],
-                    color="#F2C94C",
-                    accent_color="#F2C94C",
-                )
-            )
-
-        memory_rows = [
-            ("Prior Cases", self.get_nested_value(memory, "persistent_case_memory", "prior_case_count")),
-            ("Last Status", self.get_nested_value(memory, "persistent_case_memory", "last_status")),
-            ("Last Score", self.get_nested_value(memory, "persistent_case_memory", "last_score")),
-            ("Memory Confidence", self.get_nested_value(memory, "memory_confidence_scoring", "score")),
-            ("Memory Band", self.get_nested_value(memory, "memory_confidence_scoring", "band")),
-            ("Risk Drift", self.get_nested_value(memory, "longitudinal_risk_drift_tracking", "direction")),
-            ("Provider Quality", self.get_nested_value(memory, "provider_relationship_memory", "quality_trend")),
-            ("Provider Packet Count", self.get_nested_value(memory, "provider_relationship_memory", "packet_count")),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in memory_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Case Memory",
-                    self.build_detail_table(memory_rows, value_color="#9B8CFF", show_missing=False),
-                    accent_color="#9B8CFF",
-                )
-            )
-
-        recurring_issues = self.get_nested_value(memory, "recurring_deficiency_detection", "recurring_issues", default=[])
-        if recurring_issues:
-            sections.append(
-                self.build_bullet_section(
-                    "Recurring Deficiencies",
-                    recurring_issues[:5],
-                    color="#EB5757",
-                    accent_color="#EB5757",
-                )
-            )
-
-        carryover_context = self.get_nested_value(memory, "context_carryover_engine", "carryover_context", default=[])
-        if carryover_context:
-            sections.append(
-                self.build_bullet_section(
-                    "Context Carryover",
-                    carryover_context[:5],
-                    color="#9B8CFF",
-                    accent_color="#9B8CFF",
-                )
-            )
-
-        similar_cases = self.get_nested_value(memory, "similar_case_recall", default=[])
-        if similar_cases:
-            similar_case_items = [
-                f"{item.get('file_name')} | similarity {item.get('similarity_score')} | "
-                f"status {item.get('status')} | score {item.get('score')}"
-                for item in similar_cases[:4]
-            ]
-            sections.append(
-                self.build_bullet_section(
-                    "Similar Case Recall",
-                    similar_case_items,
-                    color="#9B8CFF",
-                    accent_color="#9B8CFF",
-                )
-            )
-
-        triage_rows = [
-            ("Priority", triage.get("priority_level")),
-            ("Urgency", triage.get("urgency_classification")),
-            ("Review Depth", triage.get("review_depth_allocation")),
-            ("Time To Action", triage.get("time_to_action_scoring")),
-            ("Staff Route", triage.get("staff_match_routing")),
-            ("Queue Risk", triage.get("queue_risk_forecasting")),
-            ("Triage Confidence", triage.get("triage_confidence_scoring")),
-            ("Deferral Safe", triage.get("deferral_safety_check")),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in triage_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Triage Intelligence",
-                    self.build_detail_table(triage_rows, value_color="#56CCF2", show_missing=False),
-                    accent_color="#56CCF2",
-                )
-            )
-
-        triage_focus = triage.get("next_operator_focus", []) or []
-        if triage_focus:
-            sections.append(
-                self.build_bullet_section(
-                    "Triage Focus",
-                    triage_focus[:5],
-                    color="#56CCF2",
-                    accent_color="#56CCF2",
-                )
-            )
-
-        operator_rows = [
-            ("Primary Route", self.get_nested_value(operator, "operator_workbench_layer", "primary_route")),
-            ("Priority", self.get_nested_value(operator, "operator_workbench_layer", "priority_level")),
-            ("Review Depth", self.get_nested_value(operator, "operator_workbench_layer", "review_depth")),
-            ("Time To Action", self.get_nested_value(operator, "operator_workbench_layer", "time_to_action")),
-            ("Efficiency", self.get_nested_value(operator, "reviewer_efficiency_scoring", "band")),
-            ("Efficiency Score", self.get_nested_value(operator, "reviewer_efficiency_scoring", "score")),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in operator_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Operator Workbench",
-                    self.build_detail_table(operator_rows, value_color="#6FCF97", show_missing=False),
-                    accent_color="#27AE60",
-                )
-            )
-
-        operator_checklist = self.get_nested_value(operator, "smart_review_checklist_generation", "checklist", default=[])
-        if operator_checklist:
-            sections.append(
-                self.build_bullet_section(
-                    "Operator Checklist",
-                    operator_checklist[:6],
-                    color="#6FCF97",
-                    accent_color="#27AE60",
-                )
-            )
-
-        productivity_hints = self.get_nested_value(operator, "productivity_hint_engine", "hints", default=[])
-        if productivity_hints:
-            sections.append(
-                self.build_bullet_section(
-                    "Productivity Hints",
-                    productivity_hints[:5],
-                    color="#6FCF97",
-                    accent_color="#27AE60",
-                )
-            )
-
-        operator_feedback = self.get_nested_value(operator, "operator_support_feedback_loop", "suggestions", default=[])
-        if operator_feedback:
-            sections.append(
-                self.build_bullet_section(
-                    "Operator Feedback Loop",
-                    operator_feedback[:5],
-                    color="#6FCF97",
-                    accent_color="#27AE60",
-                )
-            )
-
-        operator_patterns = self.get_nested_value(operator, "work_pattern_analysis", "friction_points", default=[])
-        if operator_patterns:
-            sections.append(
-                self.build_bullet_section(
-                    "Operator Friction Points",
-                    operator_patterns[:5],
-                    color="#6FCF97",
-                    accent_color="#27AE60",
-                )
-            )
-
-        escalation_note = self.get_nested_value(operator, "escalation_note_drafting", "note")
-        if escalation_note:
-            sections.append(
-                self.build_detail_card(
-                    "Escalation Note",
-                    f"<div style=\"color:#6FCF97;\">{html.escape(str(escalation_note))}</div>",
-                    accent_color="#27AE60",
-                )
-            )
-
-        learning_rows = [
-            ("Latest Outcome", self.get_nested_value(learning, "outcome_feedback_ingestion", "latest_outcome")),
-            ("Outcome Count", self.get_nested_value(learning, "outcome_feedback_ingestion", "outcome_count")),
-            ("Calibration", self.get_nested_value(learning, "confidence_calibration_engine", "status")),
-            ("Calibration Delta", self.get_nested_value(learning, "confidence_calibration_engine", "delta")),
-            ("Override Status", self.get_nested_value(learning, "reviewer_override_learning", "status")),
-            ("Override Rate", self.get_nested_value(learning, "reviewer_override_learning", "override_rate")),
-            ("Readiness", self.get_nested_value(learning, "continuous_intelligence_refinement", "readiness_band")),
-            ("Readiness Score", self.get_nested_value(learning, "continuous_intelligence_refinement", "readiness_score")),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in learning_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Learning Intelligence",
-                    self.build_detail_table(learning_rows, value_color="#F2994A", show_missing=False),
-                    accent_color="#F2994A",
-                )
-            )
-
-        rule_adjustments = self.get_nested_value(learning, "rule_adjustment_recommendation", "recommendations", default=[])
-        if rule_adjustments:
-            sections.append(
-                self.build_bullet_section(
-                    "Rule Adjustment Recommendations",
-                    rule_adjustments[:5],
-                    color="#F2994A",
-                    accent_color="#F2994A",
-                )
-            )
-
-        learning_safeguards = self.get_nested_value(learning, "failure_to_learning_conversion", "recommended_safeguards", default=[])
-        if learning_safeguards:
-            sections.append(
-                self.build_bullet_section(
-                    "Learning Safeguards",
-                    learning_safeguards[:5],
-                    color="#F2994A",
-                    accent_color="#F2994A",
-                )
-            )
-
-        insight_rows = [
-            ("Trend", self.get_nested_value(insight, "hidden_trend_detection", "status")),
-            ("Recent Avg Score", self.get_nested_value(insight, "hidden_trend_detection", "recent_average_score")),
-            ("Provider Rank", self.get_nested_value(insight, "provider_network_insight_engine", "provider_rank")),
-            ("Provider Avg Score", self.get_nested_value(insight, "provider_network_insight_engine", "provider_average_score")),
-            ("Variance", self.get_nested_value(insight, "process_variance_detection", "status")),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in insight_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Insight Intelligence",
-                    self.build_detail_table(insight_rows, value_color="#BB6BD9", show_missing=False),
-                    accent_color="#BB6BD9",
-                )
-            )
-
-        strategic_insights = self.get_nested_value(insight, "strategic_insight_summarization", default=[])
-        if strategic_insights:
-            sections.append(
-                self.build_bullet_section(
-                    "Insight Summary",
-                    strategic_insights[:5],
-                    color="#BB6BD9",
-                    accent_color="#BB6BD9",
-                )
-            )
-
-        insight_actions = self.get_nested_value(insight, "insight_action_recommendation", default=[])
-        if insight_actions:
-            sections.append(
-                self.build_bullet_section(
-                    "Insight Actions",
-                    insight_actions[:5],
-                    color="#BB6BD9",
-                    accent_color="#BB6BD9",
-                )
-            )
-
-        benchmark_rows = [
-            ("Standing", self.get_nested_value(benchmark, "internal_benchmark_engine", "standing")),
-            ("Average Score", self.get_nested_value(benchmark, "internal_benchmark_engine", "average_score")),
-            ("Quality Percentile", self.get_nested_value(benchmark, "quality_benchmark_calibration", "score_percentile")),
-            ("Benchmark Confidence", self.get_nested_value(benchmark, "benchmark_confidence_scoring", "band")),
-            ("Target Score", self.get_nested_value(benchmark, "improvement_target_modeling", "target_score")),
-            ("Provider Rank", self.get_nested_value(benchmark, "team_to_team_benchmarking", "provider_rank")),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in benchmark_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Benchmark Intelligence",
-                    self.build_detail_table(benchmark_rows, value_color="#2DCE89", show_missing=False),
-                    accent_color="#2DCE89",
-                )
-            )
-
-        benchmark_targets = self.get_nested_value(benchmark, "improvement_target_modeling", "recommendations", default=[])
-        if benchmark_targets:
-            sections.append(
-                self.build_bullet_section(
-                    "Benchmark Targets",
-                    benchmark_targets[:5],
-                    color="#2DCE89",
-                    accent_color="#2DCE89",
-                )
-            )
-
-        system_rows = [
-            ("Pipeline State", self.get_nested_value(orchestration, "pipeline_health_state_machine", "state")),
-            ("Coordination Score", self.get_nested_value(orchestration, "end_to_end_coordination_scoring", "score")),
-            ("Coordination Band", self.get_nested_value(orchestration, "end_to_end_coordination_scoring", "band")),
-            ("Maintainability", self.get_nested_value(architecture, "maintainability_scoring", "band")),
-            ("Reliability", self.get_nested_value(recovery, "reliability_scoring", "band")),
-            ("Recovery Strategy", self.get_nested_value(recovery, "intelligent_retry_engine", "strategy")),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in system_rows):
-            sections.append(
-                self.build_detail_card(
-                    "System Intelligence",
-                    self.build_detail_table(system_rows, value_color="#6FCF97", show_missing=False),
-                    accent_color="#6FCF97",
-                )
-            )
-
-        policy_rows = [
-            ("Policy Confidence", self.get_nested_value(policy, "policy_compliance_confidence", "band")),
-            ("Policy Score", self.get_nested_value(policy, "policy_compliance_confidence", "score")),
-            ("Forecast Status", self.get_nested_value(policy, "missing_requirement_forecasting", "forecast_status")),
-            ("Deployment Confidence", self.get_nested_value(deployment, "deployment_confidence_scoring", "band")),
-            ("Deployment Score", self.get_nested_value(deployment, "deployment_confidence_scoring", "score")),
-            ("Update Compatibility", self.get_nested_value(deployment, "update_compatibility_analysis", "status")),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in policy_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Policy & Deployment",
-                    self.build_detail_table(policy_rows, value_color="#57B6FF", show_missing=False),
-                    accent_color="#57B6FF",
-                )
-            )
-
-        validation_rows = [
-            ("Deep Verification Score", self.get_nested_value(validation, "deep_verification_score", "score")),
-            ("Verification Band", self.get_nested_value(validation, "deep_verification_score", "band")),
-            ("Verified Claims", self.get_nested_value(validation, "extraction_claim_verification", "verified_claims")),
-            ("Weak Claims", self.get_nested_value(validation, "extraction_claim_verification", "weak_claims")),
-            ("Date Logic", self.get_nested_value(validation, "date_logic_validation", "status")),
-            ("Procedure-Code Check", self.get_nested_value(validation, "procedure_code_consistency_checks", "status")),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in validation_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Reviewer Verification",
-                    self.build_detail_table(validation_rows, value_color="#56CCF2", show_missing=False),
-                    accent_color="#56CCF2",
-                )
-            )
-
-        traceback_items = []
-        for item in (self.get_nested_value(validation, "evidence_traceback_links", default=[]) or [])[:8]:
-            field_name = self.format_field(item.get("field"))
-            support_status = self.format_field(item.get("support_status") or "unknown")
-            document_type = self.format_field(item.get("document_type") or "unknown")
-            page_number = item.get("page_number") or "?"
-            provider = item.get("ocr_provider") or item.get("extraction_strategy") or "native_text"
-            value = self.format_detail_value(item.get("value"))
-            traceback_items.append(
-                f"{field_name}: {value} | {support_status} | {document_type} | page {page_number} | {provider}"
-            )
-
-        if traceback_items:
-            sections.append(
-                self.build_bullet_section(
-                    "Source Traceback",
-                    traceback_items,
-                    color="#56CCF2",
-                    accent_color="#56CCF2",
-                )
-            )
-
-        return sections
+        return render_build_advanced_intel_sections(self, result)
 
     def build_condensed_advanced_intel_sections(self, result):
-
-        intel = self.intel_payload(result)
-        evidence = intel.get("evidence_intelligence", {}) or {}
-        clinical = intel.get("clinical_intelligence", {}) or {}
-        human_loop = intel.get("human_in_the_loop_intelligence", {}) or {}
-        memory = intel.get("memory_intelligence", {}) or {}
-        triage = intel.get("triage_intelligence", {}) or {}
-        insight = intel.get("insight_intelligence", {}) or {}
-        benchmark = intel.get("benchmark_intelligence", {}) or {}
-        orchestration = intel.get("orchestration_intelligence", {}) or {}
-        recovery = intel.get("recovery_intelligence", {}) or {}
-        policy = intel.get("policy_intelligence", {}) or {}
-        deployment = intel.get("deployment_intelligence", {}) or {}
-        validation = intel.get("validation_intelligence", {}) or {}
-
-        sections = []
-
-        evidence_rows = [
-            ("Support Level", self.format_packet_display_value("Support Level", self.get_nested_value(evidence, "evidence_sufficiency_modeling", "support_level"))),
-            ("Evidence Rating", self.format_evidence_rating(self.get_nested_value(evidence, "evidence_sufficiency_modeling", "score"))),
-            ("Freshness", self.format_packet_display_value("Freshness", self.get_nested_value(evidence, "evidence_freshness_validation", "status"))),
-            ("Escalation", self.format_packet_display_value("Escalation", self.get_nested_value(evidence, "evidence_escalation_recommendation", "level"))),
-        ]
-        if any(value not in (None, "", [], {}) for _, value in evidence_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Evidence Intelligence",
-                    self.build_detail_table(evidence_rows, value_color="#57B6FF", show_missing=False),
-                    accent_color="#57B6FF",
-                )
-            )
-
-        clinical_rows = [
-            ("Coherence", self.format_packet_display_value("Coherence", self.get_nested_value(clinical, "clinical_coherence_scoring", "band"))),
-            ("Coherence Score", self.get_nested_value(clinical, "clinical_coherence_scoring", "score")),
-            ("Severity", self.format_packet_display_value("Severity", self.get_nested_value(clinical, "severity_inference_engine", "level"))),
-            ("Conservative Care", self.format_packet_display_value("Conservative Care", self.get_nested_value(clinical, "conservative_care_verification", "status"))),
-            ("Specialty Alignment", self.format_packet_display_value("Specialty Alignment", self.get_nested_value(clinical, "specialty_alignment_validation", "status"))),
-        ]
-        if any(value not in (None, "", [], {}) for _, value in clinical_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Clinical Intelligence",
-                    self.build_detail_table(clinical_rows, value_color="#57B6FF", show_missing=False),
-                    accent_color="#57B6FF",
-                )
-            )
-
-        clinical_gaps = self.get_nested_value(clinical, "clinical_gap_detection", "gaps", default=[])
-        if clinical_gaps:
-            sections.append(
-                self.build_bullet_section(
-                    "Clinical Gaps",
-                    clinical_gaps[:3],
-                    color="#F2C94C",
-                    accent_color="#F2994A",
-                )
-            )
-
-        operations_rows = [
-            ("Trust Score", self.format_packet_display_value("Trust Score", self.get_nested_value(human_loop, "trust_score_modeling", "trust_score"))),
-            ("Provider History", self.format_packet_display_value("Provider History", self.get_nested_value(memory, "provider_relationship_memory", "quality_trend"))),
-            ("Benchmark Standing", self.format_packet_display_value("Benchmark Standing", self.get_nested_value(benchmark, "internal_benchmark_engine", "standing"))),
-        ]
-        if any(value not in (None, "", [], {}) for _, value in operations_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Operational Snapshot",
-                    self.build_detail_table(operations_rows, value_color="#9B8CFF", show_missing=False),
-                    accent_color="#9B8CFF",
-                )
-            )
-
-        insight_actions = self.get_nested_value(insight, "insight_action_recommendation", "actions", default=[])
-        if insight_actions:
-            sections.append(
-                self.build_bullet_section(
-                    "Insight Actions",
-                    insight_actions[:3],
-                    color="#9B8CFF",
-                    accent_color="#9B8CFF",
-                )
-            )
-
-        system_rows = [
-            ("Verification Score", self.get_nested_value(validation, "deep_verification_score", "score")),
-            ("Verification Band", self.format_packet_display_value("Verification Band", self.get_nested_value(validation, "deep_verification_score", "band"))),
-            ("Pipeline State", self.format_packet_display_value("Pipeline State", self.get_nested_value(orchestration, "pipeline_health_state_machine", "state"))),
-            ("Reliability", self.format_packet_display_value("Reliability", self.get_nested_value(recovery, "reliability_scoring", "band"))),
-            ("Policy Confidence", self.format_packet_display_value("Policy Confidence", self.get_nested_value(policy, "policy_compliance_confidence", "band"))),
-        ]
-        if any(value not in (None, "", [], {}) for _, value in system_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Review Controls",
-                    self.build_detail_table(system_rows, value_color="#56CCF2", show_missing=False),
-                    accent_color="#56CCF2",
-                )
-            )
-
-        concept_links = list(self.get_nested_value(validation, "concept_evidence_tracebacks", default=[]) or [])
-        concept_items = []
-        for item in concept_links[:4]:
-            rendered = self.format_concept_evidence_item(item)
-            if rendered:
-                concept_items.append(rendered)
-
-        if concept_items:
-            sections.append(
-                self.build_bullet_section(
-                    "Concept Evidence",
-                    concept_items,
-                    color="#57B6FF",
-                    accent_color="#57B6FF",
-                )
-            )
-
-        traceback_links = list(self.get_nested_value(validation, "evidence_traceback_links", default=[]) or [])
-        field_priority = {
-            "diagnosis": 0,
-            "icd_codes": 1,
-            "reason_for_request": 2,
-            "ordering_provider": 3,
-            "ordering_doctor": 3,
-            "provider": 4,
-            "authorization_number": 5,
-            "va_icn": 6,
-            "patient_name": 7,
-            "name": 7,
-            "dob": 8,
-        }
-        sorted_traceback_links = sorted(
-            traceback_links,
-            key=lambda item: (
-                field_priority.get(str(item.get("field") or "").strip().lower(), 99),
-                item.get("page_number") or 999,
-            ),
-        )
-        seen_fields = set()
-        traceback_items = []
-        for item in sorted_traceback_links:
-            field_key = str(item.get("field") or "").strip().lower()
-            if not field_key or field_key in seen_fields:
-                continue
-            seen_fields.add(field_key)
-            field_name = self.format_field(item.get("field"))
-            value = self.format_detail_value(item.get("value"))
-            document_type = str(item.get("document_type") or "").strip()
-            page_number = item.get("page_number") or "?"
-            source_role = item.get("source_role")
-            metadata_parts = []
-            if document_type and document_type.lower() != "unknown":
-                metadata_parts.append(self.format_field(document_type))
-            if source_role:
-                metadata_parts.append(self.format_field(source_role))
-            metadata_text = f" | {' | '.join(metadata_parts)}" if metadata_parts else ""
-            traceback_items.append(
-                f"{field_name}: {value}{metadata_text} | page {page_number}"
-            )
-            if len(traceback_items) >= 4:
-                break
-
-        if traceback_items:
-            sections.append(
-                self.build_bullet_section(
-                    "Source Traceback Highlights",
-                    traceback_items,
-                    color="#56CCF2",
-                    accent_color="#56CCF2",
-                )
-            )
-
-        return sections
+        return render_build_condensed_advanced_intel_sections(self, result)
 
     def build_export_summary(self, result):
-
-        intel = self.intel_payload(result)
-        evidence = intel.get("evidence_intelligence", {}) or {}
-        clinical = intel.get("clinical_intelligence", {}) or {}
-        denial = intel.get("denial_intelligence", {}) or {}
-        human_loop = intel.get("human_in_the_loop_intelligence", {}) or {}
-        memory = intel.get("memory_intelligence", {}) or {}
-        triage = intel.get("triage_intelligence", {}) or {}
-        operator = intel.get("operator_intelligence", {}) or {}
-        learning = intel.get("learning_intelligence", {}) or {}
-        insight = intel.get("insight_intelligence", {}) or {}
-        benchmark = intel.get("benchmark_intelligence", {}) or {}
-        orchestration = intel.get("orchestration_intelligence", {}) or {}
-        recovery = intel.get("recovery_intelligence", {}) or {}
-        policy = intel.get("policy_intelligence", {}) or {}
-        deployment = intel.get("deployment_intelligence", {}) or {}
-
-        return {
-            "evidence_sufficiency": self.get_nested_value(evidence, "evidence_sufficiency_modeling", "status"),
-            "evidence_freshness": self.get_nested_value(evidence, "evidence_freshness_validation", "status"),
-            "evidence_escalation": self.get_nested_value(evidence, "evidence_escalation_recommendation", "level"),
-            "clinical_coherence": self.get_nested_value(clinical, "clinical_coherence_scoring", "band"),
-            "clinical_severity": self.get_nested_value(clinical, "severity_inference_engine", "level"),
-            "conservative_care": self.get_nested_value(clinical, "conservative_care_verification", "status"),
-            "denial_category": self.get_nested_value(denial, "denial_taxonomy_engine", "primary_category"),
-            "denial_recovery_score": self.get_nested_value(denial, "failure_recovery_scoring", "score"),
-            "trust_score": self.get_nested_value(human_loop, "trust_score_modeling", "trust_score"),
-            "checkpoint_required": self.get_nested_value(human_loop, "approval_checkpoint_layer", "checkpoint_required"),
-            "prior_case_count": self.get_nested_value(memory, "persistent_case_memory", "prior_case_count"),
-            "memory_confidence": self.get_nested_value(memory, "memory_confidence_scoring", "score"),
-            "risk_drift": self.get_nested_value(memory, "longitudinal_risk_drift_tracking", "direction"),
-            "provider_quality_trend": self.get_nested_value(memory, "provider_relationship_memory", "quality_trend"),
-            "triage_priority": triage.get("priority_level"),
-            "triage_urgency": triage.get("urgency_classification"),
-            "triage_review_depth": triage.get("review_depth_allocation"),
-            "triage_staff_route": triage.get("staff_match_routing"),
-            "triage_time_to_action": triage.get("time_to_action_scoring"),
-            "operator_primary_route": self.get_nested_value(operator, "operator_workbench_layer", "primary_route"),
-            "operator_focus": self.get_nested_value(operator, "operator_workbench_layer", "next_operator_focus", default=[]),
-            "operator_efficiency": self.get_nested_value(operator, "reviewer_efficiency_scoring", "band"),
-            "latest_outcome": self.get_nested_value(learning, "outcome_feedback_ingestion", "latest_outcome"),
-            "outcome_count": self.get_nested_value(learning, "outcome_feedback_ingestion", "outcome_count"),
-            "calibration_status": self.get_nested_value(learning, "confidence_calibration_engine", "status"),
-            "calibration_delta": self.get_nested_value(learning, "confidence_calibration_engine", "delta"),
-            "override_status": self.get_nested_value(learning, "reviewer_override_learning", "status"),
-            "override_rate": self.get_nested_value(learning, "reviewer_override_learning", "override_rate"),
-            "learning_readiness": self.get_nested_value(learning, "continuous_intelligence_refinement", "readiness_band"),
-            "learning_readiness_score": self.get_nested_value(learning, "continuous_intelligence_refinement", "readiness_score"),
-            "insight_trend": self.get_nested_value(insight, "hidden_trend_detection", "status"),
-            "insight_provider_rank": self.get_nested_value(insight, "provider_network_insight_engine", "provider_rank"),
-            "insight_top_action": self.get_nested_value(insight, "insight_action_recommendation", default=[]),
-            "benchmark_standing": self.get_nested_value(benchmark, "internal_benchmark_engine", "standing"),
-            "benchmark_percentile": self.get_nested_value(benchmark, "quality_benchmark_calibration", "score_percentile"),
-            "benchmark_target_score": self.get_nested_value(benchmark, "improvement_target_modeling", "target_score"),
-            "benchmark_confidence_band": self.get_nested_value(benchmark, "benchmark_confidence_scoring", "band"),
-            "coordination_score": self.get_nested_value(orchestration, "end_to_end_coordination_scoring", "score"),
-            "reliability_score": self.get_nested_value(recovery, "reliability_scoring", "score"),
-            "policy_confidence": self.get_nested_value(policy, "policy_compliance_confidence", "band"),
-            "deployment_confidence": self.get_nested_value(deployment, "deployment_confidence_scoring", "band"),
-        }
+        return render_build_export_summary(self, result)
 
     def current_selected_file(self):
 
-        selected = self.table.currentRow()
-
-        if selected < 0 or selected >= len(self.files):
-            return None
-
-        return self.files[selected]
+        return self.get_selected_table_file()
 
     def current_selected_result(self):
 
@@ -1832,134 +938,7 @@ class MainWindow(QMainWindow):
         self.btn_record_outcome.setEnabled(bool(result))
 
     def build_scan_diagnostics_html(self, file_path, result):
-
-        intel = self.intel_payload(result)
-        diagnostics = intel.get("scan_diagnostics", {}) or {}
-        summary = diagnostics.get("summary", {}) or {}
-        pages = diagnostics.get("pages", []) or []
-        ranking = diagnostics.get("source_reliability_ranking", []) or []
-
-        if not diagnostics:
-            return (
-                "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-                "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
-                "<div style=\"color:#9CA3AF;\">No scan diagnostics available for this packet.</div>"
-                "</body></html>"
-            )
-
-        sections = [
-            self.build_detail_card(
-                "Packet Scan Summary",
-                self.build_detail_table(
-                    [
-                        ("Packet", os.path.basename(file_path)),
-                        ("Extraction Mode", self.format_scan_mode(summary.get("extraction_mode"))),
-                        ("OCR Attempted", "Yes" if summary.get("ocr_attempted") else "No"),
-                        ("OCR Provider", summary.get("ocr_provider") or "Not used"),
-                        ("Provider Chain", ", ".join(summary.get("ocr_provider_chain", []) or []) or "Not used"),
-                        ("Available OCR Providers", ", ".join(summary.get("available_ocr_providers", []) or []) or "None"),
-                        ("Available PDF Tools", ", ".join(summary.get("available_pdf_tools", []) or []) or "None"),
-                        ("Fallback Applied", "Yes" if summary.get("fallback_applied") else "No"),
-                        ("Pages", summary.get("page_count")),
-                        ("Pages With Native Text", summary.get("pages_with_native_text")),
-                        ("Pages With OCR Text", summary.get("pages_with_ocr")),
-                        ("Pages With OCR Field Zones", summary.get("pages_with_ocr_field_zones")),
-                        ("Pages With Native Field Zones", summary.get("pages_with_native_field_zones")),
-                        ("Pages With Field Zones", summary.get("pages_with_field_zones")),
-                        ("Pages With Split Segments", summary.get("pages_with_split_segments")),
-                        (
-                            "Average OCR Confidence",
-                            summary.get("average_ocr_confidence")
-                            if summary.get("ocr_attempted")
-                            else "Not used",
-                        ),
-                        ("Scan Quality", summary.get("scan_quality_band")),
-                        ("Scan Quality Score", summary.get("scan_quality_score")),
-                        ("Handwriting Risk", summary.get("handwriting_risk_level")),
-                        ("Handwriting Risk Score", summary.get("handwriting_risk_score")),
-                        ("Pages With Table Regions", summary.get("pages_with_table_regions")),
-                        ("Pages With Signature Regions", summary.get("pages_with_signature_regions")),
-                        ("Pages With Handwritten Regions", summary.get("pages_with_handwritten_regions")),
-                    ],
-                    value_color="#57B6FF",
-                    show_missing=False,
-                ),
-                accent_color="#57B6FF",
-                margin_top=0,
-            )
-        ]
-
-        if ranking:
-            ranking_items = [
-                f"{item.get('rank')}. {self.format_field(item.get('document_type', 'unknown'))} | "
-                f"Reliability {item.get('reliability_score')} ({item.get('reliability_band')}) | "
-                f"Confidence {item.get('average_confidence')}"
-                for item in ranking
-            ]
-            sections.append(
-                self.build_bullet_section(
-                    "Most Reliable Sources",
-                    ranking_items,
-                    color="#6FCF97",
-                    accent_color="#27AE60",
-                )
-            )
-
-        if pages:
-            page_rows = []
-            for page in pages:
-                page_rows.append(
-                    "<tr>"
-                    f"<td style=\"color:#FFFFFF; padding:4px 8px;\">{html.escape(str(page.get('page')))}</td>"
-                    f"<td style=\"color:#DCE6F2; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('document_type')))}</td>"
-                    f"<td style=\"color:#9B8CFF; padding:4px 8px;\">{html.escape(self.format_scan_mode(page.get('text_source')))}</td>"
-                    f"<td style=\"color:#57B6FF; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('ocr_provider') or 'Not used'))}</td>"
-                    f"<td style=\"color:#57B6FF; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('ocr_confidence') if page.get('ocr_confidence') is not None else 'Not used'))}</td>"
-                    f"<td style=\"color:#56CCF2; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('classification_confidence')))}</td>"
-                    f"<td style=\"color:#DCE6F2; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('scan_quality')))}</td>"
-                    f"<td style=\"color:#F2C94C; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('handwriting_risk')))}</td>"
-                    f"<td style=\"color:#6FCF97; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('field_zone_count')))}</td>"
-                    f"<td style=\"color:#57B6FF; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('ocr_field_zone_count')))}</td>"
-                    f"<td style=\"color:#6FCF97; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('native_field_zone_count')))}</td>"
-                    f"<td style=\"color:#DCE6F2; padding:4px 8px;\">{html.escape(self.format_detail_value(page.get('split_segment_count')))}</td>"
-                    "</tr>"
-                )
-
-            page_table = (
-                "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;\">"
-                "<tr>"
-                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Page</td>"
-                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Document</td>"
-                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Read Mode</td>"
-                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Provider</td>"
-                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">OCR</td>"
-                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Classify</td>"
-                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Scan Quality</td>"
-                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Handwriting</td>"
-                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Field Zones</td>"
-                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">OCR Zones</td>"
-                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Native Zones</td>"
-                "<td style=\"color:#FFFFFF; font-weight:700; padding:4px 8px;\">Segments</td>"
-                "</tr>"
-                + "".join(page_rows) +
-                "</table>"
-            )
-
-            sections.append(
-                self.build_detail_card(
-                    "Page Diagnostics",
-                    page_table,
-                    accent_color="#57B6FF",
-                )
-            )
-
-        rendered_sections = "".join(section for section in sections if section)
-
-        return (
-            "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-            "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
-            f"{rendered_sections}</body></html>"
-        )
+        return render_build_scan_diagnostics_html(self, file_path, result)
 
     def refresh_scan_diagnostics_dialog(self):
 
@@ -2012,40 +991,137 @@ class MainWindow(QMainWindow):
         self.scan_diagnostics_dialog.raise_()
         self.scan_diagnostics_dialog.activateWindow()
 
+    def prompt_record_outcome(self, file_path, result):
+
+        intel_display = dict(((result.get("intel", {}) or {}).get("display", {}) or {}))
+        score = self.get_result_score(result)
+        queue = intel_display.get("workflow_queue") or "n/a"
+        denial_risk = intel_display.get("denial_risk") or "n/a"
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Record Real Outcome")
+        dialog.setMinimumWidth(560)
+        dialog.setStyleSheet(self.admin_modal_stylesheet())
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("Save what actually happened to this packet")
+        title.setStyleSheet("font-size:18px; font-weight:700; color:#FFFFFF;")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        guidance = QLabel(
+            "Use this after human review or real downstream disposition. "
+            "This should reflect what truly happened, not what the system predicted."
+        )
+        guidance.setWordWrap(True)
+        guidance.setStyleSheet("color:#B8C4D6;")
+        layout.addWidget(guidance)
+
+        packet_summary = QLabel(
+            f"Packet: {os.path.basename(file_path)}\n"
+            f"Score: {score}   |   Queue: {queue}   |   Denial Risk: {denial_risk}"
+        )
+        packet_summary.setWordWrap(True)
+        packet_summary.setStyleSheet(
+            "background-color:#0F1722; border:1px solid #253243; border-radius:8px; "
+            "padding:10px; color:#E5E7EB;"
+        )
+        layout.addWidget(packet_summary)
+
+        outcome_label = QLabel("Outcome")
+        outcome_label.setStyleSheet("font-weight:600; color:#FFFFFF;")
+        layout.addWidget(outcome_label)
+
+        outcome_combo = QComboBox(dialog)
+        outcome_combo.addItems(list(self.OUTCOME_OPTION_DETAILS.keys()))
+        layout.addWidget(outcome_combo)
+
+        detail_label = QLabel("")
+        detail_label.setWordWrap(True)
+        detail_label.setStyleSheet(
+            "background-color:#111A25; border:1px solid #253243; border-radius:8px; "
+            "padding:10px; color:#C9D5E6;"
+        )
+        layout.addWidget(detail_label)
+
+        note_label = QLabel("Note")
+        note_label.setStyleSheet("font-weight:600; color:#FFFFFF;")
+        layout.addWidget(note_label)
+
+        note_edit = QTextEdit(dialog)
+        note_edit.setPlaceholderText(
+            "Optional context, such as why it was denied, what was corrected, or why the reviewer overrode the system."
+        )
+        note_edit.setFixedHeight(110)
+        layout.addWidget(note_edit)
+
+        requirement_label = QLabel("")
+        requirement_label.setWordWrap(True)
+        requirement_label.setStyleSheet("color:#F2C94C;")
+        layout.addWidget(requirement_label)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+
+        cancel_button = QPushButton("Cancel")
+        save_button = QPushButton("Save Outcome")
+        save_button.setStyleSheet(
+            "background-color:#1E6FDB; color:#FFFFFF; border:1px solid #2F80ED; "
+            "border-radius:6px; padding:8px 14px;"
+        )
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(save_button)
+        layout.addLayout(button_row)
+
+        def update_outcome_guidance():
+            selected = outcome_combo.currentText()
+            detail_label.setText(self.OUTCOME_OPTION_DETAILS.get(selected, ""))
+            if selected in self.OUTCOME_NOTE_REQUIRED:
+                requirement_label.setText(
+                    "A short note is required for this outcome so the learning record has useful context."
+                )
+            else:
+                requirement_label.setText(
+                    "A note is optional, but adding context makes the learning layer more useful later."
+                )
+
+        def submit():
+            selected = outcome_combo.currentText().strip()
+            note = note_edit.toPlainText().strip()
+            if selected in self.OUTCOME_NOTE_REQUIRED and not note:
+                self.show_admin_message(
+                    "Note Required",
+                    "Please add a short note for this outcome so future learning has enough context.",
+                    icon=QMessageBox.Warning,
+                )
+                return
+            dialog.accept()
+
+        outcome_combo.currentTextChanged.connect(lambda _: update_outcome_guidance())
+        cancel_button.clicked.connect(dialog.reject)
+        save_button.clicked.connect(submit)
+
+        update_outcome_guidance()
+
+        if dialog.exec() != QDialog.Accepted:
+            return None, None
+
+        return outcome_combo.currentText().strip(), note_edit.toPlainText().strip()
+
     def open_record_outcome(self):
 
         file_path, result = self.current_selected_result()
 
         if not file_path or not result:
-            QMessageBox.information(self, "Record Outcome", "Select a packet result first.")
+            self.show_admin_message("Record Real Outcome", "Select a packet result first.")
             return
 
-        options = [
-            "Approved",
-            "Denied",
-            "Corrected",
-            "Resubmitted",
-            "Reviewer Override",
-            "Deferred",
-        ]
-
-        outcome, ok = QInputDialog.getItem(
-            self,
-            "Record Outcome",
-            "Select packet outcome:",
-            options,
-            0,
-            False,
-        )
-
-        if not ok or not outcome:
+        outcome, note = self.prompt_record_outcome(file_path, result)
+        if not outcome:
             return
-
-        note, _ = QInputDialog.getMultiLineText(
-            self,
-            "Record Outcome",
-            "Optional note:",
-        )
 
         updated_result = record_manual_outcome(file_path, result, outcome, note=note)
         self.results[file_path] = updated_result
@@ -2056,135 +1132,17 @@ class MainWindow(QMainWindow):
             self.refresh_scan_diagnostics_dialog()
 
         self.log(f"Recorded outcome for {os.path.basename(file_path)}: {outcome}")
-        QMessageBox.information(self, "Record Outcome", f"Saved outcome: {outcome}")
+        self.show_admin_message(
+            "Record Real Outcome",
+            f"Saved outcome: {outcome}\n\nThis packet's learning and benchmark context have been refreshed.",
+        )
 
     def build_packet_details_html_condensed(self, file, result):
-
-        score = result.get("score", 0)
-        forms = result.get("forms", [])
-        fields = result.get("fields", {})
-        issues = result.get("issues", [])
-        fixes = result.get("fixes", [])
-        intel_display = result.get("intel", {}).get("display", {})
-        issue_items = intel_display.get("issue_details") or issues
-        issue_groups = intel_display.get("issue_breakdowns") or [{"title": item, "details": []} for item in issue_items]
-        fix_items = intel_display.get("priority_fixes") or fixes
-        review_rationale = (
-            intel_display.get("review_rationale")
-            or intel_display.get("why_weak")
-            or intel_display.get("approval_rationale")
-            or []
-        )
-        review_rationale = self.polish_review_rationale(review_rationale, max_items=5)
-        issue_palette = self.get_issue_display_palette(intel_display)
-
-        score_color = "#27AE60" if score >= 90 else "#F2C94C" if score >= 70 else "#EB5757"
-
-        summary_rows = [
-            ("Packet", os.path.basename(file)),
-            ("Score", score),
-        ]
-        decision_rows = []
-
-        if intel_display:
-            summary_rows.extend(
-                [
-                    ("Packet Strength", intel_display.get("packet_strength")),
-                    ("Submission Readiness", intel_display.get("submission_readiness")),
-                    ("Approval Probability", intel_display.get("approval_probability")),
-                    ("Next Action", intel_display.get("next_action")),
-                ]
-            )
-            decision_rows = [
-                ("Packet Confidence", intel_display.get("packet_confidence")),
-                ("Denial Risk", intel_display.get("denial_risk")),
-                ("Workflow Queue", intel_display.get("workflow_queue")),
-                ("Review Priority", intel_display.get("review_priority")),
-            ]
-
-        sections = [
-            self.build_detail_card(
-                "Packet Summary",
-                self.build_detail_table(summary_rows, value_color="#57B6FF", show_missing=False),
-                accent_color="#57B6FF",
-                margin_top=0,
-            ),
-        ]
-
-        if any(value not in (None, "", [], {}) for _, value in decision_rows):
-            sections.append(
-                self.build_detail_card(
-                    "Decision Snapshot",
-                    self.build_detail_table(decision_rows, value_color="#57B6FF", show_missing=False),
-                    accent_color="#57B6FF",
-                )
-            )
-
-        sections.extend(
-            [
-                self.build_bullet_section(
-                    "Forms Detected",
-                    forms,
-                    color="#6FCF97",
-                    accent_color="#27AE60",
-                    bullet="✓",
-                ),
-                self.build_detail_card(
-                    "Fields",
-                    self.build_detail_table(
-                        [(self.format_field(key), value) for key, value in fields.items()],
-                        value_color="#DCE6F2",
-                    ),
-                    accent_color="#5B8DEF",
-                ),
-                self.build_bullet_section(
-                    "Issues",
-                    issue_items,
-                    color="#EB5757",
-                    accent_color="#EB5757",
-                    bullet="⚠",
-                ),
-                self.build_bullet_section(
-                    "Missing Items",
-                    intel_display.get("missing_items", []),
-                    color="#EB5757",
-                    accent_color="#EB5757",
-                ),
-                self.build_bullet_section(
-                    "Priority Fixes",
-                    fix_items,
-                    color="#F2C94C",
-                    accent_color="#F2C94C",
-                ),
-                self.build_bullet_section(
-                    "Review Flags",
-                    [self.format_review_flag(flag) for flag in intel_display.get("review_flags", [])],
-                    color="#F2994A",
-                    accent_color="#F2994A",
-                ),
-                self.build_bullet_section(
-                    "Review Rationale",
-                    review_rationale,
-                    color="#57B6FF",
-                    accent_color="#57B6FF",
-                ),
-            ]
-        )
-
-        if intel_display:
-            sections.extend(self.build_condensed_advanced_intel_sections(result))
-
-        rendered_sections = "".join(section for section in sections if section)
-
-        return (
-            "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-            "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
-            f"{rendered_sections}</body></html>"
-        )
+        return render_build_packet_details_html_condensed(self, file, result)
 
     def build_packet_details_html_v2(self, file, result):
 
-        score = result.get("score", 0)
+        score = self.get_result_score(result)
         forms = result.get("forms", [])
         fields = result.get("fields", {})
         issues = result.get("issues", [])
@@ -2210,8 +1168,11 @@ class MainWindow(QMainWindow):
             "ordering_doctor",
             "referring_doctor",
             "provider",
+            "treating_provider",
+            "followup_provider",
             "facility",
             "clinic_name",
+            "location",
             "service_date_range",
             "npi",
             "signature_present",
@@ -2221,7 +1182,6 @@ class MainWindow(QMainWindow):
             "diagnosis",
             "icd_codes",
             "symptom",
-            "location",
             "procedure",
         ]
 
@@ -2243,8 +1203,13 @@ class MainWindow(QMainWindow):
                 ]
             )
             decision_rows = [
+                ("Evidence Strength", self.format_packet_display_value("Evidence Strength", intel_display.get("evidence_strength"))),
+                ("Packet Assembly", self.format_packet_display_value("Packet Assembly", intel_display.get("packet_assembly"))),
+                ("Invariant Coverage", self.format_packet_display_value("Invariant Coverage", intel_display.get("invariant_coverage"))),
                 ("Packet Confidence", self.format_packet_display_value("Packet Confidence", intel_display.get("packet_confidence"))),
                 ("Packet Profile", self.format_packet_display_value("Packet Profile", intel_display.get("packet_profile"))),
+                ("Packet Archetype", self.format_packet_display_value("Packet Archetype", intel_display.get("packet_archetype"))),
+                ("Format Variability", self.format_packet_display_value("Format Variability", intel_display.get("format_variability"))),
                 ("Denial Risk", self.format_packet_display_value("Denial Risk", intel_display.get("denial_risk"))),
                 ("Workflow Queue", self.format_packet_display_value("Workflow Queue", intel_display.get("workflow_queue"))),
                 ("Review Priority", self.format_packet_display_value("Review Priority", intel_display.get("review_priority"))),
@@ -2256,6 +1221,14 @@ class MainWindow(QMainWindow):
 
         for field_name in key_field_order:
             if field_name in remaining_fields:
+                if (
+                    field_name == "provider"
+                    and "treating_provider" in remaining_fields
+                    and self.format_detail_value(remaining_fields.get("provider")).strip().lower()
+                    == self.format_detail_value(remaining_fields.get("treating_provider")).strip().lower()
+                ):
+                    remaining_fields.pop(field_name, None)
+                    continue
                 key_rows.append(
                     (
                         self.format_packet_field_label(field_name),
@@ -2281,6 +1254,13 @@ class MainWindow(QMainWindow):
             )
 
         sections = [
+            self.build_operator_quick_read_card(
+                intel_display,
+                issue_groups,
+                fix_items,
+                review_rationale,
+                margin_top=0,
+            ),
             self.build_detail_card(
                 "Packet Summary",
                 self.build_detail_table(summary_rows, value_color=score_color, show_missing=False),
@@ -2296,6 +1276,9 @@ class MainWindow(QMainWindow):
                     self.build_detail_table(decision_rows, value_color="#57B6FF", show_missing=False),
                     accent_color="#57B6FF",
                 )
+            )
+            sections.append(
+                self.build_repeat_review_comparison_card(file, result)
             )
 
         sections.extend(
@@ -2502,149 +1485,36 @@ class MainWindow(QMainWindow):
 
         self.files=files
         self.update_scan_diagnostics_button()
+        self.show_reviewer_empty_state("files_loaded")
+        self.update_results_hint(
+            f"{len(files)} packet{'s' if len(files) != 1 else ''} loaded. Click Analyze Packets to score and review them."
+        )
         self.log(f"Loaded {len(files)} files.")
         log_event("files_loaded", f"{len(files)} files")
 
     # -------------------------------------------------
-    # ANALYZE (LEGACY BLOCKING PATH)
-    # -------------------------------------------------
-
-    def analyze_packets_legacy_blocking(self):
-
-        icon_base=resource_path("ui/pyside_gui/assets/icons/")
-        self.table.setRowCount(0)
-        self.results = {}
-
-        if not self.files:
-            self.log("No packets loaded for analysis.")
-            return
-
-        total = len(self.files)
-        self.btn_analyze.setEnabled(False)
-        self.btn_folder.setEnabled(False)
-
-        try:
-            for index, file in enumerate(self.files, start=1):
-                basename = os.path.basename(file)
-                self.log(f"Analyzing {index}/{total}: {basename}")
-                QApplication.processEvents()
-
-                try:
-                    result = process_packet(file)
-                except Exception as exc:
-                    error_text = str(exc)
-                    log_event("packet_processing_error", f"{basename} | {error_text}")
-                    self.log(f"Packet processing failed for {basename}: {error_text}")
-                    result = {
-                        "_processing_error": True,
-                        "file": file,
-                        "score": 0,
-                        "fields": {},
-                        "forms": [],
-                        "issues": [f"Packet processing failed: {error_text}"],
-                        "fixes": ["Retry packet analysis after reviewing the packet and logs."],
-                        "intel": {
-                            "display": {
-                                "packet_strength": "error",
-                                "submission_readiness": "needs_review",
-                                "review_priority": "high",
-                                "denial_risk": "high",
-                                "workflow_queue": "review_queue",
-                                "next_action": "retry_analysis",
-                                "issue_details": [f"Packet processing failed: {error_text}"],
-                                "priority_fixes": ["Retry packet analysis after reviewing the packet and logs."],
-                                "review_rationale": ["The packet could not be fully analyzed."],
-                                "review_flags": ["manual_review_required"],
-                            }
-                        },
-                    }
-
-                score=result.get("score",0)
-                intel_display=result.get("intel",{}).get("display",{})
-                workbook_summary=self.build_export_summary(result)
-                workbook_summary.update({
-                    "packet_confidence": intel_display.get("packet_confidence"),
-                    "approval_probability": intel_display.get("approval_probability"),
-                    "submission_readiness": intel_display.get("submission_readiness"),
-                    "workflow_queue": intel_display.get("workflow_queue"),
-                    "next_action": intel_display.get("next_action"),
-                    "denial_risk": intel_display.get("denial_risk"),
-                })
-
-                self.results[file]=result
-
-                row=self.table.rowCount()
-                self.table.insertRow(row)
-
-                file_item=QTableWidgetItem(basename)
-                file_item.setIcon(QIcon(icon_base+"folder.svg"))
-                self.table.setItem(row,0,file_item)
-
-                score_item=QTableWidgetItem(str(score))
-                score_item.setTextAlignment(Qt.AlignCenter)
-                self.table.setItem(row,1,score_item)
-
-                status=QTableWidgetItem()
-
-                if result.get("_processing_error"):
-                    status.setText("Error")
-                    status.setIcon(QIcon(icon_base+"error.svg"))
-                    status.setForeground(QColor("#EB5757"))
-                elif score>=90:
-                    status.setText("Approved")
-                    status.setIcon(QIcon(icon_base+"check.svg"))
-                    status.setForeground(QColor("#27AE60"))
-                    export_patient(result.get("fields",{}), file, workbook_summary)
-                    self.log(
-                        f"Approved packet exported → {basename}",
-                        action="packet_processed"
-                    )
-                elif score>=70:
-                    status.setText("Needs Review")
-                    status.setIcon(QIcon(icon_base+"warning.svg"))
-                    status.setForeground(QColor("#F2C94C"))
-                else:
-                    status.setText("Rejected")
-                    status.setIcon(QIcon(icon_base+"error.svg"))
-                    status.setForeground(QColor("#EB5757"))
-
-                self.table.setItem(row,2,status)
-
-                if not result.get("_processing_error"):
-                    triage_packet(file, score, result=result)
-
-                if row == 0:
-                    self.table.selectRow(0)
-                    self.load_packet_details()
-
-                QApplication.processEvents()
-        finally:
-            self.btn_analyze.setEnabled(True)
-            self.btn_folder.setEnabled(True)
-
-        if self.table.rowCount() > 0 and self.table.currentRow() < 0:
-            self.table.selectRow(0)
-            self.load_packet_details()
-
-        self.update_scan_diagnostics_button()
-        self.log("Packet analysis complete.")
-
     def analyze_packets(self):
 
         if self.analysis_thread and self.analysis_thread.isRunning():
             self.log("Packet analysis is already running.")
             return
 
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self.results = {}
-        self.details.clear()
+        self.show_reviewer_empty_state("analyzing")
 
         if not self.files:
+            self.show_reviewer_empty_state("no_files")
+            self.update_results_hint("No packets loaded yet. Use Select Packets or Analyze Folder first.")
             self.log("No packets loaded for analysis.")
             return
 
         self.update_scan_diagnostics_button()
         self.set_analysis_controls_enabled(False)
+        self.update_results_hint(
+            f"Analyzing {len(self.files)} packet{'s' if len(self.files) != 1 else ''}. Results will populate below."
+        )
 
         self.analysis_thread = QThread(self)
         self.analysis_worker = PacketAnalysisWorker(list(self.files))
@@ -2670,12 +1540,15 @@ class MainWindow(QMainWindow):
         selected=self.table.currentRow()
 
         if selected<0:
+            self.show_reviewer_empty_state("no_selection")
+            self.update_scan_diagnostics_button()
             return
 
-        file=self.files[selected]
+        file = self.get_selected_table_file()
         result=self.results.get(file)
 
         if not result:
+            self.show_reviewer_empty_state("no_result")
             self.update_scan_diagnostics_button()
             return
 
@@ -2715,6 +1588,10 @@ class MainWindow(QMainWindow):
 
         self.files=files
         self.update_scan_diagnostics_button()
+        self.show_reviewer_empty_state("files_loaded")
+        self.update_results_hint(
+            f"{len(files)} packet{'s' if len(files) != 1 else ''} loaded from the folder. Click Analyze Packets to review them."
+        )
         self.log(f"Loaded {len(files)} files.")
         log_event("files_loaded", f"{len(files)} files")
 
@@ -2875,13 +1752,15 @@ class MainWindow(QMainWindow):
 
     def clear_results(self):
 
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self.console.clear()
-        self.details.clear()
+        self.show_reviewer_empty_state("cleared")
 
         self.files=[]
         self.results={}
         self.update_scan_diagnostics_button()
+        self.update_results_hint("Results cleared. Load packets to start another review.")
 
         if self.scan_diagnostics_dialog:
             self.scan_diagnostics_dialog.close()
@@ -2987,6 +1866,1235 @@ class MainWindow(QMainWindow):
     # ADMIN PANEL
     # -------------------------------------------------
 
+    def build_admin_panel_views(self):
+
+        changelog_path = resource_path("CHANGELOG.txt")
+        activity_path = LOG_FILE
+
+        changelog = ""
+        activity_lines = []
+
+        if os.path.exists(changelog_path):
+            with open(changelog_path, "r", encoding="utf-8") as handle:
+                changelog = handle.read()
+
+        if os.path.exists(activity_path):
+            with open(activity_path, "r", encoding="utf-8") as handle:
+                activity_lines = [line.rstrip() for line in handle.readlines() if line.strip()]
+
+        totals = memory_totals()
+        all_runs = get_recent_packet_runs(280)
+        all_events = get_recent_packet_events(280)
+        recent_runs = all_runs[:20]
+        recent_events = all_events[:12]
+        predictive_snapshot = build_predictive_learning_snapshot(all_runs, all_events)
+        predictive_model_summary = dict(predictive_snapshot.get("model_summary") or {})
+        outcome_learning_health = dict(predictive_snapshot.get("outcome_learning_health") or {})
+        deployment_manifest = build_deployment_manifest()
+        deployment_platform = dict(deployment_manifest.get("platform") or {})
+        deployment_details = dict(deployment_manifest.get("deployment") or {})
+        deployment_data_state = dict(deployment_manifest.get("data_state") or {})
+        rollout_summary = dict(deployment_manifest.get("office_rollout") or {})
+        platform_readiness = dict(deployment_manifest.get("platform_readiness") or {})
+        recent_activity = [mask_phi(line) for line in activity_lines[-80:]]
+
+        unmasked_dob_count = len(re.findall(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", "\n".join(recent_activity)))
+        unmasked_va_count = len(re.findall(r"\bVA\d{6,}\b", "\n".join(recent_activity), flags=re.IGNORECASE))
+        unmasked_email_count = len(re.findall(r"\b[\w.\-]+@[\w.\-]+\.\w+\b", "\n".join(recent_activity)))
+        unmasked_phone_count = len(re.findall(r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b", "\n".join(recent_activity)))
+        phi_audit_clean = not any([unmasked_dob_count, unmasked_va_count, unmasked_email_count, unmasked_phone_count])
+
+        blocks = changelog.split("VERSION:")
+        blocks = [block.strip() for block in blocks if block.strip()]
+        blocks.reverse()
+        blocks = blocks[:5]
+
+        updates_html = "".join(
+            f"<div style=\"color:#DCE6F2; margin:0 0 10px 0; white-space:pre-wrap;\">{html.escape(mask_phi('VERSION: ' + block[:800]))}</div>"
+            for block in blocks
+        ) or "<div style=\"color:#9CA3AF;\">No changelog entries found.</div>"
+
+        def average(values):
+            cleaned = [float(value) for value in values if value not in (None, "", [], {})]
+            if not cleaned:
+                return None
+            return round(sum(cleaned) / len(cleaned), 2)
+
+        def safe_issue_list(run):
+            try:
+                return list(json.loads(run.get("issues_json") or "[]") or [])
+            except Exception:
+                return []
+
+        def format_score_value(value):
+            if value in (None, "", [], {}):
+                return "—"
+            try:
+                return int(round(float(value)))
+            except (TypeError, ValueError):
+                return value
+
+        def format_confidence_percent(value):
+            if value in (None, "", [], {}):
+                return "—"
+            try:
+                return f"{int(round(float(value) * 100))}%"
+            except (TypeError, ValueError):
+                return str(value)
+
+        def format_probability_percent(value):
+            if value in (None, "", [], {}):
+                return "â€”"
+            try:
+                numeric = float(value)
+                if numeric <= 1.0:
+                    numeric *= 100.0
+                return f"{int(round(numeric))}%"
+            except (TypeError, ValueError):
+                return str(value)
+
+        def format_count_pairs(items, normalize_label=False):
+            formatted = []
+            for item in list(items or []):
+                if not isinstance(item, (list, tuple)) or len(item) < 2:
+                    continue
+                label = str(item[0] or "Unknown").strip() or "Unknown"
+                if normalize_label:
+                    label = self.format_field(label)
+                formatted.append(f"{label} ({item[1]})")
+            return formatted
+
+        scores = [run.get("score") for run in recent_runs if run.get("score") not in (None, "")]
+        packet_confidences = [run.get("packet_confidence") for run in recent_runs if run.get("packet_confidence") not in (None, "")]
+        runtimes = [run.get("runtime_seconds") for run in recent_runs if run.get("runtime_seconds") not in (None, "")]
+        intel_runtimes = [run.get("intel_runtime_seconds") for run in recent_runs if run.get("intel_runtime_seconds") not in (None, "")]
+        host_runtimes = [run.get("host_runtime_seconds") for run in recent_runs if run.get("host_runtime_seconds") not in (None, "")]
+        ocr_confidences = [run.get("ocr_confidence") for run in recent_runs if run.get("ocr_confidence") not in (None, "")]
+        intel_summaries = [parse_intel_summary(run) for run in recent_runs]
+
+        avg_score = average(scores)
+        avg_confidence = average(packet_confidences)
+        avg_runtime = average(runtimes)
+        avg_intel_runtime = average(intel_runtimes)
+        avg_host_runtime = average(host_runtimes)
+        avg_ocr_confidence = average(ocr_confidences)
+
+        engine_metric_averages = {}
+        for key in [
+            "intake_seconds",
+            "primary_pipeline_seconds",
+            "retry_evaluation_seconds",
+            "fallback_reload_seconds",
+            "fallback_pipeline_seconds",
+            "pipeline_total_seconds",
+            "process_path_total_seconds",
+        ]:
+            engine_metric_averages[key] = average(
+                [
+                    (summary.get("engine_metrics", {}) or {}).get(key)
+                    for summary in intel_summaries
+                ]
+            )
+
+        pipeline_stage_averages = {}
+        for stage_name in [
+            "detection",
+            "extraction",
+            "validation",
+            "intelligence",
+            "review",
+            "post_review_intelligence",
+            "learning",
+        ]:
+            pipeline_stage_averages[stage_name] = average(
+                [
+                    (summary.get("pipeline_stage_timings", {}) or {}).get(stage_name)
+                    for summary in intel_summaries
+                ]
+            )
+
+        status_counts = {"approved": 0, "needs_review": 0, "rejected": 0}
+        high_risk_count = 0
+        slow_packet_count = 0
+        analysis_mode_counts = {}
+        recurring_issue_counter = {}
+
+        for run in recent_runs:
+            status = str(run.get("status") or "").strip().lower()
+            if status in status_counts:
+                status_counts[status] += 1
+
+            risk = str(run.get("denial_risk") or "").strip().lower()
+            if risk in {"high", "critical"}:
+                high_risk_count += 1
+
+            runtime_value = run.get("runtime_seconds")
+            try:
+                if runtime_value is not None and float(runtime_value) >= 30:
+                    slow_packet_count += 1
+            except Exception:
+                pass
+
+            analysis_mode = str(run.get("analysis_mode") or "unknown").strip().lower()
+            analysis_mode_counts[analysis_mode] = analysis_mode_counts.get(analysis_mode, 0) + 1
+
+            for issue in safe_issue_list(run):
+                recurring_issue_counter[issue] = recurring_issue_counter.get(issue, 0) + 1
+
+        recurring_issues = [
+            f"{issue} ({count})"
+            for issue, count in sorted(
+                recurring_issue_counter.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:6]
+        ]
+
+        dominant_mode = "-"
+        if analysis_mode_counts:
+            dominant_mode = max(analysis_mode_counts.items(), key=lambda item: item[1])[0]
+            dominant_mode = self.format_field(dominant_mode)
+
+        office_profile = load_office_profile()
+        current_snapshot = build_cross_office_snapshot()
+        current_snapshot_summary = dict(current_snapshot.get("summary") or {})
+        snapshot_file_exists = os.path.exists(SNAPSHOT_OUTPUT_PATH)
+        imported_snapshot_paths = list_imported_snapshot_files()
+        imported_snapshot_rows = []
+        imported_office_count = 0
+
+        for snapshot_path in imported_snapshot_paths:
+            try:
+                snapshot = load_cross_office_snapshot(snapshot_path)
+            except Exception:
+                continue
+
+            office = dict(snapshot.get("office") or {})
+            summary = dict(snapshot.get("summary") or {})
+            imported_snapshot_rows.append(
+                [
+                    office.get("office_name") or "Unknown Office",
+                    office.get("organization_id") or "Unknown Org",
+                    snapshot.get("generated_at") or "Unknown",
+                    summary.get("packet_count") or 0,
+                    format_score_value(summary.get("average_packet_score")),
+                    os.path.basename(snapshot_path),
+                ]
+            )
+            imported_office_count += 1
+
+        network_rollup = load_network_rollup()
+        network_office_rankings = list((network_rollup or {}).get("office_rankings") or [])
+        network_status = "Ready" if network_rollup else "Pending"
+        network_total_packets = (network_rollup or {}).get("total_packet_count")
+        network_average_score = (network_rollup or {}).get("average_packet_score")
+        network_average_runtime = (network_rollup or {}).get("average_runtime_seconds")
+        network_generated_at = (network_rollup or {}).get("generated_at")
+        network_office_count = (network_rollup or {}).get("office_count")
+        network_org_count = (network_rollup or {}).get("organization_count")
+        try:
+            cross_office_intelligence = build_local_cross_office_intelligence(include_current_office=True)
+        except Exception:
+            cross_office_intelligence = {}
+        active_network_package = load_active_network_intelligence_package()
+        active_network_package_payload = dict((active_network_package or {}).get("payload") or {})
+        imported_network_intelligence = dict(active_network_package_payload.get("cross_office_intelligence") or {})
+        imported_network_rollup = dict(active_network_package_payload.get("network_rollup") or {})
+
+        network_tiles = [
+            {
+                "title": "Office Snapshot",
+                "value": "Ready",
+                "subtitle": office_profile.get("office_name") or "Current office profile loaded",
+                "accent": "#57B6FF",
+            },
+            {
+                "title": "Imported Snapshots",
+                "value": imported_office_count,
+                "subtitle": "De-identified office feeds stored locally",
+                "accent": "#2DCE89" if imported_office_count else "#9CA3AF",
+            },
+            {
+                "title": "Network Rollup",
+                "value": network_status,
+                "subtitle": network_generated_at or "Build after imports to unlock comparison",
+                "accent": "#F2C94C" if network_rollup else "#F2994A",
+            },
+            {
+                "title": "Network Offices",
+                "value": network_office_count if network_rollup else imported_office_count + 1,
+                "subtitle": f"{network_org_count or 1} organizations in view",
+                "accent": "#9B8CFF",
+            },
+            {
+                "title": "Network Packets",
+                "value": network_total_packets if network_rollup else current_snapshot_summary.get("packet_count", 0),
+                "subtitle": "Combined learning volume",
+                "accent": "#57B6FF",
+            },
+            {
+                "title": "Avg Network Score",
+                "value": format_score_value(network_average_score if network_rollup else current_snapshot_summary.get("average_packet_score")),
+                "subtitle": self.format_runtime_value(network_average_runtime) + " average runtime" if network_rollup else "Current office preview",
+                "accent": "#F2C94C",
+            },
+        ]
+
+        snapshot_status_rows = [
+            ("Office Profile", office_profile.get("office_name")),
+            ("Organization ID", office_profile.get("organization_id")),
+            ("Office ID", office_profile.get("office_id")),
+            ("Install ID", office_profile.get("install_id")),
+            ("Office Profile Path", OFFICE_PROFILE_PATH),
+            ("Snapshot File Status", "Exported" if snapshot_file_exists else "Not exported yet"),
+            ("Snapshot Output Path", SNAPSHOT_OUTPUT_PATH),
+            ("Imported Snapshot Folder", IMPORTED_SNAPSHOT_DIR),
+            ("Imported Snapshot Count", imported_office_count),
+            ("Network Rollup Status", network_status),
+            ("Network Rollup Path", NETWORK_ROLLUP_OUTPUT_PATH),
+        ]
+
+        network_status_html = ""
+        if not network_rollup:
+            network_status_html = self.build_detail_card(
+                "Cross-Office Rollup Status",
+                "<div style=\"color:#9CA3AF; line-height:1.5;\">"
+                "Import other office snapshots and build a network rollup to unlock cross-office rankings, "
+                "workflow graphs, and organization-level quality benchmarking."
+                "</div>",
+                accent_color="#F2994A",
+            )
+
+        imported_library_html = self.build_html_grid_table(
+            ["Office", "Organization", "Generated", "Packets", "Avg Score", "Stored File"],
+            imported_snapshot_rows,
+            column_colors=["#FFFFFF", "#57B6FF", "#9CA3AF", "#DCE6F2", "#F2C94C", "#DCE6F2"],
+        ) if imported_snapshot_rows else "<div style=\"color:#9CA3AF;\">No imported office snapshots yet.</div>"
+
+        office_ranking_rows = []
+        for index, office_rollup in enumerate(network_office_rankings, start=1):
+            top_issue = "—"
+            top_issues = list(office_rollup.get("top_issues") or [])
+            if top_issues:
+                lead_issue = top_issues[0]
+                if isinstance(lead_issue, (list, tuple)) and len(lead_issue) >= 2:
+                    top_issue = f"{lead_issue[0]} ({lead_issue[1]})"
+
+            office_ranking_rows.append(
+                [
+                    index,
+                    office_rollup.get("office_name") or office_rollup.get("office_id") or "Unknown Office",
+                    self.format_field(office_rollup.get("standing") or "unknown"),
+                    office_rollup.get("packet_count") or 0,
+                    format_score_value(office_rollup.get("average_packet_score")),
+                    format_confidence_percent(office_rollup.get("average_packet_confidence")),
+                    self.format_runtime_value(office_rollup.get("average_runtime_seconds")),
+                    top_issue,
+                ]
+            )
+
+        intelligence_summary = dict((cross_office_intelligence or {}).get("network_summary") or {})
+        priority_alert_groups = []
+        for alert in list((cross_office_intelligence or {}).get("priority_alerts") or []):
+            severity = self.format_field(alert.get("severity") or "notice")
+            office_name = alert.get("office_name") or "Unknown Office"
+            priority_alert_groups.append(
+                {
+                    "title": f"{severity}: {alert.get('title') or 'Network attention item'} | {office_name}",
+                    "details": [alert.get("message") or ""],
+                }
+            )
+
+        momentum_rows = []
+        for office_history in list((cross_office_intelligence or {}).get("office_histories") or [])[:6]:
+            current_state = dict(office_history.get("current") or {})
+
+            def format_delta(value, suffix=""):
+                if value in (None, ""):
+                    return "—"
+                try:
+                    numeric = float(value)
+                except Exception:
+                    return str(value)
+                prefix = "+" if numeric > 0 else ""
+                return f"{prefix}{numeric:.1f}{suffix}"
+
+            momentum_rows.append(
+                [
+                    current_state.get("office_name") or current_state.get("office_id") or "Unknown Office",
+                    current_state.get("average_packet_score"),
+                    format_delta(office_history.get("score_delta")),
+                    self.format_runtime_value(current_state.get("average_runtime_seconds")),
+                    format_delta(office_history.get("runtime_delta"), "s"),
+                    f"{int(round((current_state.get('high_risk_share') or 0) * 100))}%",
+                ]
+            )
+
+        network_signal_rows = [
+            ("Source Snapshots", (cross_office_intelligence or {}).get("source_snapshot_count")),
+            ("Current Offices In View", (cross_office_intelligence or {}).get("current_office_count")),
+            ("Best Current Office", intelligence_summary.get("best_office") or "—"),
+            ("Network Average Score", format_score_value(intelligence_summary.get("network_average_score"))),
+            ("Network Average Runtime", self.format_runtime_value(intelligence_summary.get("network_average_runtime"))),
+            ("Network Average Confidence", format_confidence_percent(intelligence_summary.get("network_average_confidence"))),
+        ]
+
+        hybrid_package_status_rows = [
+            ("Office Sync Package", "Ready" if os.path.exists(OFFICE_SYNC_PACKAGE_PATH) else "Not exported yet"),
+            ("Office Sync Path", OFFICE_SYNC_PACKAGE_PATH),
+            ("Network Intelligence Package", "Active" if active_network_package else "Not imported"),
+            ("Active Network Package Path", ACTIVE_NETWORK_INTELLIGENCE_PACKAGE_PATH),
+            ("Imported Package Generated", (active_network_package or {}).get("generated_at") or "—"),
+            ("Imported Package Source", (active_network_package or {}).get("source", {}).get("office_name") or "—"),
+            ("Imported Package Offices", imported_network_rollup.get("office_count") or "—"),
+            ("Imported Package Alerts", len(list(imported_network_intelligence.get("priority_alerts") or []))),
+        ]
+
+        improving_items = [
+            f"{item.get('office_name')}: {('+' if (item.get('score_delta') or 0) > 0 else '')}{item.get('score_delta')} score delta"
+            for item in list((cross_office_intelligence or {}).get("most_improved") or [])
+            if item.get("score_delta") not in (None, "")
+        ]
+        declining_items = [
+            f"{item.get('office_name')}: {item.get('score_delta')} score delta"
+            for item in list((cross_office_intelligence or {}).get("most_declined") or [])
+            if item.get("score_delta") not in (None, "")
+        ]
+
+        imported_package_alert_groups = []
+        for alert in list(imported_network_intelligence.get("priority_alerts") or []):
+            imported_package_alert_groups.append(
+                {
+                    "title": f"{self.format_field(alert.get('severity') or 'notice')}: {alert.get('title') or 'Imported network insight'}",
+                    "details": [alert.get("message") or ""],
+                }
+            )
+
+        run_rows = [
+            [
+                self.format_admin_value(run.get("file_name"), missing="Unknown"),
+                run.get("score"),
+                self.format_runtime_value(run.get("runtime_seconds")),
+                self.format_field(run.get("status") or "unknown"),
+                self.format_field(run.get("denial_risk") or "unknown"),
+                self.format_field(run.get("analysis_mode") or "unknown"),
+                self.format_field(run.get("scan_quality_band") or "unknown"),
+                self.format_admin_value(run.get("provider_name"), missing="Unknown"),
+            ]
+            for run in recent_runs
+        ]
+
+        slowest_runs = sorted(
+            recent_runs,
+            key=lambda run: float(run.get("runtime_seconds") or 0.0),
+            reverse=True,
+        )[:6]
+
+        slow_run_rows = [
+            [
+                self.format_admin_value(run.get("file_name"), missing="Unknown"),
+                self.format_runtime_value(run.get("runtime_seconds")),
+                run.get("score"),
+                self.format_field(run.get("analysis_mode") or "unknown"),
+                self.format_field(run.get("denial_risk") or "unknown"),
+                self.format_field(run.get("scan_quality_band") or "unknown"),
+            ]
+            for run in slowest_runs
+        ]
+
+        event_rows = [
+            [
+                event.get("created_at"),
+                self.format_field(event.get("event_type") or "unknown"),
+                self.format_field(event.get("event_status") or "unknown"),
+                self.format_admin_value(event.get("file_name"), missing="Unknown"),
+                self.format_admin_value(event.get("note"), missing="-"),
+            ]
+            for event in recent_events
+        ]
+
+        activity_html = (
+            "<div style=\"color:#9CA3AF; white-space:pre-wrap;\">"
+            + "<br>".join(html.escape(line) for line in recent_activity)
+            + "</div>"
+        ) if recent_activity else "<div style=\"color:#9CA3AF;\">No activity log entries found.</div>"
+
+        performance_rows = [
+            ("Average Total Runtime", self.format_runtime_value(avg_runtime)),
+            ("Average Intel Runtime", self.format_runtime_value(avg_intel_runtime)),
+            ("Average Host Runtime", self.format_runtime_value(avg_host_runtime)),
+            ("Average Intake Runtime", self.format_runtime_value(engine_metric_averages.get("intake_seconds"))),
+            ("Average Pipeline Runtime", self.format_runtime_value(engine_metric_averages.get("pipeline_total_seconds"))),
+            ("Average OCR Confidence", "—" if avg_ocr_confidence is None else f"{avg_ocr_confidence:.2f}"),
+            ("Slow Packets (>30s)", slow_packet_count),
+            ("Dominant Analysis Mode", dominant_mode),
+        ]
+
+        pipeline_stage_rows = [
+            ("Detection", self.format_runtime_value(pipeline_stage_averages.get("detection"))),
+            ("Extraction", self.format_runtime_value(pipeline_stage_averages.get("extraction"))),
+            ("Validation", self.format_runtime_value(pipeline_stage_averages.get("validation"))),
+            ("Intelligence", self.format_runtime_value(pipeline_stage_averages.get("intelligence"))),
+            ("Review", self.format_runtime_value(pipeline_stage_averages.get("review"))),
+            ("Post Review", self.format_runtime_value(pipeline_stage_averages.get("post_review_intelligence"))),
+            ("Learning", self.format_runtime_value(pipeline_stage_averages.get("learning"))),
+        ]
+
+        quality_rows = [
+            ("Recent Average Score", "—" if avg_score is None else int(round(avg_score))),
+            ("Average Packet Confidence", "—" if avg_confidence is None else f"{int(round(avg_confidence * 100))}%"),
+            ("Approved", status_counts["approved"]),
+            ("Needs Review", status_counts["needs_review"]),
+            ("Rejected", status_counts["rejected"]),
+            ("High / Critical Risk", high_risk_count),
+        ]
+
+        predictive_learning_rows = [
+            ("Model Availability", "Active" if predictive_model_summary.get("available") else "Learning"),
+            ("Model Type", self.format_field(predictive_model_summary.get("model_type") or predictive_model_summary.get("reason") or "insufficient_history")),
+            ("Labeled Outcomes", predictive_model_summary.get("sample_size") or 0),
+            ("Approval Base Rate", format_probability_percent(predictive_model_summary.get("positive_rate"))),
+            ("Reliability", self.format_field(predictive_model_summary.get("reliability_band") or outcome_learning_health.get("reliability_band") or "early")),
+            ("Reliability Score", predictive_model_summary.get("reliability_score") if predictive_model_summary.get("reliability_score") not in (None, "") else outcome_learning_health.get("reliability_score")),
+            ("Brier Score", predictive_model_summary.get("brier_score")),
+            ("Calibration Error", predictive_model_summary.get("ece")),
+            ("ROC AUC", predictive_model_summary.get("roc_auc")),
+            ("Learning Maturity", self.format_field(outcome_learning_health.get("maturity_band") or "early")),
+        ]
+
+        outcome_activity_rows = [
+            ("Approved Outcomes", outcome_learning_health.get("approval_count") or 0),
+            ("Denied Outcomes", outcome_learning_health.get("denial_count") or 0),
+            ("Corrected Outcomes", outcome_learning_health.get("correction_count") or 0),
+            ("Resubmitted Outcomes", outcome_learning_health.get("resubmission_count") or 0),
+            ("Reviewer Overrides", outcome_learning_health.get("override_count") or 0),
+            ("Deferred Outcomes", outcome_learning_health.get("deferred_count") or 0),
+        ]
+
+        predictive_guidance = []
+        if not predictive_model_summary.get("available"):
+            predictive_guidance.append("Add more real approved and denied outcomes to activate learned probability modeling.")
+        if str(predictive_model_summary.get("reliability_band") or outcome_learning_health.get("reliability_band") or "").lower() == "low":
+            predictive_guidance.append("Prediction reliability is still low, so approval signals should be treated as directional support.")
+        if outcome_learning_health.get("correction_count", 0) + outcome_learning_health.get("resubmission_count", 0) >= 3:
+            predictive_guidance.append("Correction and resubmission volume is high enough to justify stronger pre-submit safeguards.")
+        if outcome_learning_health.get("override_count", 0) >= 2:
+            predictive_guidance.append("Reviewer overrides are recurring, which suggests policy or routing rules should be revisited.")
+
+        operations_guide_items = [
+            "Office Profile Editor: lets you set the real office identity, rollout tier, support contact, and launcher username hint for this install.",
+            "Install Profile: refreshes the local record of this office's version, build, install, and learning state.",
+            "Support Package: exports a troubleshooting snapshot you can share internally without digging through folders by hand.",
+            "Archive + Reset Local PHI: creates a de-identified archive first, then resets local PHI-bearing history for this install.",
+            "Rollout Readiness: shows whether this install is in good shape for broader deployment and support.",
+            "Office Rollout Status: shows how far this office has moved through onboarding and real-world usage milestones.",
+            "Learning Model Status: shows how much real outcome history exists and how trustworthy the learned prediction layer is.",
+            "Recent Packet Runs and Slowest Recent Packets: help you understand live workload and bottlenecks.",
+        ]
+
+        local_phi_status = build_local_phi_storage_status()
+        memory_storage = dict(local_phi_status.get("memory_database") or {})
+        workbook_storage = dict(local_phi_status.get("legacy_workbook") or {})
+
+        def format_size_bytes(value):
+            try:
+                size = int(value or 0)
+            except Exception:
+                size = 0
+
+            if size >= 1024 * 1024:
+                return f"{round(size / (1024 * 1024), 2)} MB"
+            if size >= 1024:
+                return f"{round(size / 1024, 2)} KB"
+            return f"{size} bytes"
+
+        privacy_storage_rows = [
+            ("Memory Storage Mode", "De-identified local history"),
+            ("Local Memory Database", "Present" if memory_storage.get("exists") else "Missing"),
+            ("Memory Database Size", format_size_bytes(memory_storage.get("size_bytes"))),
+            ("Retired Workbook", "Present" if workbook_storage.get("exists") else "Removed"),
+            ("Workbook Size", format_size_bytes(workbook_storage.get("size_bytes"))),
+            ("Memory Database Path", memory_storage.get("path") or "Unknown"),
+            ("Reset Archive Folder", local_phi_status.get("privacy_reset_archive_dir") or "Unknown"),
+            ("De-Identified Export Policy", "Active"),
+        ]
+
+        privacy_warning_items = [
+            "Archive + Reset Local PHI is a controlled privacy reset, not a routine cleanup button.",
+            "It creates a de-identified archive first, then removes the local memory database and the retired workbook from this install.",
+            "That reset reduces local learning history for this office until new packets and real outcomes are recorded again.",
+            "Use it only under the office's retention policy and compliance direction. It should not replace the office's official medical-record or audit-retention process.",
+        ]
+
+        deployment_readiness_rows = [
+            ("Scale Readiness", self.format_field(platform_readiness.get("band") or "foundational")),
+            ("Readiness Score", platform_readiness.get("score")),
+            ("Office Rollout Status", self.format_field(rollout_summary.get("band") or "starter")),
+            ("Onboarding Progress", f"{rollout_summary.get('completed_steps', 0)}/{rollout_summary.get('total_steps', 0)}"),
+            ("Version", deployment_platform.get("version") or self.version),
+            ("Build ID", deployment_platform.get("build_id") or self.build_id or "Unknown"),
+            ("Office", deployment_details.get("office_name") or office_profile.get("office_name") or "Default Office"),
+            ("Install ID", deployment_details.get("install_id") or office_profile.get("install_id") or "Unknown"),
+            ("Runtime Mode", "Packaged" if deployment_platform.get("frozen") else "Source"),
+            ("Release Manifest", "Available" if deployment_details.get("release_manifest_available") else "Pending"),
+        ]
+
+        rollout_status_rows = [
+            ("Rollout Tier", self.format_field(deployment_details.get("rollout_tier") or office_profile.get("rollout_tier") or "single_office")),
+            ("Office Identity Configured", "Yes" if rollout_summary.get("office_identity_configured") else "No"),
+            ("Docs Kit Exported", "Yes" if rollout_summary.get("docs_kit_exported") else "No"),
+            ("Launcher Credential Mode", self.format_field((rollout_summary.get("credential_policy") or {}).get("mode") or "local_install_shared")),
+            ("Launcher Username", (rollout_summary.get("credential_policy") or {}).get("username_hint") or "Not set"),
+            ("First Packet Analyzed", "Yes" if rollout_summary.get("first_packet_analyzed") else "No"),
+            ("First Real Outcome Recorded", "Yes" if rollout_summary.get("first_real_outcome_recorded") else "No"),
+        ]
+
+        rollout_checklist_groups = [
+            (
+                item.get("label"),
+                [
+                    (
+                        "Completed" if item.get("complete") else "Pending"
+                    )
+                    + (f" | {item.get('detail')}" if item.get("detail") not in (None, "", False) else "")
+                ],
+            )
+            for item in list(rollout_summary.get("checklist") or [])
+        ]
+
+        deployment_asset_rows = [
+            ("Deployment Manifest Path", DEPLOYMENT_MANIFEST_PATH),
+            ("Support Bundle Path", SUPPORT_BUNDLE_OUTPUT_PATH),
+            ("Snapshot Export Path", deployment_details.get("snapshot_output_path") or SNAPSHOT_OUTPUT_PATH),
+            ("Imported Snapshot Count", deployment_data_state.get("imported_snapshot_count") or 0),
+            ("Network Rollup Status", self.format_field(deployment_data_state.get("network_rollup_status") or "pending")),
+            ("Active Network Package", self.format_field(deployment_data_state.get("active_network_package_status") or "pending")),
+            ("Update Channel", deployment_details.get("update_channel")),
+            ("Runtime Root", deployment_platform.get("runtime_root")),
+        ]
+
+        platform_actions = []
+        if not deployment_details.get("release_manifest_available"):
+            platform_actions.append("Next release build should publish release manifest metadata for cleaner deployment traceability.")
+        if not predictive_model_summary.get("available"):
+            platform_actions.append("Support teams should keep recording real outcomes so predictive learning matures at each office.")
+        if (deployment_data_state.get("imported_snapshot_count") or 0) == 0:
+            platform_actions.append("Cross-office benchmarking is ready, but no external office snapshots have been imported yet.")
+        platform_actions.extend(list(rollout_summary.get("recommended_actions") or []))
+
+        cross_office_sections = [
+            self.build_detail_card(
+                "Cross-Office Intelligence Overview",
+                self.build_metric_tiles(network_tiles),
+                accent_color="#2DCE89",
+                margin_top=0,
+            ),
+            self.build_detail_card(
+                "Network Data Profile",
+                self.build_detail_table(snapshot_status_rows, value_color="#57B6FF"),
+                accent_color="#57B6FF",
+            ),
+            self.build_detail_card(
+                "Hybrid Package Status",
+                self.build_detail_table(hybrid_package_status_rows, value_color="#57B6FF"),
+                accent_color="#9B8CFF",
+            ),
+            network_status_html,
+            self.build_detail_card(
+                "Imported Office Snapshot Library",
+                imported_library_html,
+                accent_color="#2DCE89",
+            ),
+            self.build_detail_card(
+                "Central Network Signals",
+                self.build_detail_table(network_signal_rows, value_color="#57B6FF"),
+                accent_color="#57B6FF",
+            ),
+            self.build_issue_breakdown_section(
+                "Priority Attention Items",
+                priority_alert_groups,
+                color="#F2C94C",
+                accent_color="#F2994A",
+                bullet="•",
+            ),
+            self.build_issue_breakdown_section(
+                "Imported Network Package Alerts",
+                imported_package_alert_groups,
+                color="#57B6FF",
+                accent_color="#57B6FF",
+                bullet="•",
+            ),
+            self.build_detail_card(
+                "Office Momentum",
+                self.build_html_grid_table(
+                    ["Office", "Current Score", "Score Delta", "Avg Runtime", "Runtime Delta", "High-Risk Share"],
+                    momentum_rows,
+                    column_colors=["#FFFFFF", "#F2C94C", "#57B6FF", "#9B8CFF", "#2DCE89", "#EB5757"],
+                ),
+                accent_color="#2DCE89",
+            ),
+            self.build_bullet_section(
+                "Most Improved Offices",
+                improving_items,
+                color="#2DCE89",
+                accent_color="#2DCE89",
+                bullet="•",
+            ),
+            self.build_bullet_section(
+                "Most At-Risk Declines",
+                declining_items,
+                color="#EB5757",
+                accent_color="#EB5757",
+                bullet="•",
+            ),
+        ]
+
+        if network_rollup:
+            cross_office_sections.extend(
+                [
+                    self.build_detail_card(
+                        "Office Rankings",
+                        self.build_html_grid_table(
+                            ["Rank", "Office", "Standing", "Packets", "Avg Score", "Avg Confidence", "Avg Runtime", "Top Issue"],
+                            office_ranking_rows,
+                            column_colors=["#9CA3AF", "#FFFFFF", "#57B6FF", "#DCE6F2", "#F2C94C", "#2DCE89", "#9B8CFF", "#DCE6F2"],
+                        ),
+                        accent_color="#F2C94C",
+                    ),
+                    self.build_distribution_bar_card(
+                        "Workflow Distribution",
+                        (network_rollup or {}).get("workflow_distribution"),
+                        accent_color="#57B6FF",
+                    ),
+                    self.build_distribution_bar_card(
+                        "Denial Risk Distribution",
+                        (network_rollup or {}).get("denial_risk_distribution"),
+                        accent_color="#EB5757",
+                    ),
+                    self.build_distribution_bar_card(
+                        "Manual Outcome Distribution",
+                        (network_rollup or {}).get("manual_outcome_distribution"),
+                        accent_color="#2DCE89",
+                    ),
+                    self.build_bullet_section(
+                        "Cross-Office Top Issues",
+                        format_count_pairs((network_rollup or {}).get("top_issues")),
+                        color="#F2C94C",
+                        accent_color="#F2994A",
+                    ),
+                    self.build_bullet_section(
+                        "Cross-Office Document Mix",
+                        format_count_pairs((network_rollup or {}).get("top_document_families"), normalize_label=True),
+                        color="#57B6FF",
+                        accent_color="#57B6FF",
+                    ),
+                ]
+            )
+        else:
+            cross_office_sections.extend(
+                [
+                    self.build_distribution_bar_card(
+                        "Current Office Workflow Distribution",
+                        current_snapshot_summary.get("workflow_distribution"),
+                        accent_color="#57B6FF",
+                    ),
+                    self.build_distribution_bar_card(
+                        "Current Office Denial Risk Distribution",
+                        current_snapshot_summary.get("denial_risk_distribution"),
+                        accent_color="#EB5757",
+                    ),
+                    self.build_bullet_section(
+                        "Current Office Top Issues",
+                        format_count_pairs(current_snapshot_summary.get("top_issues")),
+                        color="#F2C94C",
+                        accent_color="#F2994A",
+                    ),
+                ]
+            )
+
+        overview_tiles = [
+            {
+                "title": "Packets Remembered",
+                "value": totals.get("packet_count", 0),
+                "subtitle": f"{totals.get('case_count', 0)} cases | {totals.get('provider_count', 0)} providers",
+                "accent": "#57B6FF",
+            },
+            {
+                "title": "Recent Avg Score",
+                "value": "—" if avg_score is None else int(round(avg_score)),
+                "subtitle": "Last 20 packet runs",
+                "accent": "#F2C94C",
+            },
+            {
+                "title": "Avg Runtime",
+                "value": self.format_runtime_value(avg_runtime),
+                "subtitle": f"Mode: {dominant_mode}",
+                "accent": "#9B8CFF",
+            },
+            {
+                "title": "Slow Packets",
+                "value": slow_packet_count,
+                "subtitle": "Recent runs over 30s",
+                "accent": "#F2994A" if slow_packet_count else "#27AE60",
+            },
+            {
+                "title": "High Risk Packets",
+                "value": high_risk_count,
+                "subtitle": "Recent high / critical denial risk",
+                "accent": "#EB5757" if high_risk_count else "#27AE60",
+            },
+            {
+                "title": "PHI Audit",
+                "value": "Clean" if phi_audit_clean else "Review",
+                "subtitle": "Recent activity log masking",
+                "accent": "#27AE60" if phi_audit_clean else "#EB5757",
+            },
+        ]
+
+        operations_sections = [
+            self.build_bullet_section(
+                "How To Use Operations",
+                operations_guide_items,
+                color="#57B6FF",
+                accent_color="#57B6FF",
+            ),
+            self.build_detail_card(
+                "Local Operations Overview",
+                self.build_metric_tiles(overview_tiles),
+                accent_color="#57B6FF",
+                margin_top=0,
+            ),
+            self.build_detail_card(
+                "System Snapshot",
+                self.build_detail_table(
+                    [
+                        ("Engine Version", self.version),
+                        ("Build Time", self.build_timestamp or "Unknown"),
+                        ("PHI Masking", "Active"),
+                        ("Threaded Analysis", "Enabled"),
+                        ("Activity Log Path", activity_path if os.path.exists(activity_path) else "Missing"),
+                        ("Packets Remembered", totals.get("packet_count", 0)),
+                        ("Cases Remembered", totals.get("case_count", 0)),
+                        ("Providers Remembered", totals.get("provider_count", 0)),
+                        ("Recent Activity Entries", len(recent_activity)),
+                    ],
+                    value_color="#57B6FF",
+                ),
+                accent_color="#57B6FF",
+            ),
+            self.build_detail_card(
+                "Rollout Readiness",
+                self.build_detail_table(
+                    deployment_readiness_rows,
+                    value_color="#2DCE89",
+                    show_missing=False,
+                ),
+                accent_color="#2DCE89",
+            ),
+            self.build_detail_card(
+                "Office Rollout Status",
+                self.build_detail_table(
+                    rollout_status_rows,
+                    value_color="#57B6FF",
+                    show_missing=False,
+                ),
+                accent_color="#9B8CFF",
+            ),
+            self.build_issue_breakdown_section(
+                "Onboarding Checklist",
+                rollout_checklist_groups or [("Onboarding Checklist", ["No rollout checklist data available yet."])],
+                color="#57B6FF",
+                accent_color="#57B6FF",
+                bullet="•",
+            ),
+            self.build_detail_card(
+                "Support Files & Paths",
+                self.build_detail_table(
+                    deployment_asset_rows,
+                    value_color="#57B6FF",
+                    show_missing=False,
+                ),
+                accent_color="#57B6FF",
+            ),
+            self.build_detail_card(
+                "Local PHI Storage",
+                self.build_detail_table(
+                    privacy_storage_rows,
+                    value_color="#EB5757" if memory_storage.get("exists") or workbook_storage.get("exists") else "#2DCE89",
+                    show_missing=False,
+                ),
+                accent_color="#EB5757" if memory_storage.get("exists") or workbook_storage.get("exists") else "#2DCE89",
+            ),
+            self.build_bullet_section(
+                "Privacy Reset Warning",
+                privacy_warning_items,
+                color="#F2C94C",
+                accent_color="#F2994A",
+            ),
+            self.build_detail_card(
+                "Performance Snapshot",
+                self.build_detail_table(
+                    performance_rows,
+                    value_color="#9B8CFF",
+                    show_missing=False,
+                ),
+                accent_color="#9B8CFF",
+            ),
+            self.build_detail_card(
+                "Intel Stage Timings",
+                self.build_detail_table(
+                    pipeline_stage_rows,
+                    value_color="#9B8CFF",
+                    show_missing=False,
+                ),
+                accent_color="#9B8CFF",
+            ),
+            self.build_detail_card(
+                "Quality Snapshot",
+                self.build_detail_table(
+                    quality_rows,
+                    value_color="#57B6FF",
+                    show_missing=False,
+                ),
+                accent_color="#57B6FF",
+            ),
+            self.build_detail_card(
+                "Learning Model Status",
+                self.build_detail_table(
+                    predictive_learning_rows,
+                    value_color="#F2994A",
+                    show_missing=False,
+                ),
+                accent_color="#F2994A",
+            ),
+            self.build_detail_card(
+                "Recorded Real Outcomes",
+                self.build_detail_table(
+                    outcome_activity_rows,
+                    value_color="#F2994A",
+                    show_missing=False,
+                ),
+                accent_color="#F2994A",
+            ),
+            self.build_bullet_section(
+                "Learning Guidance",
+                predictive_guidance or ["Prediction learning is stable with no immediate watchpoints."],
+                color="#F2994A",
+                accent_color="#F2994A",
+            ),
+            self.build_bullet_section(
+                "Recommended Next Steps",
+                platform_actions or ["Deployment manifest and support bundle flow are ready for use."],
+                color="#2DCE89",
+                accent_color="#2DCE89",
+            ),
+            self.build_bullet_section(
+                "Top Recurring Issues",
+                recurring_issues,
+                color="#F2C94C",
+                accent_color="#F2994A",
+            ),
+            self.build_detail_card(
+                "Slowest Recent Packets",
+                self.build_html_grid_table(
+                    ["File", "Runtime", "Score", "Mode", "Risk", "Scan"],
+                    slow_run_rows,
+                    column_colors=["#DCE6F2", "#9B8CFF", "#F2C94C", "#57B6FF", "#EB5757", "#DCE6F2"],
+                ),
+                accent_color="#9B8CFF",
+            ),
+            self.build_detail_card(
+                "Recent Packet Runs",
+                self.build_html_grid_table(
+                    ["File", "Score", "Runtime", "Status", "Risk", "Mode", "Scan", "Provider"],
+                    run_rows,
+                    column_colors=["#DCE6F2", "#F2C94C", "#9B8CFF", "#DCE6F2", "#EB5757", "#57B6FF", "#DCE6F2", "#57B6FF"],
+                ),
+                accent_color="#57B6FF",
+            ),
+        ]
+
+        audit_sections = [
+            self.build_detail_card(
+                "PHI Masking Audit",
+                self.build_detail_table(
+                    [
+                        ("Raw DOB Tokens In Recent Log", unmasked_dob_count),
+                        ("Raw VA Tokens In Recent Log", unmasked_va_count),
+                        ("Raw Email Tokens In Recent Log", unmasked_email_count),
+                        ("Raw Phone Tokens In Recent Log", unmasked_phone_count),
+                    ],
+                    value_color="#6FCF97" if phi_audit_clean else "#EB5757",
+                ),
+                accent_color="#27AE60" if phi_audit_clean else "#EB5757",
+                margin_top=0,
+            ),
+            self.build_detail_card(
+                "Recent Events",
+                self.build_html_grid_table(
+                    ["Timestamp", "Event", "Status", "File", "Note"],
+                    event_rows,
+                    column_colors=["#9CA3AF", "#57B6FF", "#F2C94C", "#DCE6F2", "#DCE6F2"],
+                ),
+                accent_color="#F2C94C",
+            ),
+            self.build_detail_card(
+                "Recent Updates",
+                updates_html,
+                accent_color="#57B6FF",
+            ),
+            self.build_detail_card(
+                "Masked Activity Log",
+                activity_html,
+                accent_color="#9B8CFF",
+            ),
+        ]
+
+        def wrap_sections(section_list):
+            return (
+                "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+                "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+                + "".join(section for section in section_list if section)
+                + "</body></html>"
+            )
+
+        return {
+            "cross_office": wrap_sections(cross_office_sections),
+            "operations": wrap_sections(operations_sections),
+            "audit": wrap_sections(audit_sections),
+        }
+
+    def refresh_admin_panel(self):
+
+        self.populate_admin_dashboard()
+
+        if not any([self.admin_cross_office_text, self.admin_operations_text, self.admin_audit_text]):
+            return
+
+        try:
+            views = self.build_admin_panel_views()
+
+            if self.admin_cross_office_text:
+                self.admin_cross_office_text.setHtml(views.get("cross_office", ""))
+
+            if self.admin_operations_text:
+                self.admin_operations_text.setHtml(views.get("operations", ""))
+
+            if self.admin_audit_text:
+                self.admin_audit_text.setHtml(views.get("audit", ""))
+
+        except Exception as exc:
+            error_html = (
+                "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+                "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+                f"{self.build_detail_card('Admin Panel Error', '<div style=\"color:#EB5757;\">' + html.escape(str(exc)) + '</div>', accent_color='#EB5757', margin_top=0)}"
+                "</body></html>"
+            )
+
+            if self.admin_cross_office_text:
+                self.admin_cross_office_text.setHtml(error_html)
+            if self.admin_operations_text:
+                self.admin_operations_text.setHtml(error_html)
+            if self.admin_audit_text:
+                self.admin_audit_text.setHtml(error_html)
+
+    def export_office_snapshot_action(self):
+
+        try:
+            output_path = export_cross_office_snapshot()
+            log_event("cross_office_snapshot_exported", output_path)
+            self.refresh_admin_panel()
+            self.show_admin_message(
+                "Office Snapshot Exported",
+                f"De-identified office snapshot exported successfully.\n\n{output_path}",
+            )
+        except Exception as exc:
+            self.show_admin_message("Snapshot Export Failed", str(exc), icon=QMessageBox.Warning)
+
+    def import_cross_office_snapshots_action(self):
+
+        start_dir = os.path.dirname(SNAPSHOT_OUTPUT_PATH)
+        paths = self.get_admin_open_file_names(
+            "Import Cross-Office Snapshots",
+            start_dir,
+            "JSON Files (*.json)",
+        )
+
+        if not paths:
+            return
+
+        try:
+            imported_paths = import_cross_office_snapshot_files(paths)
+            log_event("cross_office_snapshots_imported", f"{len(imported_paths)} snapshots")
+            self.refresh_admin_panel()
+            self.show_admin_message(
+                "Snapshots Imported",
+                f"Imported {len(imported_paths)} de-identified office snapshot(s).",
+            )
+        except Exception as exc:
+            self.show_admin_message("Snapshot Import Failed", str(exc), icon=QMessageBox.Warning)
+
+    def build_network_rollup_action(self):
+
+        try:
+            output_path = build_local_network_rollup(include_current_office=True)
+            rollup = load_network_rollup(output_path) or {}
+            log_event(
+                "cross_office_network_rollup_built",
+                f"{rollup.get('office_count', 0)} offices | {rollup.get('total_packet_count', 0)} packets",
+            )
+            self.refresh_admin_panel()
+            self.show_admin_message(
+                "Network Rollup Built",
+                f"Built a network rollup for {rollup.get('office_count', 0)} office(s) across "
+                f"{rollup.get('organization_count', 0)} organization(s).\n\n{output_path}",
+            )
+        except Exception as exc:
+            self.show_admin_message("Network Rollup Failed", str(exc), icon=QMessageBox.Warning)
+
+    def export_office_sync_package_action(self):
+
+        try:
+            output_path = export_office_sync_package()
+            log_event("hybrid_office_sync_package_exported", output_path)
+            self.refresh_admin_panel()
+            self.show_admin_message(
+                "Office Sync Package Exported",
+                f"Hybrid office sync package exported successfully.\n\n{output_path}",
+            )
+        except Exception as exc:
+            self.show_admin_message("Office Sync Export Failed", str(exc), icon=QMessageBox.Warning)
+
+    def import_network_intelligence_package_action(self):
+
+        start_dir = os.path.dirname(NETWORK_INTELLIGENCE_PACKAGE_PATH)
+        paths = self.get_admin_open_file_names(
+            "Import Network Intelligence Package",
+            start_dir,
+            "JSON Files (*.json)",
+        )
+
+        if not paths:
+            return
+
+        try:
+            imported_path = import_network_intelligence_package(paths[0])
+            log_event("hybrid_network_package_imported", imported_path)
+            self.refresh_admin_panel()
+            self.show_admin_message(
+                "Network Intelligence Imported",
+                f"Imported and activated network intelligence package.\n\n{imported_path}",
+            )
+        except Exception as exc:
+            self.show_admin_message("Network Package Import Failed", str(exc), icon=QMessageBox.Warning)
+
+    def export_network_intelligence_package_action(self):
+
+        try:
+            output_path = build_local_network_intelligence_package(include_current_office=True)
+            log_event("hybrid_network_package_exported", output_path)
+            self.refresh_admin_panel()
+            self.show_admin_message(
+                "Network Intelligence Package Exported",
+                f"Built and exported a hybrid network intelligence package.\n\n{output_path}",
+            )
+        except Exception as exc:
+            self.show_admin_message("Network Package Export Failed", str(exc), icon=QMessageBox.Warning)
+
+    def open_cross_office_data_folder_action(self):
+
+        try:
+            output_folder = os.path.dirname(NETWORK_ROLLUP_OUTPUT_PATH)
+            os.makedirs(output_folder, exist_ok=True)
+            if hasattr(os, "startfile"):
+                os.startfile(output_folder)
+            else:
+                self.show_admin_message("Cross-Office Data Folder", output_folder)
+        except Exception as exc:
+            self.show_admin_message("Unable To Open Folder", str(exc), icon=QMessageBox.Warning)
+
+    def refresh_deployment_manifest_action(self):
+
+        try:
+            output_path, manifest = write_deployment_manifest()
+            log_event(
+                "deployment_manifest_refreshed",
+                f"{manifest.get('platform', {}).get('version', 'unknown')} | {manifest.get('platform_readiness', {}).get('band', 'foundational')}",
+            )
+            self.refresh_admin_panel()
+            self.show_admin_message(
+                "Install Profile Refreshed",
+                "The local install profile was refreshed successfully.\n\n"
+                "This file records the version, build, office identity, and current learning state for this install.\n\n"
+                f"{output_path}",
+            )
+        except Exception as exc:
+            self.show_admin_message("Install Profile Refresh Failed", str(exc), icon=QMessageBox.Warning)
+
+    def export_support_bundle_action(self):
+
+        try:
+            output_path = export_support_bundle()
+            log_event("support_bundle_exported", output_path)
+            self.refresh_admin_panel()
+            self.show_admin_message(
+                "Support Package Exported",
+                "A support package was exported successfully.\n\n"
+                "It contains de-identified deployment, office, network, and recent activity summaries so support can understand this install quickly without exposing raw patient file names.\n\n"
+                f"{output_path}",
+            )
+        except Exception as exc:
+            self.show_admin_message("Support Package Export Failed", str(exc), icon=QMessageBox.Warning)
+
+    def open_support_data_folder_action(self):
+
+        try:
+            output_folder = os.path.dirname(SUPPORT_BUNDLE_OUTPUT_PATH)
+            os.makedirs(output_folder, exist_ok=True)
+            if hasattr(os, "startfile"):
+                os.startfile(output_folder)
+            else:
+                self.show_admin_message("Support Files Folder", output_folder)
+        except Exception as exc:
+            self.show_admin_message("Unable To Open Support Folder", str(exc), icon=QMessageBox.Warning)
+
+    def archive_and_reset_local_phi_action(self):
+
+        should_purge = self.confirm_admin_action(
+            "Archive And Reset Local PHI",
+            "This will first create a de-identified archive, then delete the local packet memory database and the retired Excel workbook from this install.",
+            "Use this only under the office's retention policy and compliance direction. This tool resets local learning history and should not be treated as a substitute for the office's official record-retention process.",
+            confirm_label="Archive And Reset",
+        )
+
+        if not should_purge:
+            return
+
+        try:
+            archive_path = export_local_phi_reset_archive()
+            outcome = purge_local_phi_storage()
+            removed_paths = list(outcome.get("removed_paths") or [])
+            log_event(
+                "local_phi_storage_purged",
+                f"Archived and removed {len(removed_paths)} local storage file(s).",
+            )
+            self.refresh_admin_panel()
+            message_lines = [
+                "A de-identified archive was created and local PHI-bearing storage was reset successfully.",
+                "",
+                "Archive file:",
+                archive_path,
+                "",
+                "Removed files:",
+            ]
+            if removed_paths:
+                message_lines.extend(removed_paths)
+            else:
+                message_lines.append("Nothing needed removal.")
+            self.show_admin_message("Archive And Reset Complete", "\n".join(message_lines))
+        except Exception as exc:
+            self.show_admin_message("Archive And Reset Failed", str(exc), icon=QMessageBox.Warning)
+
     def open_admin_panel(self):
 
         password,ok = self.prompt_admin_password()
@@ -2995,411 +3103,153 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self,"Access Denied","Incorrect password.")
             return
 
-        # Create Admin Window
         dialog = QDialog(self)
         dialog.setWindowTitle("TrueCore Admin Panel")
-        dialog.resize(1180, 760)
+        dialog.resize(1260, 820)
+        dialog.setStyleSheet(self.admin_modal_stylesheet())
 
         layout = QVBoxLayout()
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
 
-        text = QTextEdit()
-        text.setReadOnly(True)
-        text.setFont(QFont("Segoe UI", 10))
+        tab_widget = QTabWidget()
+        tab_widget.setDocumentMode(True)
+        layout.addWidget(tab_widget)
 
-        layout.addWidget(text)
+        def create_admin_text_view():
+            text_view = QTextEdit()
+            text_view.setReadOnly(True)
+            text_view.setFont(QFont("Segoe UI", 10))
+            text_view.setStyleSheet(
+                "QTextEdit { background-color:#11161E; border:1px solid #253243; "
+                "border-radius:8px; padding:6px; }"
+            )
+            return text_view
+
+        overview_tab = QWidget()
+        overview_layout = QVBoxLayout(overview_tab)
+        overview_layout.setContentsMargins(10, 10, 10, 10)
+        overview_layout.setSpacing(10)
+
+        dashboard_host = QWidget()
+        dashboard_layout = QVBoxLayout(dashboard_host)
+        dashboard_layout.setContentsMargins(0, 0, 0, 0)
+        dashboard_layout.setSpacing(10)
+
+        dashboard_scroll = QScrollArea()
+        dashboard_scroll.setWidgetResizable(True)
+        dashboard_scroll.setFrameShape(QFrame.NoFrame)
+        dashboard_scroll.setStyleSheet("QScrollArea { background: transparent; border: 0; }")
+        dashboard_scroll.setWidget(dashboard_host)
+        overview_layout.addWidget(dashboard_scroll, 1)
+
+        cross_office_tab = QWidget()
+        cross_office_layout = QVBoxLayout(cross_office_tab)
+        cross_office_layout.setContentsMargins(10, 10, 10, 10)
+        cross_office_layout.setSpacing(10)
+
+        primary_button_row = QHBoxLayout()
+        primary_button_row.setSpacing(8)
+        secondary_button_row = QHBoxLayout()
+        secondary_button_row.setSpacing(8)
+
+        primary_actions = [
+            ("Export Office Snapshot", self.export_office_snapshot_action),
+            ("Import Office Snapshots", self.import_cross_office_snapshots_action),
+            ("Build Network Rollup", self.build_network_rollup_action),
+        ]
+        secondary_actions = [
+            ("Export Office Sync Package", self.export_office_sync_package_action),
+            ("Import Network Package", self.import_network_intelligence_package_action),
+            ("Export Network Package", self.export_network_intelligence_package_action),
+            ("Open Data Folder", self.open_cross_office_data_folder_action),
+            ("Refresh", self.refresh_admin_panel),
+        ]
+
+        for label, handler in primary_actions:
+            button = QPushButton(label)
+            button.setMinimumHeight(34)
+            button.clicked.connect(handler)
+            primary_button_row.addWidget(button)
+
+        primary_button_row.addStretch()
+
+        for label, handler in secondary_actions:
+            button = QPushButton(label)
+            button.setMinimumHeight(34)
+            button.clicked.connect(handler)
+            secondary_button_row.addWidget(button)
+
+        secondary_button_row.addStretch()
+        cross_office_layout.addLayout(primary_button_row)
+        cross_office_layout.addLayout(secondary_button_row)
+
+        cross_office_text = create_admin_text_view()
+        cross_office_layout.addWidget(cross_office_text, 1)
+
+        operations_tab = QWidget()
+        operations_layout = QVBoxLayout(operations_tab)
+        operations_layout.setContentsMargins(10, 10, 10, 10)
+        operations_layout.setSpacing(10)
+
+        operations_button_row = QHBoxLayout()
+        operations_button_row.setSpacing(10)
+        operations_actions = [
+            ("Edit Office Profile", self.open_office_profile_editor, "Set the real office identity, rollout tier, and support contact for this install."),
+            ("Refresh Install Profile", self.refresh_deployment_manifest_action, "Update the local record of version, build, office, and learning state."),
+            ("Export Support Package", self.export_support_bundle_action, "Export a troubleshooting snapshot for this install."),
+            ("Open Support Files", self.open_support_data_folder_action, "Open the folder that contains support and rollout files."),
+            ("Archive + Reset Local PHI", self.archive_and_reset_local_phi_action, "Create a de-identified archive, then reset local PHI-bearing storage for this install."),
+            ("Refresh", self.refresh_admin_panel, "Refresh the Operations tab data."),
+        ]
+
+        for label, handler, tooltip in operations_actions:
+            button = QPushButton(label)
+            button.setMinimumHeight(34)
+            button.setToolTip(tooltip)
+            button.clicked.connect(handler)
+            operations_button_row.addWidget(button)
+
+        operations_button_row.addStretch()
+        operations_layout.addLayout(operations_button_row)
+
+        operations_text = create_admin_text_view()
+        operations_layout.addWidget(operations_text, 1)
+
+        audit_tab = QWidget()
+        audit_layout = QVBoxLayout(audit_tab)
+        audit_layout.setContentsMargins(10, 10, 10, 10)
+        audit_layout.setSpacing(10)
+
+        audit_text = create_admin_text_view()
+        audit_layout.addWidget(audit_text, 1)
+
+        tab_widget.addTab(overview_tab, "Overview")
+        tab_widget.addTab(cross_office_tab, "Cross-Office")
+        tab_widget.addTab(operations_tab, "Operations")
+        tab_widget.addTab(audit_tab, "Audit & Logs")
 
         dialog.setLayout(layout)
-        
-        # ----------------------------------------------
-        # LOAD ADMIN DATA
-        # ----------------------------------------------
 
-        try:
-
-            changelog_path = resource_path("CHANGELOG.txt")
-            activity_path = LOG_FILE if os.path.exists(LOG_FILE) else LEGACY_LOG_FILE
-
-            changelog = ""
-            activity_lines = []
-
-            if os.path.exists(changelog_path):
-                with open(changelog_path,"r",encoding="utf-8") as f:
-                    changelog = f.read()
-
-            if os.path.exists(activity_path):
-                with open(activity_path,"r",encoding="utf-8") as f:
-                    activity_lines = [line.rstrip() for line in f.readlines() if line.strip()]
-
-            totals = memory_totals()
-            recent_runs = get_recent_packet_runs(20)
-            recent_events = get_recent_packet_events(12)
-            recent_activity = [mask_phi(line) for line in activity_lines[-80:]]
-
-            unmasked_dob_count = len(re.findall(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", "\n".join(recent_activity)))
-            unmasked_va_count = len(re.findall(r"\bVA\d{6,}\b", "\n".join(recent_activity), flags=re.IGNORECASE))
-            unmasked_email_count = len(re.findall(r"\b[\w.\-]+@[\w.\-]+\.\w+\b", "\n".join(recent_activity)))
-            unmasked_phone_count = len(re.findall(r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b", "\n".join(recent_activity)))
-            phi_audit_clean = not any([unmasked_dob_count, unmasked_va_count, unmasked_email_count, unmasked_phone_count])
-
-            blocks = changelog.split("VERSION:")
-            blocks = [b.strip() for b in blocks if b.strip()]
-            blocks.reverse()
-            blocks = blocks[:5]
-
-            updates_html = "".join(
-                f"<div style=\"color:#DCE6F2; margin:0 0 10px 0; white-space:pre-wrap;\">{html.escape(mask_phi('VERSION: ' + block[:800]))}</div>"
-                for block in blocks
-            ) or "<div style=\"color:#9CA3AF;\">No changelog entries found.</div>"
-
-            def average(values):
-                cleaned = [float(value) for value in values if value not in (None, "", [], {})]
-                if not cleaned:
-                    return None
-                return round(sum(cleaned) / len(cleaned), 2)
-
-            def safe_issue_list(run):
-                try:
-                    return list(json.loads(run.get("issues_json") or "[]") or [])
-                except Exception:
-                    return []
-
-            scores = [run.get("score") for run in recent_runs if run.get("score") not in (None, "")]
-            packet_confidences = [run.get("packet_confidence") for run in recent_runs if run.get("packet_confidence") not in (None, "")]
-            runtimes = [run.get("runtime_seconds") for run in recent_runs if run.get("runtime_seconds") not in (None, "")]
-            intel_runtimes = [run.get("intel_runtime_seconds") for run in recent_runs if run.get("intel_runtime_seconds") not in (None, "")]
-            host_runtimes = [run.get("host_runtime_seconds") for run in recent_runs if run.get("host_runtime_seconds") not in (None, "")]
-            ocr_confidences = [run.get("ocr_confidence") for run in recent_runs if run.get("ocr_confidence") not in (None, "")]
-            intel_summaries = [parse_intel_summary(run) for run in recent_runs]
-
-            avg_score = average(scores)
-            avg_confidence = average(packet_confidences)
-            avg_runtime = average(runtimes)
-            avg_intel_runtime = average(intel_runtimes)
-            avg_host_runtime = average(host_runtimes)
-            avg_ocr_confidence = average(ocr_confidences)
-
-            engine_metric_averages = {}
-            for key in [
-                "intake_seconds",
-                "primary_pipeline_seconds",
-                "retry_evaluation_seconds",
-                "fallback_reload_seconds",
-                "fallback_pipeline_seconds",
-                "pipeline_total_seconds",
-                "process_path_total_seconds",
-            ]:
-                engine_metric_averages[key] = average(
-                    [
-                        (summary.get("engine_metrics", {}) or {}).get(key)
-                        for summary in intel_summaries
-                    ]
-                )
-
-            pipeline_stage_averages = {}
-            for stage_name in [
-                "detection",
-                "extraction",
-                "validation",
-                "intelligence",
-                "review",
-                "post_review_intelligence",
-                "learning",
-            ]:
-                pipeline_stage_averages[stage_name] = average(
-                    [
-                        (summary.get("pipeline_stage_timings", {}) or {}).get(stage_name)
-                        for summary in intel_summaries
-                    ]
-                )
-
-            status_counts = {"approved": 0, "needs_review": 0, "rejected": 0}
-            high_risk_count = 0
-            slow_packet_count = 0
-            analysis_mode_counts = {}
-            recurring_issue_counter = {}
-
-            for run in recent_runs:
-                status = str(run.get("status") or "").strip().lower()
-                if status in status_counts:
-                    status_counts[status] += 1
-
-                risk = str(run.get("denial_risk") or "").strip().lower()
-                if risk in {"high", "critical"}:
-                    high_risk_count += 1
-
-                runtime_value = run.get("runtime_seconds")
-                try:
-                    if runtime_value is not None and float(runtime_value) >= 30:
-                        slow_packet_count += 1
-                except Exception:
-                    pass
-
-                analysis_mode = str(run.get("analysis_mode") or "unknown").strip().lower()
-                analysis_mode_counts[analysis_mode] = analysis_mode_counts.get(analysis_mode, 0) + 1
-
-                for issue in safe_issue_list(run):
-                    recurring_issue_counter[issue] = recurring_issue_counter.get(issue, 0) + 1
-
-            recurring_issues = [
-                f"{issue} ({count})"
-                for issue, count in sorted(
-                    recurring_issue_counter.items(),
-                    key=lambda item: item[1],
-                    reverse=True,
-                )[:6]
-            ]
-
-            dominant_mode = "-"
-            if analysis_mode_counts:
-                dominant_mode = max(analysis_mode_counts.items(), key=lambda item: item[1])[0]
-                dominant_mode = self.format_field(dominant_mode)
-
-            overview_tiles = [
-                {
-                    "title": "Packets Remembered",
-                    "value": totals.get("packet_count", 0),
-                    "subtitle": f"{totals.get('case_count', 0)} cases | {totals.get('provider_count', 0)} providers",
-                    "accent": "#57B6FF",
-                },
-                {
-                    "title": "Recent Avg Score",
-                    "value": "—" if avg_score is None else int(round(avg_score)),
-                    "subtitle": "Last 20 packet runs",
-                    "accent": "#F2C94C",
-                },
-                {
-                    "title": "Avg Runtime",
-                    "value": self.format_runtime_value(avg_runtime),
-                    "subtitle": f"Mode: {dominant_mode}",
-                    "accent": "#9B8CFF",
-                },
-                {
-                    "title": "Slow Packets",
-                    "value": slow_packet_count,
-                    "subtitle": "Recent runs over 30s",
-                    "accent": "#F2994A" if slow_packet_count else "#27AE60",
-                },
-                {
-                    "title": "High Risk Packets",
-                    "value": high_risk_count,
-                    "subtitle": "Recent high / critical denial risk",
-                    "accent": "#EB5757" if high_risk_count else "#27AE60",
-                },
-                {
-                    "title": "PHI Audit",
-                    "value": "Clean" if phi_audit_clean else "Review",
-                    "subtitle": "Recent activity log masking",
-                    "accent": "#27AE60" if phi_audit_clean else "#EB5757",
-                },
-            ]
-
-            run_rows = [
-                [
-                    self.format_admin_value(run.get("file_name"), missing="Unknown"),
-                    run.get("score"),
-                    self.format_runtime_value(run.get("runtime_seconds")),
-                    self.format_field(run.get("status") or "unknown"),
-                    self.format_field(run.get("denial_risk") or "unknown"),
-                    self.format_field(run.get("analysis_mode") or "unknown"),
-                    self.format_field(run.get("scan_quality_band") or "unknown"),
-                    self.format_admin_value(run.get("provider_name"), missing="Unknown"),
-                ]
-                for run in recent_runs
-            ]
-
-            slowest_runs = sorted(
-                recent_runs,
-                key=lambda run: float(run.get("runtime_seconds") or 0.0),
-                reverse=True,
-            )[:6]
-
-            slow_run_rows = [
-                [
-                    self.format_admin_value(run.get("file_name"), missing="Unknown"),
-                    self.format_runtime_value(run.get("runtime_seconds")),
-                    run.get("score"),
-                    self.format_field(run.get("analysis_mode") or "unknown"),
-                    self.format_field(run.get("denial_risk") or "unknown"),
-                    self.format_field(run.get("scan_quality_band") or "unknown"),
-                ]
-                for run in slowest_runs
-            ]
-
-            event_rows = [
-                [
-                    event.get("created_at"),
-                    self.format_field(event.get("event_type") or "unknown"),
-                    self.format_field(event.get("event_status") or "unknown"),
-                    self.format_admin_value(event.get("file_name"), missing="Unknown"),
-                    self.format_admin_value(event.get("note"), missing="-"),
-                ]
-                for event in recent_events
-            ]
-
-            activity_html = (
-                "<div style=\"color:#9CA3AF; white-space:pre-wrap;\">"
-                + "<br>".join(html.escape(line) for line in recent_activity)
-                + "</div>"
-            ) if recent_activity else "<div style=\"color:#9CA3AF;\">No activity log entries found.</div>"
-
-            performance_rows = [
-                ("Average Total Runtime", self.format_runtime_value(avg_runtime)),
-                ("Average Intel Runtime", self.format_runtime_value(avg_intel_runtime)),
-                ("Average Host Runtime", self.format_runtime_value(avg_host_runtime)),
-                ("Average Intake Runtime", self.format_runtime_value(engine_metric_averages.get("intake_seconds"))),
-                ("Average Pipeline Runtime", self.format_runtime_value(engine_metric_averages.get("pipeline_total_seconds"))),
-                ("Average OCR Confidence", "—" if avg_ocr_confidence is None else f"{avg_ocr_confidence:.2f}"),
-                ("Slow Packets (>30s)", slow_packet_count),
-                ("Dominant Analysis Mode", dominant_mode),
-            ]
-
-            pipeline_stage_rows = [
-                ("Detection", self.format_runtime_value(pipeline_stage_averages.get("detection"))),
-                ("Extraction", self.format_runtime_value(pipeline_stage_averages.get("extraction"))),
-                ("Validation", self.format_runtime_value(pipeline_stage_averages.get("validation"))),
-                ("Intelligence", self.format_runtime_value(pipeline_stage_averages.get("intelligence"))),
-                ("Review", self.format_runtime_value(pipeline_stage_averages.get("review"))),
-                ("Post Review", self.format_runtime_value(pipeline_stage_averages.get("post_review_intelligence"))),
-                ("Learning", self.format_runtime_value(pipeline_stage_averages.get("learning"))),
-            ]
-
-            quality_rows = [
-                ("Recent Average Score", "—" if avg_score is None else int(round(avg_score))),
-                ("Average Packet Confidence", "—" if avg_confidence is None else f"{int(round(avg_confidence * 100))}%"),
-                ("Approved", status_counts["approved"]),
-                ("Needs Review", status_counts["needs_review"]),
-                ("Rejected", status_counts["rejected"]),
-                ("High / Critical Risk", high_risk_count),
-            ]
-
-            sections = [
-                self.build_detail_card(
-                    "Operations Overview",
-                    self.build_metric_tiles(overview_tiles),
-                    accent_color="#57B6FF",
-                    margin_top=0,
-                ),
-                self.build_detail_card(
-                    "System Summary",
-                    self.build_detail_table(
-                        [
-                            ("Engine Version", self.version),
-                            ("Build Time", self.build_timestamp or "Unknown"),
-                            ("PHI Masking", "Active"),
-                            ("Threaded Analysis", "Enabled"),
-                            ("Activity Log Path", activity_path if os.path.exists(activity_path) else "Missing"),
-                            ("Legacy Log Mirror", LEGACY_LOG_FILE if os.path.exists(LEGACY_LOG_FILE) else "Missing"),
-                            ("Packets Remembered", totals.get("packet_count", 0)),
-                            ("Cases Remembered", totals.get("case_count", 0)),
-                            ("Providers Remembered", totals.get("provider_count", 0)),
-                            ("Recent Activity Entries", len(recent_activity)),
-                        ],
-                        value_color="#57B6FF",
-                    ),
-                    accent_color="#57B6FF",
-                ),
-                self.build_detail_card(
-                    "Performance Snapshot",
-                    self.build_detail_table(
-                        performance_rows,
-                        value_color="#9B8CFF",
-                        show_missing=False,
-                    ),
-                    accent_color="#9B8CFF",
-                ),
-                self.build_detail_card(
-                    "Intel Stage Timings",
-                    self.build_detail_table(
-                        pipeline_stage_rows,
-                        value_color="#9B8CFF",
-                        show_missing=False,
-                    ),
-                    accent_color="#9B8CFF",
-                ),
-                self.build_detail_card(
-                    "Quality Snapshot",
-                    self.build_detail_table(
-                        quality_rows,
-                        value_color="#57B6FF",
-                        show_missing=False,
-                    ),
-                    accent_color="#57B6FF",
-                ),
-                self.build_bullet_section(
-                    "Top Recurring Issues",
-                    recurring_issues,
-                    color="#F2C94C",
-                    accent_color="#F2994A",
-                ),
-                self.build_detail_card(
-                    "Slowest Recent Packets",
-                    self.build_html_grid_table(
-                        ["File", "Runtime", "Score", "Mode", "Risk", "Scan"],
-                        slow_run_rows,
-                        column_colors=["#DCE6F2", "#9B8CFF", "#F2C94C", "#57B6FF", "#EB5757", "#DCE6F2"],
-                    ),
-                    accent_color="#9B8CFF",
-                ),
-                self.build_detail_card(
-                    "Recent Packet Runs",
-                    self.build_html_grid_table(
-                        ["File", "Score", "Runtime", "Status", "Risk", "Mode", "Scan", "Provider"],
-                        run_rows,
-                        column_colors=["#DCE6F2", "#F2C94C", "#9B8CFF", "#DCE6F2", "#EB5757", "#57B6FF", "#DCE6F2", "#57B6FF"],
-                    ),
-                    accent_color="#57B6FF",
-                ),
-                self.build_detail_card(
-                    "PHI Masking Audit",
-                    self.build_detail_table(
-                        [
-                            ("Raw DOB Tokens In Recent Log", unmasked_dob_count),
-                            ("Raw VA Tokens In Recent Log", unmasked_va_count),
-                            ("Raw Email Tokens In Recent Log", unmasked_email_count),
-                            ("Raw Phone Tokens In Recent Log", unmasked_phone_count),
-                        ],
-                        value_color="#6FCF97" if phi_audit_clean else "#EB5757",
-                    ),
-                    accent_color="#27AE60" if phi_audit_clean else "#EB5757",
-                ),
-                self.build_detail_card(
-                    "Recent Events",
-                    self.build_html_grid_table(
-                        ["Timestamp", "Event", "Status", "File", "Note"],
-                        event_rows,
-                        column_colors=["#9CA3AF", "#57B6FF", "#F2C94C", "#DCE6F2", "#DCE6F2"],
-                    ),
-                    accent_color="#F2C94C",
-                ),
-                self.build_detail_card(
-                    "Recent Updates",
-                    updates_html,
-                    accent_color="#57B6FF",
-                ),
-                self.build_detail_card(
-                    "Masked Activity Log",
-                    activity_html,
-                    accent_color="#9B8CFF",
-                ),
-            ]
-
-            text.setHtml(
-                "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-                "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
-                + "".join(section for section in sections if section)
-                + "</body></html>"
-            )
-
-        except Exception as e:
-
-            text.setHtml(
-                "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-                "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
-                f"{self.build_detail_card('Admin Panel Error', '<div style=\"color:#EB5757;\">' + html.escape(str(e)) + '</div>', accent_color='#EB5757', margin_top=0)}"
-                "</body></html>"
-            )
+        self.admin_dialog = dialog
+        self.admin_dashboard_focus = None
+        self.admin_dashboard_host = dashboard_host
+        self.admin_panel_text = None
+        self.admin_cross_office_text = cross_office_text
+        self.admin_operations_text = operations_text
+        self.admin_audit_text = audit_text
+        self.refresh_admin_panel()
 
         dialog.exec()
+
+        self.admin_dialog = None
+        self.admin_dashboard_focus = None
+        self.admin_dashboard_host = None
+        self.admin_panel_text = None
+        self.admin_cross_office_text = None
+        self.admin_operations_text = None
+        self.admin_audit_text = None
+        return
 
     # ----------------------------------------------
     # ESCAPE KEY HANDLER

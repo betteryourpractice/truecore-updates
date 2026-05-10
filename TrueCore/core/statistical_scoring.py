@@ -418,6 +418,25 @@ def build_packet_feature_map(packet):
     }
 
 
+def build_result_feature_map(result):
+    result = dict(result or {})
+    intel = dict(result.get("intel", {}) or {})
+    display = dict(intel.get("display", {}) or {})
+    diagnostics = dict(intel.get("scan_diagnostics", {}) or {})
+    summary = dict(diagnostics.get("summary", {}) or {})
+
+    return {
+        "score_norm": clamp(safe_float(result.get("score"), 0.0) / 100.0),
+        "packet_confidence": normalize_rate(display.get("packet_confidence")),
+        "issue_count": len(result.get("issues", []) or []),
+        "form_count": len(result.get("forms", []) or []),
+        "missing_item_count": len(display.get("missing_items", []) or []),
+        "review_flag_count": len(set(display.get("review_flags", []) or [])),
+        "scan_quality_score": normalize_rate(summary.get("scan_quality_score")),
+        "ocr_confidence": normalize_rate(summary.get("average_ocr_confidence")),
+    }
+
+
 def _build_training_examples(all_runs, all_events):
     terminal_events = defaultdict(list)
     for event in all_events:

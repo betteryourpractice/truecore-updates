@@ -10,6 +10,7 @@ import compileall
 import sys
 import time
 import tempfile
+import unittest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 REPO_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, ".."))
@@ -449,6 +450,105 @@ def test_host_intelligence():
 
 
 # -------------------------------------------------
+# PACKET VARIABILITY MATRIX
+# -------------------------------------------------
+
+def test_packet_variability_matrix():
+
+    if not os.path.isdir(INTEL_ROOT):
+        return True
+
+    print("Testing packet variability matrix...")
+
+    try:
+
+        from TrueCore.dev.packet_variability_matrix import run_packet_variability_matrix
+
+        summary = run_packet_variability_matrix(include_tracking=True, verbose=False)
+
+        if not summary.get("strict_pass"):
+            print("ERROR: Strict packet variability cases failed.")
+            for result in summary.get("strict_results", []):
+                if result.get("passed"):
+                    continue
+                case = result["case"]
+                print(" -", case.case_id)
+                for check_name, ok, detail in result.get("checks", []):
+                    if not ok:
+                        print(f"    {check_name}: {detail}")
+            return False
+
+        return True
+
+    except Exception as e:
+
+        print("ERROR: Packet variability matrix failed:", e)
+        return False
+
+
+# -------------------------------------------------
+# REAL PACKET REGRESSION LIBRARY
+# -------------------------------------------------
+
+def test_real_packet_regression_library():
+
+    print("Testing real packet regression library...")
+
+    try:
+
+        from TrueCore.dev.real_packet_regression_library import run_real_packet_regression_library
+
+        summary = run_real_packet_regression_library(verbose=False)
+
+        if not summary.get("strict_pass"):
+            print("ERROR: Strict real-packet regression cases failed.")
+            for result in summary.get("strict_results", []):
+                if not result.get("available") or result.get("passed"):
+                    continue
+                case = result["case"]
+                print(" -", case.case_id)
+                for check_name, ok, detail in result.get("checks", []):
+                    if not ok:
+                        print(f"    {check_name}: {detail}")
+            return False
+
+        skipped = list(summary.get("skipped_results", []))
+        if skipped:
+            print(f"NOTICE: Skipped {len(skipped)} real-packet regression case(s) because local files were unavailable.")
+
+        return True
+
+    except Exception as e:
+
+        print("ERROR: Real packet regression library failed:", e)
+        return False
+
+
+# -------------------------------------------------
+# TARGETED AUTOMATED TESTS
+# -------------------------------------------------
+
+def test_targeted_automated_tests():
+
+    print("Running targeted automated tests...")
+
+    tests_root = os.path.join(REPO_ROOT, "tests")
+
+    if not os.path.isdir(tests_root):
+        print("ERROR: tests directory missing.")
+        return False
+
+    suite = unittest.defaultTestLoader.discover(tests_root, pattern="test_*.py")
+    result = unittest.TextTestRunner(stream=sys.stdout, verbosity=1).run(suite)
+
+    if not result.wasSuccessful():
+        print("ERROR: Targeted automated tests failed.")
+        return False
+
+    return True
+
+
+# -------------------------------------------------
 # GUI STARTUP TEST
 # -------------------------------------------------
 
@@ -496,6 +596,9 @@ def run_validation():
         test_intel_capabilities,
         test_intel_scan_benchmark,
         test_host_intelligence,
+        test_packet_variability_matrix,
+        test_real_packet_regression_library,
+        test_targeted_automated_tests,
         test_gui_startup
     ]
 

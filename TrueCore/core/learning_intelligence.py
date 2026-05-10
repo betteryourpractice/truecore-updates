@@ -6,9 +6,17 @@ from TrueCore.core.case_memory import (
     get_case_events,
     get_case_history,
     get_provider_history,
+    get_recent_packet_events,
+    get_recent_packet_runs,
     json_loads,
     parse_fixes,
     parse_issues,
+)
+from TrueCore.core.outcome_learning_intelligence import (
+    build_outcome_learning_health,
+    build_prediction_watchpoints,
+    build_predictive_outcome_modeling,
+    build_provider_outcome_learning,
 )
 from TrueCore.core.statistical_scoring import (
     beta_smoothed_rate,
@@ -358,12 +366,27 @@ def build_learning_intelligence(file_path, result, memory_intelligence=None, tri
     prior_runs = get_case_history(case_key, limit=30)
     case_events = get_case_events(case_key, limit=50)
     provider_history = get_provider_history(provider_key, limit=50)
+    all_runs = get_recent_packet_runs(limit=280)
+    all_events = get_recent_packet_events(limit=280)
     display = _display(result)
-    global_model_summary = summarize_outcome_model(build_outcome_model())
+    global_model = build_outcome_model(all_runs=all_runs, all_events=all_events)
+    global_model_summary = summarize_outcome_model(global_model)
 
     outcome_feedback = build_outcome_feedback(case_events)
     override_learning = build_override_learning(case_events, result.get("score"))
     calibration = build_confidence_calibration(display, case_events, global_model_summary=global_model_summary)
+    predictive_outcome_modeling = build_predictive_outcome_modeling(
+        result,
+        global_model,
+        global_model_summary,
+    )
+    outcome_learning_health = build_outcome_learning_health(all_events, global_model_summary)
+    provider_outcome_learning = build_provider_outcome_learning(
+        provider_key,
+        provider_history,
+        all_events,
+        global_model_summary,
+    )
     rule_adjustment = build_rule_adjustment(memory, case_events)
     suggestion_acceptance = build_suggestion_acceptance(prior_runs, result, memory)
     correction_patterns = build_correction_patterns(memory)
@@ -376,10 +399,19 @@ def build_learning_intelligence(file_path, result, memory_intelligence=None, tri
         suggestion_acceptance,
         calibration,
     )
+    prediction_watchpoints = build_prediction_watchpoints(
+        predictive_outcome_modeling,
+        calibration,
+        provider_outcome_learning,
+        outcome_learning_health,
+    )
 
     return {
         "outcome_feedback_ingestion": outcome_feedback,
         "reviewer_override_learning": override_learning,
+        "predictive_outcome_modeling": predictive_outcome_modeling,
+        "outcome_learning_health": outcome_learning_health,
+        "provider_outcome_learning": provider_outcome_learning,
         "rule_adjustment_recommendation": rule_adjustment,
         "confidence_calibration_engine": calibration,
         "drift_detection_for_decision_logic": drift_detection,
@@ -389,4 +421,5 @@ def build_learning_intelligence(file_path, result, memory_intelligence=None, tri
         "failure_to_learning_conversion": failure_learning,
         "continuous_intelligence_refinement": continuous_refinement,
         "global_probability_modeling": global_model_summary,
+        "prediction_watchpoints": prediction_watchpoints,
     }

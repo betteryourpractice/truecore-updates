@@ -412,3 +412,12 @@ CHANGES
 
 * Admin auth hardening, packet intelligence upgrades, GUI improvements, and speed optimization
 
+
+
+VERSION: 4.2
+DATE: 2026-05-09
+
+CHANGES
+
+* Core engine role extraction, admin workspace improvements, privacy hardening, and rollout support updates
+

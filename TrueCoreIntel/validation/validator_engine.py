@@ -1,16 +1,20 @@
 from datetime import datetime
 import re
 
+from TrueCoreIntel.core import packet_archetypes
 from TrueCoreIntel.validation.validation_intelligence import ValidationIntelligenceAnalyzer
 
 
 class ValidatorEngine:
+    AUTHORIZATION_DOCUMENT_TYPES = packet_archetypes.AUTHORIZATION_DOCUMENT_TYPES
 
     HIGH_SEVERITY_FIELDS = {"name", "dob", "authorization_number", "va_icn", "claim_number"}
     MEDIUM_SEVERITY_FIELDS = {
         "ordering_provider",
         "referring_provider",
         "provider",
+        "treating_provider",
+        "followup_provider",
         "icd_codes",
         "reason_for_request",
         "npi",
@@ -19,6 +23,8 @@ class ValidatorEngine:
 
     ROLE_TOLERANT_FIELDS = {
         "provider",
+        "treating_provider",
+        "followup_provider",
         "clinic_name",
         "facility",
         "location",
@@ -27,6 +33,7 @@ class ValidatorEngine:
     DOCUMENT_ORDER_PRIORITY = {
         "cover_sheet": 10,
         "rfs": 20,
+        "approved_referral": 25,
         "consult_request": 30,
         "seoc": 40,
         "lomn": 50,
@@ -38,6 +45,7 @@ class ValidatorEngine:
     DOCUMENT_FIELD_EXPECTATIONS = {
         "lomn": ["reason_for_request", "signature_present"],
         "rfs": ["authorization_number"],
+        "approved_referral": ["authorization_number", "va_icn", "referring_provider"],
         "clinical_notes": ["icd_codes"],
         "consult_request": ["ordering_provider"],
         "seoc": ["referring_provider"],
@@ -45,44 +53,13 @@ class ValidatorEngine:
     }
 
     REQUIRED_DOCS_BY_PACKET_TYPE = {
-        "full_submission": {
-            "lomn",
-            "seoc",
-            "rfs",
-            "consult_request",
-            "clinical_notes",
-            "consent",
-            "cover_sheet",
-        },
-        "authorization_request": {
-            "consult_request",
-            "clinical_notes",
-        },
-        "clinical_minimal": {
-            "clinical_notes",
-        },
+        key: set(config.get("required_documents", set()) or set())
+        for key, config in packet_archetypes.SUBMISSION_PROFILES.items()
     }
 
     REQUIRED_FIELDS_BY_PACKET_TYPE = {
-        "full_submission": [
-            "name",
-            "dob",
-            "icd_codes",
-            "authorization_number",
-            "reason_for_request",
-        ],
-        "authorization_request": [
-            "name",
-            "dob",
-            "icd_codes",
-            "authorization_number",
-            "reason_for_request",
-        ],
-        "clinical_minimal": [
-            "name",
-            "dob",
-            "icd_codes",
-        ],
+        key: sorted(config.get("expected_fields", set()) or set())
+        for key, config in packet_archetypes.SUBMISSION_PROFILES.items()
     }
 
     def __init__(self):
@@ -91,6 +68,7 @@ class ValidatorEngine:
     def validate(self, packet):
         packet.validation_intelligence = {}
         packet.deep_verification_score = None
+        packet_archetypes.annotate_packet_context(packet)
         self.check_missing_fields(packet)
         self.check_required_documents(packet)
         self.check_document_field_gaps(packet)
@@ -108,31 +86,10 @@ class ValidatorEngine:
         return packet
 
     def infer_packet_type(self, packet):
-        detected = set(packet.detected_documents)
-        full_submission_docs = {
-            "lomn",
-            "seoc",
-            "rfs",
-            "consult_request",
-            "clinical_notes",
-            "consent",
-            "cover_sheet",
-        }
-        full_submission_hits = detected.intersection(full_submission_docs)
-
-        if "clinical_notes" in detected and len(detected) <= 2 and not ({"rfs", "consult_request"} & detected):
-            return "clinical_minimal"
-
-        if len(full_submission_hits) >= 4:
-            return "full_submission"
-
-        if {"cover_sheet", "lomn", "seoc"} & detected and len(full_submission_hits) >= 3:
-            return "full_submission"
-
-        if "rfs" in detected or "consult_request" in detected:
-            return "authorization_request"
-
-        return "full_submission"
+        packet_type = packet_archetypes.infer_submission_profile(packet)
+        packet.packet_profile = packet_type
+        packet.packet_profile_label = packet_archetypes.get_submission_profile_label(packet_type)
+        return packet_type
 
     def check_required_documents(self, packet):
         # Only enforce required docs if ANY docs were detected
@@ -143,7 +100,7 @@ class ValidatorEngine:
         required_docs = self.REQUIRED_DOCS_BY_PACKET_TYPE.get(packet_type, set())
 
         for doc in required_docs:
-            if doc not in packet.detected_documents and doc not in packet.missing_documents:
+            if not packet_archetypes.has_equivalent_document(packet, doc) and doc not in packet.missing_documents:
                 packet.missing_documents.append(doc)
 
     def check_document_field_gaps(self, packet):
@@ -237,6 +194,20 @@ class ValidatorEngine:
             conflict_type="provider_mismatch",
             severity="medium",
             message="Provider is inconsistent across packet documents.",
+        )
+        self.check_specific_field_consistency(
+            packet=packet,
+            field="treating_provider",
+            conflict_type="provider_mismatch",
+            severity="medium",
+            message="Treating provider is inconsistent across packet documents.",
+        )
+        self.check_specific_field_consistency(
+            packet=packet,
+            field="followup_provider",
+            conflict_type="provider_mismatch",
+            severity="medium",
+            message="Follow-up provider is inconsistent across packet documents.",
         )
         self.check_specific_field_consistency(
             packet=packet,
@@ -453,6 +424,9 @@ class ValidatorEngine:
             if self.has_mixed_episode_history(packet, "icd_codes"):
                 return
 
+            if self.has_contextually_acceptable_icd_variation(packet, normalized_values):
+                return
+
             code_sets = [set(value) for value in normalized_values if isinstance(value, tuple) and value]
             if len(code_sets) >= 2:
                 shared_codes = set.intersection(*code_sets)
@@ -479,6 +453,8 @@ class ValidatorEngine:
             "dob",
             "authorization_number",
             "provider",
+            "treating_provider",
+            "followup_provider",
             "ordering_provider",
             "referring_provider",
             "icd_codes",
@@ -518,6 +494,9 @@ class ValidatorEngine:
                     continue
 
                 if field in {"reason_for_request", "diagnosis"} and self.has_mixed_episode_history(packet, field):
+                    continue
+
+                if field == "service_date_range" and self.has_contextually_acceptable_service_date_variation(packet):
                     continue
 
                 self.add_conflict(
@@ -617,7 +596,7 @@ class ValidatorEngine:
         if field == "dob":
             return self.normalize_dob(value)
 
-        if field in {"provider", "ordering_provider", "referring_provider"}:
+        if field in {"provider", "ordering_provider", "referring_provider", "treating_provider", "followup_provider"}:
             return self.normalize_provider(value)
 
         if field in {"va_icn", "claim_number", "authorization_number", "npi"}:
@@ -803,6 +782,12 @@ class ValidatorEngine:
 
     def normalize_provider(self, value):
         cleaned = str(value).strip().lower()
+        if "," in cleaned:
+            left, right = cleaned.split(",", 1)
+            left = left.strip()
+            right = right.strip()
+            if left and right:
+                cleaned = f"{right} {left}"
         cleaned = cleaned.replace("dr.", "dr").replace(",", " ")
         cleaned = re.sub(
             r"\b(?:dr|doctor|md|m\.d\.|do|d\.o\.|pa(?:-c)?|np|fnp|aprn|rn|dc|dds)\b\.?",
@@ -945,6 +930,74 @@ class ValidatorEngine:
 
         return historical_like >= max(1, considered // 2)
 
+    def has_contextually_acceptable_service_date_variation(self, packet):
+        observations = list((getattr(packet, "field_observations", {}) or {}).get("service_date_range", []) or [])
+        if len(observations) < 2:
+            return False
+
+        normalized_values = []
+        for observation in observations:
+            normalized = self.normalize_conflict_value("service_date_range", observation.get("value"))
+            if normalized:
+                normalized_values.append(normalized)
+
+        distinct_values = sorted(set(normalized_values))
+        if len(distinct_values) < 2:
+            return False
+
+        historical_like = 0
+        for observation in observations:
+            snippet = str(observation.get("snippet") or "").lower()
+            matched_text = str(observation.get("matched_text") or "").lower()
+            doc_type = str(observation.get("document_type") or "unknown").lower()
+            combined = f"{snippet} {matched_text}"
+
+            if (
+                doc_type in {"clinical_notes", "unknown", "imaging_report"}
+                or "procedure note" in combined
+                or "office clinic note" in combined
+                or "encounter info" in combined
+                or "registration date" in combined
+            ):
+                historical_like += 1
+
+        return historical_like >= max(2, len(observations) // 2)
+
+    def has_contextually_acceptable_icd_variation(self, packet, normalized_values):
+        code_sets = [set(value) for value in normalized_values if isinstance(value, tuple) and value]
+        if len(code_sets) < 2:
+            return False
+
+        regions = set()
+        for value in normalized_values:
+            inferred = self.infer_regions_for_field_value("icd_codes", list(value) if isinstance(value, tuple) else value)
+            if inferred:
+                regions.update(inferred)
+
+        if len(regions) == 1:
+            return True
+
+        observations = list((getattr(packet, "field_observations", {}) or {}).get("icd_codes", []) or [])
+        if len(observations) < 2:
+            return False
+
+        historical_like = 0
+        for observation in observations:
+            snippet = str(observation.get("snippet") or "").lower()
+            matched_text = str(observation.get("matched_text") or "").lower()
+            doc_type = str(observation.get("document_type") or "unknown").lower()
+            combined = f"{snippet} {matched_text}"
+            if (
+                doc_type in {"clinical_notes", "unknown", "imaging_report"}
+                or "procedure note" in combined
+                or "office clinic note" in combined
+                or "office visit note" in combined
+                or "history" in combined
+            ):
+                historical_like += 1
+
+        return bool(regions) and historical_like >= max(2, len(observations) // 2)
+
     def infer_regions_for_field_value(self, field, value):
         regions = set()
 
@@ -964,7 +1017,14 @@ class ValidatorEngine:
                 normalized = str(code).strip().upper()
                 if normalized.startswith("M54.2") or normalized.startswith("M47.812"):
                     regions.add("cervical")
-                elif normalized.startswith("M54.5") or normalized.startswith("M54.4") or normalized.startswith("M51"):
+                elif (
+                    normalized.startswith("M54.5")
+                    or normalized.startswith("M54.4")
+                    or normalized.startswith("M51")
+                    or normalized.startswith("M43.0")
+                    or normalized.startswith("M47.8")
+                    or normalized.startswith("M47.81")
+                ):
                     regions.add("lumbar")
                 elif normalized.startswith("G43"):
                     regions.add("head")

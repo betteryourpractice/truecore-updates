@@ -30,6 +30,8 @@ class Packet:
             "name": [],
             "dob": [],
             "provider": [],
+            "treating_provider": [],
+            "followup_provider": [],
             "ordering_provider": [],
             "referring_provider": [],
             "va_icn": [],
@@ -66,6 +68,27 @@ class Packet:
         self.policy_intelligence = {}
         self.deployment_intelligence = {}
         self.packet_score = None
+        self.packet_evidence_score = None
+        self.packet_evidence_band = None
+        self.packet_assembly_score = None
+        self.packet_assembly_band = None
+        self.packet_profile = None
+        self.packet_profile_label = None
+        self.packet_archetype = None
+        self.packet_archetype_label = None
+        self.packet_archetype_description = None
+        self.packet_archetype_signals = []
+        self.packet_invariants = {}
+        self.packet_invariant_coverage_score = None
+        self.packet_invariant_coverage_band = None
+        self.packet_variability = {}
+        self.packet_format_variability = None
+        self.packet_variability_reasons = []
+        self.packet_failure_modes = []
+        self.packet_failure_mode_labels = []
+        self.packet_failure_mode_summaries = []
+        self.packet_classification_caution = False
+        self.packet_confidence_penalty = 0.0
         self.packet_strength = None
         self.approval_probability = None
         self.packet_confidence = None

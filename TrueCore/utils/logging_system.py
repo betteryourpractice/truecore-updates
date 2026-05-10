@@ -1,20 +1,16 @@
 import os
 import re
 from datetime import datetime
-from TrueCore.utils.runtime_info import resource_path
+from TrueCore.utils.runtime_info import runtime_data_path, runtime_dir_path
 
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LEGACY_LOG_FOLDER = os.path.join(BASE_DIR, "logs")
-LEGACY_LOG_FILE = os.path.join(LEGACY_LOG_FOLDER, "activity.log")
-LOG_FOLDER = resource_path("logs")
-LOG_FILE = os.path.join(LOG_FOLDER, "activity.log")
+LOG_FOLDER = runtime_dir_path("logs")
+LOG_FILE = runtime_data_path("logs", "activity.log", ensure_parent=True)
 
 
 def ensure_log_folder():
 
     os.makedirs(LOG_FOLDER, exist_ok=True)
-    os.makedirs(LEGACY_LOG_FOLDER, exist_ok=True)
 
 
 # -------------------------------------------------
@@ -62,6 +58,5 @@ def log_event(action, details=""):
 
     entry = f"{timestamp} | ACTION: {action} | DETAILS: {details}\n"
 
-    for path in {LOG_FILE, LEGACY_LOG_FILE}:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(entry)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(entry)

@@ -3,10 +3,10 @@ import hmac
 import json
 import os
 
-from TrueCore.utils.runtime_info import resource_path
+from TrueCore.utils.runtime_info import runtime_data_path
 
 
-ADMIN_AUTH_PATH = resource_path("dev_system/admin_auth.json")
+ADMIN_AUTH_PATH = runtime_data_path("dev_system", "admin_auth.json")
 DEFAULT_ADMIN_AUTH = {
     "version": 1,
     "algorithm": "pbkdf2_sha256",

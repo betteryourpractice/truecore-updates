@@ -2,6 +2,7 @@ import hashlib
 import re
 from difflib import SequenceMatcher
 
+from TrueCoreIntel.core.document_semantics import normalize_semantic_text, semantic_hint_matches
 from TrueCoreIntel.detection.document_intelligence import DocumentIntelligenceAnalyzer
 from TrueCoreIntel.detection.form_templates import FORM_TEMPLATES
 
@@ -76,6 +77,17 @@ class DocumentDetector:
             "community care provider": 4,
             "ordering provider signature": 4,
         },
+        "approved_referral": {
+            "10-7080": 8,
+            "approved referral for medical care": 8,
+            "referral number": 5,
+            "veteran icn": 5,
+            "referring va facility": 5,
+            "referring provider npi": 4,
+            "community provider npi": 4,
+            "va order reason for request": 5,
+            "provisional diagnosis": 4,
+        },
         "clinical_notes": {
             "clinical documentation template": 6,
             "history of present illness": 4,
@@ -124,6 +136,7 @@ class DocumentDetector:
     HEADER_HINT_PRIORITY = {
         "unknown": 0,
         "clinical_notes": 1,
+        "approved_referral": 2,
         "consult_request": 2,
         "lomn": 2,
         "rfs": 2,
@@ -197,6 +210,14 @@ class DocumentDetector:
             "diagnosis codes",
             "ordering provider signature",
             "community care",
+        ],
+        "approved_referral": [
+            "10-7080",
+            "approved referral for medical care",
+            "referral number",
+            "veteran icn",
+            "referring va facility",
+            "va order reason for request",
         ],
         "clinical_notes": [
             "clinical documentation template",
@@ -324,6 +345,8 @@ class DocumentDetector:
             max_hits = max(details["hits"] for details in strong_hits.values())
             for doc_type, _details in ranked_hits:
                 if not self.should_skip_document(doc_type, raw_text):
+                    if not self.matches_family_fingerprint(doc_type, text):
+                        continue
                     confidence = min(0.99, 0.84 + (0.04 * max_hits))
                     confidence = self.adjust_confidence_for_anchor_groups(doc_type, text, confidence)
                     confidence = self.adjust_confidence_for_field_hints(doc_type, text, confidence)
@@ -547,6 +570,19 @@ class DocumentDetector:
         if not normalized_text:
             return False
 
+        if doc_type == "imaging_report":
+            procedure_markers = [
+                "procedure note",
+                "result type: procedure note",
+                "procedure:",
+                "pre-operative diagnosis",
+                "post-operative diagnosis",
+                "radiofrequency ablation",
+                "viadisc injection",
+            ]
+            if any(marker in normalized_text for marker in procedure_markers):
+                return False
+
         anchor_group_hits = self.count_anchor_group_hits(doc_type, normalized_text)
         field_hint_hits = self.count_template_field_hints(doc_type, normalized_text)
         signature_hits = self.count_structure_signature_hits(doc_type, normalized_text)
@@ -564,6 +600,9 @@ class DocumentDetector:
             return True
 
         if doc_type == "clinical_notes" and signature_hits >= 3 and field_hint_hits >= 2:
+            return True
+
+        if doc_type == "approved_referral" and title_hits and signature_hits >= 2:
             return True
 
         return False
@@ -672,6 +711,103 @@ class DocumentDetector:
         confidence = self.adjust_confidence_for_layout(best_doc_type, confidence, page_metadata)
         return best_doc_type, min(0.93, round(confidence, 2))
 
+    def infer_document_types_from_semantics(self, page, page_metadata=None):
+        normalized_text = self.normalize_page_text(page, page_metadata=page_metadata)
+        if not normalized_text:
+            return []
+
+        semantic_text = normalize_semantic_text(normalized_text)
+        hint_matches = semantic_hint_matches(semantic_text)
+        if not hint_matches:
+            return []
+
+        title_text = self.extract_title_region_text(page, page_metadata=page_metadata)
+        candidates = []
+
+        for doc_type, matched_pairs in hint_matches.items():
+            semantic_hits = len(matched_pairs)
+            anchor_group_hits = self.count_anchor_group_hits(doc_type, semantic_text)
+            field_hint_hits = self.count_template_field_hints(doc_type, semantic_text)
+            signature_hits = self.count_structure_signature_hits(doc_type, semantic_text)
+            title_hits = self.count_title_pattern_hits(doc_type, title_text)
+            threshold = self.get_anchor_group_threshold(doc_type)
+
+            fingerprint_ok = self.matches_family_fingerprint(
+                doc_type,
+                semantic_text,
+                title_hits=title_hits,
+            )
+            if not fingerprint_ok:
+                if not (
+                    semantic_hits >= 2 and (
+                        anchor_group_hits >= max(1, threshold - 1)
+                        or field_hint_hits >= 2
+                        or signature_hits >= 2
+                        or title_hits >= 1
+                    )
+                ):
+                    continue
+
+            if semantic_hits == 1 and anchor_group_hits == 0 and field_hint_hits < 2 and signature_hits < 1:
+                continue
+
+            confidence = (
+                0.58
+                + (0.06 * min(semantic_hits, 3))
+                + (0.03 * min(anchor_group_hits, 3))
+                + (0.02 * min(field_hint_hits, 3))
+                + (0.02 * min(signature_hits, 2))
+                + (0.01 * min(title_hits, 2))
+            )
+            confidence = self.adjust_confidence_for_layout(doc_type, confidence, page_metadata)
+            candidates.append({
+                "doc_type": doc_type,
+                "confidence": min(0.94, round(confidence, 2)),
+                "semantic_hits": semantic_hits,
+                "anchor_group_hits": anchor_group_hits,
+                "field_hint_hits": field_hint_hits,
+                "signature_hits": signature_hits,
+                "title_hits": title_hits,
+                "matched_pairs": [tuple(pair) for pair in matched_pairs],
+            })
+
+        candidates.sort(
+            key=lambda item: (
+                item["confidence"],
+                item["semantic_hits"],
+                item["anchor_group_hits"],
+                item["field_hint_hits"],
+                item["signature_hits"],
+            ),
+            reverse=True,
+        )
+        return candidates
+
+    def should_add_secondary_semantic_recovery(self, current_doc_type, candidate):
+        doc_type = str(candidate.get("doc_type") or "")
+        if not doc_type or doc_type == current_doc_type:
+            return False
+
+        semantic_hits = int(candidate.get("semantic_hits") or 0)
+        anchor_group_hits = int(candidate.get("anchor_group_hits") or 0)
+        field_hint_hits = int(candidate.get("field_hint_hits") or 0)
+        signature_hits = int(candidate.get("signature_hits") or 0)
+        title_hits = int(candidate.get("title_hits") or 0)
+        threshold = self.get_anchor_group_threshold(doc_type)
+
+        if semantic_hits >= 2 and (
+            anchor_group_hits >= max(1, threshold - 1)
+            or field_hint_hits >= 2
+            or signature_hits >= 2
+            or title_hits >= 1
+        ):
+            return True
+
+        if semantic_hits >= 1 and anchor_group_hits >= threshold and field_hint_hits >= 2:
+            return True
+
+        return False
+
     def adjust_confidence_for_field_hints(self, doc_type, text, base_confidence):
         field_hint_hits = self.count_template_field_hints(doc_type, text)
         if field_hint_hits >= 4:
@@ -723,13 +859,16 @@ class DocumentDetector:
         if layout.get("header_text"):
             confidence += 0.02
 
-        if doc_type in {"rfs", "consult_request", "seoc", "cover_sheet"} and len(field_zones) >= 4:
+        if doc_type in {"rfs", "approved_referral", "consult_request", "seoc", "cover_sheet"} and len(field_zones) >= 4:
             confidence += 0.05
 
         if doc_type == "clinical_notes" and layout.get("signature_regions"):
             confidence += 0.03
 
         if doc_type == "rfs" and any("authorization" in label or "box 4" in label for label in zone_labels):
+            confidence += 0.06
+
+        if doc_type == "approved_referral" and any("referral" in label or "veteran icn" in label for label in zone_labels):
             confidence += 0.06
 
         if doc_type == "consent" and page_metadata.get("ocr_confidence", 0.0) < 55:
@@ -763,7 +902,10 @@ class DocumentDetector:
             boosted["clinical_notes"] = boosted.get("clinical_notes", 0) + 1
             boosted["lomn"] = boosted.get("lomn", 0) + 1
 
-        if "10-10172" in header_text or "request for service" in header_text:
+        if "10-7080" in header_text or "approved referral for medical care" in header_text:
+            boosted["approved_referral"] = boosted.get("approved_referral", 0) + 4
+
+        if ("10-10172" in header_text or "request for service" in header_text) and "10-7080" not in header_text:
             boosted["rfs"] = boosted.get("rfs", 0) + 3
 
         return boosted
@@ -773,7 +915,7 @@ class DocumentDetector:
 
         if self.looks_like_cover_sheet(raw_text):
             filtered["cover_sheet"] = max(filtered.get("cover_sheet", 0), 12)
-            for doc_type in ("rfs", "consult_request", "consent", "seoc", "lomn"):
+            for doc_type in ("rfs", "approved_referral", "consult_request", "consent", "seoc", "lomn"):
                 filtered.pop(doc_type, None)
 
         for doc_type, patterns in self.NEGATIVE_PATTERNS.items():
@@ -832,19 +974,35 @@ class DocumentDetector:
 
         # rfs should have actual form or request/service language
         if "rfs" in filtered:
-            rfs_language = any(
+            if "10-7080" in text or "approved referral for medical care" in text:
+                filtered.pop("rfs", None)
+            else:
+                rfs_language = any(
+                    term in text for term in [
+                        "10-10172",
+                        "10172",
+                        "va form",
+                        "request for service",
+                        "authorization",
+                        "referral",
+                        "member id",
+                    ]
+                )
+                if not rfs_language and filtered.get("rfs", 0) < 8:
+                    filtered.pop("rfs", None)
+
+        if "approved_referral" in filtered:
+            approved_referral_language = any(
                 term in text for term in [
-                    "10-10172",
-                    "10172",
-                    "va form",
-                    "request for service",
-                    "authorization",
-                    "referral",
-                    "member id",
+                    "10-7080",
+                    "approved referral for medical care",
+                    "referral number",
+                    "veteran icn",
+                    "referring va facility",
                 ]
             )
-            if not rfs_language and filtered.get("rfs", 0) < 8:
-                filtered.pop("rfs", None)
+            if not approved_referral_language:
+                filtered.pop("approved_referral", None)
 
         # clinical notes should have actual clinical content
         if "clinical_notes" in filtered:
@@ -862,6 +1020,44 @@ class DocumentDetector:
             )
             if clinical_support < 2 and "clinical" not in text and "notes" not in text:
                 filtered.pop("clinical_notes", None)
+
+        if "imaging_report" in filtered:
+            report_language = any(
+                term in text for term in [
+                    "mri report",
+                    "radiology report",
+                    "imaging report",
+                    "exam:",
+                    "exam ",
+                ]
+            )
+            interpretive_sections = sum(
+                1 for term in [
+                    "findings",
+                    "impression",
+                    "study date",
+                    "technique",
+                ]
+                if term in text
+            )
+            procedure_language = any(
+                term in text for term in [
+                    "procedure note",
+                    "result type: procedure note",
+                    "procedure:",
+                    "pre-operative diagnosis",
+                    "post-operative diagnosis",
+                    "radiofrequency ablation",
+                    "viadisc injection",
+                ]
+            )
+            if (
+                procedure_language
+                or "office clinic note" in text
+                or ("clinical notes" in text and not report_language)
+                or (not report_language and interpretive_sections < 2)
+            ):
+                filtered.pop("imaging_report", None)
 
         if "consent" in filtered:
             consent_language = any(
@@ -953,12 +1149,21 @@ class DocumentDetector:
                     packet.detected_documents.add(hinted_doc)
                     current_doc_type = hinted_doc
 
+            if self.looks_like_approved_referral_form(page, page_metadata=page_metadata):
+                packet.detected_documents.add("approved_referral")
+
+                if current_doc_type == "unknown":
+                    packet.document_types[idx] = "approved_referral"
+                    packet.page_confidence[idx] = max(packet.page_confidence.get(idx, 0.0), 0.86)
+                    current_doc_type = "approved_referral"
+
             if self.looks_like_clinical_notes(page, page_metadata=page_metadata):
                 packet.detected_documents.add("clinical_notes")
 
                 if current_doc_type == "unknown":
                     packet.document_types[idx] = "clinical_notes"
                     packet.page_confidence[idx] = max(packet.page_confidence.get(idx, 0.0), 0.78)
+                    current_doc_type = "clinical_notes"
 
             if self.looks_like_rfs_form(page, page_metadata=page_metadata):
                 packet.detected_documents.add("rfs")
@@ -966,6 +1171,54 @@ class DocumentDetector:
                 if current_doc_type == "unknown":
                     packet.document_types[idx] = "rfs"
                     packet.page_confidence[idx] = max(packet.page_confidence.get(idx, 0.0), 0.8)
+                    current_doc_type = "rfs"
+
+            semantic_candidates = self.infer_document_types_from_semantics(page, page_metadata=page_metadata)
+            if semantic_candidates:
+                semantic_recoveries = []
+                primary_candidate = semantic_candidates[0]
+
+                if current_doc_type == "unknown":
+                    packet.document_types[idx] = primary_candidate["doc_type"]
+                    packet.page_confidence[idx] = max(
+                        packet.page_confidence.get(idx, 0.0),
+                        primary_candidate["confidence"],
+                    )
+                    packet.detected_documents.add(primary_candidate["doc_type"])
+                    current_doc_type = primary_candidate["doc_type"]
+                    semantic_recoveries.append({
+                        "doc_type": primary_candidate["doc_type"],
+                        "confidence": primary_candidate["confidence"],
+                        "mode": "primary",
+                    })
+                elif primary_candidate["doc_type"] == current_doc_type:
+                    packet.page_confidence[idx] = max(
+                        packet.page_confidence.get(idx, 0.0),
+                        primary_candidate["confidence"],
+                    )
+
+                for candidate in semantic_candidates:
+                    doc_type = candidate["doc_type"]
+                    if doc_type == current_doc_type:
+                        continue
+                    if not self.should_add_secondary_semantic_recovery(current_doc_type, candidate):
+                        continue
+                    if self.should_skip_document(doc_type, str(page)):
+                        packet.unfilled_documents.add(doc_type)
+                        continue
+
+                    if self.is_unfilled_document(doc_type, str(page)):
+                        packet.unfilled_documents.add(doc_type)
+
+                    packet.detected_documents.add(doc_type)
+                    semantic_recoveries.append({
+                        "doc_type": doc_type,
+                        "confidence": candidate["confidence"],
+                        "mode": "secondary",
+                    })
+
+                if semantic_recoveries:
+                    packet.links.setdefault("semantic_document_recoveries", {})[idx + 1] = semantic_recoveries
 
     def propagate_document_context(self, packet):
         page_count = len(packet.pages)
@@ -1074,7 +1327,17 @@ class DocumentDetector:
 
         if self.looks_like_cover_sheet(page, page_metadata=page_metadata):
             return False
+        if "10-7080" in text or "approved referral for medical care" in text:
+            return False
         return self.matches_family_fingerprint("rfs", text)
+
+    def looks_like_approved_referral_form(self, page, page_metadata=None):
+        text = self.normalize_page_text(page, page_metadata=page_metadata)
+
+        if not text or len(text) < 120:
+            return False
+
+        return self.matches_family_fingerprint("approved_referral", text, title_hits=1 if ("10-7080" in text or "approved referral for medical care" in text) else 0)
 
     def looks_like_cover_sheet(self, page, page_metadata=None):
         text = self.normalize_page_text(page, page_metadata=page_metadata)
@@ -1282,6 +1545,7 @@ class DocumentDetector:
             "consult_request": ["consultation", "requested services", "medical rationale", "reason for consultation"],
             "seoc": ["single episode of care", "scope of requested episode", "continuity of care", "estimated duration"],
             "cover_sheet": ["documents included", "date of submission", "primary diagnosis code", "submitting office"],
+            "approved_referral": ["approved referral for medical care", "referral number", "veteran icn", "referring va facility"],
             "rfs": ["request for service", "type of care request", "diagnosis codes", "reason for request"],
         }
         markers = fallback_markers.get(doc_type, [])

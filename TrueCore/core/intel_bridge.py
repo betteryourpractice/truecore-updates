@@ -7,6 +7,7 @@ TrueCore Packet Assistant result format expected by the GUI.
 
 import os
 import re
+from collections import Counter
 
 from TrueCore.utils.logging_system import log_event
 
@@ -19,6 +20,11 @@ except Exception as exc:
     process_intel_path = None
     INTEL_IMPORT_ERROR = exc
 
+try:
+    from TrueCoreIntel.core import packet_archetypes as intel_packet_archetypes
+except Exception:
+    intel_packet_archetypes = None
+
 
 FIELD_NAME_MAP = {
     "name": "patient_name",
@@ -28,6 +34,8 @@ FIELD_NAME_MAP = {
     "ordering_provider": "ordering_doctor",
     "referring_provider": "referring_doctor",
     "provider": "provider",
+    "treating_provider": "treating_provider",
+    "followup_provider": "followup_provider",
     "diagnosis": "diagnosis",
     "symptom": "symptom",
     "procedure": "procedure",
@@ -53,6 +61,8 @@ FIELD_LABEL_MAP = {
     "referring_provider": "referring doctor",
     "referring_doctor": "referring doctor",
     "provider": "provider",
+    "treating_provider": "treating provider",
+    "followup_provider": "follow-up provider",
     "reason_for_request": "reason for request",
     "service_date_range": "service date range",
     "signature_present": "signature",
@@ -67,6 +77,7 @@ FORM_NAME_MAP = {
     "seoc": "SEOC",
     "lomn": "Letter of Medical Necessity",
     "rfs": "VA Form 10-10172",
+    "approved_referral": "VA Form 10-7080",
     "clinical_notes": "Clinical Notes",
     "imaging_report": "MRI / Imaging Report",
     "conservative_care_summary": "Conservative Care Summary",
@@ -75,6 +86,7 @@ FORM_NAME_MAP = {
 FORM_ORDER = {
     "Submission Cover Sheet": 10,
     "VA Form 10-10172": 20,
+    "VA Form 10-7080": 25,
     "Consultation & Treatment Request": 30,
     "SEOC": 40,
     "Letter of Medical Necessity": 50,
@@ -84,31 +96,46 @@ FORM_ORDER = {
     "MRI / Imaging Report": 90,
 }
 
-PACKET_PROFILE_LABELS = {
-    "full_submission": "Full Submission",
-    "authorization_request": "Authorization Request",
-    "clinical_minimal": "Clinical Minimal",
-}
+if intel_packet_archetypes is not None:
+    PACKET_PROFILE_LABELS = {
+        key: config.get("label") or str(key).replace("_", " ").title()
+        for key, config in intel_packet_archetypes.SUBMISSION_PROFILES.items()
+    }
+    PACKET_PROFILE_EXPECTED_DOCUMENTS = {
+        key: list(config.get("expected_document_labels", []) or [])
+        for key, config in intel_packet_archetypes.SUBMISSION_PROFILES.items()
+    }
+    PACKET_ARCHETYPE_LABELS = {
+        key: config.get("label") or str(key).replace("_", " ").title()
+        for key, config in intel_packet_archetypes.PACKET_ARCHETYPES.items()
+    }
+else:
+    PACKET_PROFILE_LABELS = {
+        "full_submission": "Full Submission",
+        "authorization_request": "Authorization Request",
+        "clinical_minimal": "Clinical Minimal",
+    }
 
-PACKET_PROFILE_EXPECTED_DOCUMENTS = {
-    "full_submission": [
-        "Submission Cover Sheet",
-        "VA Form 10-10172",
-        "Consultation & Treatment Request",
-        "SEOC",
-        "Letter of Medical Necessity",
-        "Virtual Consent Form",
-        "Clinical Notes",
-    ],
-    "authorization_request": [
-        "Consultation & Treatment Request",
-        "Clinical Notes",
-        "VA Form 10-10172",
-    ],
-    "clinical_minimal": [
-        "Clinical Notes",
-    ],
-}
+    PACKET_PROFILE_EXPECTED_DOCUMENTS = {
+        "full_submission": [
+            "Submission Cover Sheet",
+            "VA Form 10-10172",
+            "Consultation & Treatment Request",
+            "SEOC",
+            "Letter of Medical Necessity",
+            "Virtual Consent Form",
+            "Clinical Notes",
+        ],
+        "authorization_request": [
+            "Consultation & Treatment Request",
+            "Clinical Notes",
+            "VA Authorization / Referral (10-10172 or 10-7080)",
+        ],
+        "clinical_minimal": [
+            "Clinical Notes",
+        ],
+    }
+    PACKET_ARCHETYPE_LABELS = {}
 
 CONCEPT_LABEL_MAP = {
     "request_intent": "request intent",
@@ -129,6 +156,8 @@ FIELD_CONCEPT_FAMILY = {
     "referring_provider": "routing_admin",
     "referring_doctor": "routing_admin",
     "provider": "routing_admin",
+    "treating_provider": "routing_admin",
+    "followup_provider": "routing_admin",
     "authorization_number": "routing_admin",
     "va_icn": "routing_admin",
     "claim_number": "routing_admin",
@@ -151,7 +180,9 @@ TEXT_REPLACEMENTS = {
     "consent": "Virtual Consent Form",
     "lomn": "Letter of Medical Necessity",
     "rfs": "VA Form 10-10172",
+    "approved_referral": "VA Form 10-7080",
     "seoc": "SEOC",
+    "classification_uncertainty": "document family uncertainty",
 }
 
 UNFILLED_DOCUMENT_MESSAGES = {
@@ -385,6 +416,25 @@ def _format_human_label(value):
     return str(value or "").replace("_", " ").strip().title()
 
 
+def _format_scored_band(score, band):
+    if score in (None, "") and not band:
+        return None
+
+    band_label = _format_human_label(band) if band else None
+    try:
+        numeric_score = int(round(float(score)))
+    except Exception:
+        numeric_score = None
+
+    if band_label and numeric_score is not None:
+        return f"{band_label} ({numeric_score})"
+    if band_label:
+        return band_label
+    if numeric_score is not None:
+        return numeric_score
+    return score
+
+
 def _describe_concept_source(entry):
     if not entry:
         return None
@@ -472,6 +522,290 @@ def _map_forms(packet_output, packet):
     return sorted(forms, key=lambda name: (FORM_ORDER.get(name, 999), name))
 
 
+US_STATE_CODES = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+    "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+    "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+    "DC",
+}
+
+LOWERCASE_TITLE_WORDS = {"and", "or", "of", "for", "the", "at", "in", "on", "to"}
+ALWAYS_UPPER_WORDS = {"OCH", "VA", "VAMC", "MRI", "ICD", "DOB", "NPI", "ICN", "SEOC", "RFA"}
+
+
+def _normalize_space(value):
+    return re.sub(r"\s+", " ", str(value or "").replace("\xa0", " ")).strip()
+
+
+def _smart_title_case(value):
+    raw = _normalize_space(value)
+    if not raw:
+        return None
+
+    parts = re.split(r"(\s+)", raw)
+    rendered = []
+    word_index = 0
+
+    for part in parts:
+        if not part or part.isspace():
+            rendered.append(part)
+            continue
+
+        if not re.search(r"[A-Za-z]", part):
+            rendered.append(part)
+            continue
+
+        leading = re.match(r"^[^A-Za-z0-9]*", part).group(0)
+        trailing = re.search(r"[^A-Za-z0-9]*$", part).group(0)
+        core = part[len(leading): len(part) - len(trailing) if trailing else len(part)]
+        upper_core = core.upper()
+        lower_core = core.lower()
+
+        if upper_core in US_STATE_CODES or upper_core in ALWAYS_UPPER_WORDS:
+            word = upper_core
+        elif word_index > 0 and lower_core in LOWERCASE_TITLE_WORDS:
+            word = lower_core
+        else:
+            word = core.title()
+
+        rendered.append(f"{leading}{word}{trailing}")
+        word_index += 1
+
+    text = "".join(rendered)
+    text = re.sub(r"\bOch\b", "OCH", text)
+    text = re.sub(r"\bVa\b", "VA", text)
+    return text
+
+
+def _normalize_provider_name(value):
+    raw = _normalize_space(value)
+    if not raw:
+        return None
+
+    raw = re.sub(r"^(?:physician|performed by|verified by|primary care physician|pcp)\s*:\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.split(r"\b(?:on|encounter info|result title|auth\s*\(verified\)|registration date)\b", raw, maxsplit=1, flags=re.IGNORECASE)[0]
+    raw = raw.strip(" :-,")
+    if not raw:
+        return None
+
+    parts = [part.strip() for part in raw.split(",", 1)] if "," in raw else [raw]
+    part_tokens = [re.findall(r"[A-Za-z][A-Za-z.'\-]*", part) for part in parts]
+    credential_pattern = re.compile(r"^(?:MD|DO|PA|PAC|NP|FNP|APRN|RN|DC|DDS)$", re.IGNORECASE)
+
+    credentials = []
+    cleaned_parts = []
+    for tokens in part_tokens:
+        name_tokens = []
+        for token in tokens:
+            normalized = token.replace(".", "")
+            if credential_pattern.fullmatch(normalized):
+                normalized = "PA-C" if normalized.upper() == "PAC" else normalized.upper()
+                if normalized not in credentials:
+                    credentials.append(normalized)
+                continue
+            name_tokens.append(token)
+        cleaned_parts.append(name_tokens)
+
+    ordered_tokens = []
+    if len(cleaned_parts) == 2 and len(cleaned_parts[0]) == 1:
+        ordered_tokens.extend(cleaned_parts[1])
+        ordered_tokens.extend(cleaned_parts[0])
+    else:
+        for tokens in cleaned_parts:
+            ordered_tokens.extend(tokens)
+
+    if len(ordered_tokens) < 2:
+        return None
+
+    rendered_tokens = []
+    for token in ordered_tokens:
+        if len(token) == 1:
+            rendered_tokens.append(token.upper())
+        else:
+            rendered_tokens.append(token.title())
+
+    name = " ".join(rendered_tokens)
+    if credentials:
+        name += ", " + ", ".join(credentials)
+    return name
+
+
+def _drop_middle_initial_if_possible(value):
+    normalized = _normalize_provider_name(value)
+    if not normalized:
+        return None
+
+    match = re.match(r"^([A-Za-z]+)\s+([A-Z])\s+([A-Za-z]+)(,\s*[A-Z\-]+)?$", normalized)
+    if not match:
+        return normalized
+
+    first_name, _middle_initial, last_name, credential_suffix = match.groups()
+    simplified = f"{first_name} {last_name}"
+    if credential_suffix:
+        simplified += credential_suffix
+    return simplified
+
+
+def _clean_community_facility_name(value):
+    raw = _normalize_space(value)
+    if not raw:
+        return None
+
+    if "-" in raw:
+        left, right = raw.split("-", 1)
+        if re.match(r"^\d", right.strip()):
+            raw = left.strip()
+
+    raw = re.sub(r"\b\d{5}(?:-\d{4})?\b.*$", "", raw).strip(" ,-")
+    return _smart_title_case(raw)
+
+
+def _clean_location_value(value):
+    raw = _normalize_space(value)
+    if not raw:
+        return None
+
+    if "-" in raw:
+        left, right = raw.split("-", 1)
+        if re.match(r"^\d", right.strip()):
+            raw = right.strip()
+
+    match = re.search(
+        r"(\d{1,6}[^,\n\r]+,\s*[A-Za-z .'\-]+,\s*[A-Z]{2})\s*,\s*(\d{5})(?:-\d+[A-Z]?)?",
+        raw,
+    )
+    if match:
+        return f"{_smart_title_case(match.group(1))} {match.group(2)}"
+
+    raw = re.sub(r"-\d{6,}[A-Z]?$", "", raw)
+    raw = re.sub(r",\s*(\d{5})(?:-\d{4})?$", r" \1", raw)
+    return _smart_title_case(raw.strip(" ,-"))
+
+
+def _looks_truncated(value):
+    normalized = _normalize_space(value)
+    if not normalized:
+        return True
+    if normalized.lower() in {"office visit note", "och center", "och center for pain man"}:
+        return True
+    return len(normalized) < 18
+
+
+def _extract_referral_community_fields(packet):
+    facility_candidates = []
+    location_candidates = []
+
+    for page_index, page in enumerate(list(getattr(packet, "pages", []) or [])):
+        doc_type = getattr(packet, "document_types", {}).get(page_index, "unknown")
+        if doc_type != "approved_referral":
+            continue
+
+        text = str(page or "")
+
+        for match in re.finditer(r"Provider Name \(If known\)\s*:\s*([^\n\r]+)", text, re.IGNORECASE):
+            facility = _clean_community_facility_name(match.group(1))
+            if facility:
+                facility_candidates.append(facility)
+
+        for match in re.finditer(
+            r"Initial Provider Location\s*:\s*([^\n\r]+(?:[\r\n]+\s*\d{5}(?:-\d+[A-Z]?)?)?)",
+            text,
+            re.IGNORECASE,
+        ):
+            raw_value = match.group(1)
+            facility = _clean_community_facility_name(raw_value)
+            location = _clean_location_value(raw_value)
+            if facility:
+                facility_candidates.append(facility)
+            if location:
+                location_candidates.append(location)
+
+    facility = Counter(facility_candidates).most_common(1)[0][0] if facility_candidates else None
+    location = Counter(location_candidates).most_common(1)[0][0] if location_candidates else None
+    return facility, location
+
+
+def _extract_treating_provider(packet):
+    primary_candidates = []
+    fallback_candidates = []
+
+    for _page_index, page in enumerate(list(getattr(packet, "pages", []) or [])):
+        text = str(page or "")
+        lowered = text.lower()
+        if "procedure note" not in lowered:
+            continue
+
+        for match in re.finditer(r"Physician\s*:\s*([^\n\r]+)", text, re.IGNORECASE):
+            candidate = _drop_middle_initial_if_possible(match.group(1))
+            if candidate:
+                primary_candidates.append(candidate)
+
+        for pattern in [
+            r"Performed by\s*:\s*([^\n\r]+)",
+            r"Verified by\s*:\s*([^\n\r]+)",
+        ]:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                candidate = _drop_middle_initial_if_possible(match.group(1))
+                if candidate:
+                    fallback_candidates.append(candidate)
+
+    if primary_candidates:
+        return Counter(primary_candidates).most_common(1)[0][0]
+    if fallback_candidates:
+        return Counter(fallback_candidates).most_common(1)[0][0]
+    return None
+
+
+def _extract_followup_provider(packet):
+    candidates = []
+
+    for _page_index, page in enumerate(list(getattr(packet, "pages", []) or [])):
+        text = str(page or "")
+        lowered = text.lower()
+        if "office visit note" not in lowered and "office clinic note" not in lowered:
+            continue
+
+        for pattern in [
+            r"Performed by\s*:\s*([^\n\r]+)",
+            r"Verified by\s*:\s*([^\n\r]+)",
+        ]:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                candidate = _normalize_provider_name(match.group(1))
+                if candidate:
+                    candidates.append(candidate)
+
+    return Counter(candidates).most_common(1)[0][0] if candidates else None
+
+
+def _derive_provider_role_fields(packet, host_fields):
+    derived = {}
+
+    treating_provider = _extract_treating_provider(packet)
+    followup_provider = _extract_followup_provider(packet)
+    community_facility, treating_location = _extract_referral_community_fields(packet)
+
+    if treating_provider:
+        derived["treating_provider"] = treating_provider
+        derived["provider"] = treating_provider
+
+    if followup_provider and followup_provider != treating_provider:
+        derived["followup_provider"] = followup_provider
+
+    if community_facility:
+        current_clinic = host_fields.get("clinic_name")
+        if _looks_truncated(current_clinic) or len(_normalize_space(current_clinic)) < len(community_facility):
+            derived["clinic_name"] = community_facility
+
+    if treating_location:
+        current_location = host_fields.get("location")
+        if _looks_truncated(current_location) or len(_normalize_space(current_location)) < len(treating_location):
+            derived["location"] = treating_location
+
+    return derived
+
+
 def _build_host_fields(packet, packet_output, approved_icd_codes=None, legacy_result=None):
     legacy_fields = {}
 
@@ -497,8 +831,20 @@ def _build_host_fields(packet, packet_output, approved_icd_codes=None, legacy_re
 
         host_fields[host_name] = value
 
-    if not host_fields.get("ordering_doctor") and host_fields.get("provider"):
+    if (
+        not host_fields.get("ordering_doctor")
+        and host_fields.get("provider")
+        and not host_fields.get("treating_provider")
+        and not host_fields.get("followup_provider")
+        and (
+            not host_fields.get("referring_doctor")
+            or str(host_fields.get("provider")).strip().lower()
+            != str(host_fields.get("referring_doctor")).strip().lower()
+        )
+    ):
         host_fields["ordering_doctor"] = host_fields["provider"]
+
+    host_fields.update(_derive_provider_role_fields(packet, host_fields))
 
     return host_fields
 
@@ -891,9 +1237,46 @@ def _build_intel_display(packet, packet_output):
     decision_intelligence = dict(packet_output.get("decision_intelligence", {}) or {})
     success_pattern = dict(packet_output.get("success_pattern_match", {}) or {})
     true_conflict_fields = _true_conflict_fields(packet)
-    packet_profile = decision_intelligence.get("packet_type") or success_pattern.get("profile")
+    packet_profile = (
+        packet_output.get("packet_profile")
+        or getattr(packet, "packet_profile", None)
+        or decision_intelligence.get("packet_type")
+        or success_pattern.get("profile")
+    )
     expected_documents = list(PACKET_PROFILE_EXPECTED_DOCUMENTS.get(packet_profile, []) or [])
+    packet_archetype = packet_output.get("packet_archetype") or getattr(packet, "packet_archetype", None)
+    packet_archetype_label = (
+        packet_output.get("packet_archetype_label")
+        or getattr(packet, "packet_archetype_label", None)
+        or PACKET_ARCHETYPE_LABELS.get(packet_archetype)
+        or (_format_human_label(packet_archetype) if packet_archetype else None)
+    )
+    packet_archetype_signals = list(
+        packet_output.get("packet_archetype_signals", [])
+        or getattr(packet, "packet_archetype_signals", [])
+        or []
+    )
+    invariant_score = packet_output.get("packet_invariant_coverage_score", getattr(packet, "packet_invariant_coverage_score", None))
+    invariant_band = packet_output.get("packet_invariant_coverage_band", getattr(packet, "packet_invariant_coverage_band", None))
+    format_variability = packet_output.get("packet_format_variability", getattr(packet, "packet_format_variability", None))
+    variability_reasons = list(
+        packet_output.get("packet_variability_reasons", [])
+        or getattr(packet, "packet_variability_reasons", [])
+        or []
+    )
+    failure_mode_summaries = list(
+        packet_output.get("packet_failure_mode_summaries", [])
+        or getattr(packet, "packet_failure_mode_summaries", [])
+        or []
+    )
+    classification_caution = bool(
+        packet_output.get("packet_classification_caution", getattr(packet, "packet_classification_caution", False))
+    )
     template_markers = list(getattr(packet, "template_markers", []) or [])
+    evidence_strength_score = packet_output.get("packet_evidence_score", getattr(packet, "packet_evidence_score", None))
+    evidence_strength_band = packet_output.get("packet_evidence_band", getattr(packet, "packet_evidence_band", None))
+    assembly_score = packet_output.get("packet_assembly_score", getattr(packet, "packet_assembly_score", None))
+    assembly_band = packet_output.get("packet_assembly_band", getattr(packet, "packet_assembly_band", None))
 
     priority_fixes = []
 
@@ -948,6 +1331,35 @@ def _build_intel_display(packet, packet_output):
         profile_summary = f"Inferred packet profile: {profile_label}. Expected document family: {', '.join(expected_documents)}."
         review_rationale = _merge_unique_strings([profile_summary] + review_rationale, _issue_key)
 
+    if packet_archetype_label:
+        archetype_summary = f"Observed packet archetype: {packet_archetype_label}."
+        review_rationale = _merge_unique_strings([archetype_summary] + review_rationale, _issue_key)
+
+    try:
+        invariant_numeric = float(invariant_score)
+    except Exception:
+        invariant_numeric = None
+
+    normalized_variability = str(format_variability or "").strip().lower()
+    if invariant_numeric is not None and normalized_variability:
+        if invariant_numeric >= 80 and normalized_variability == "high":
+            review_rationale = _merge_unique_strings(
+                ["Core packet invariants are present despite high format variation." ] + review_rationale,
+                _issue_key,
+            )
+        elif invariant_numeric < 60 and normalized_variability == "high":
+            review_rationale = _merge_unique_strings(
+                ["High format variation is limiting confidence because core packet anchors are only partially present."] + review_rationale,
+                _issue_key,
+            )
+
+    if failure_mode_summaries:
+        review_rationale = _merge_unique_strings(failure_mode_summaries + review_rationale, _issue_key)
+
+    if classification_caution and getattr(packet, "missing_documents", []):
+        caution_note = "Some missing-document calls may reflect packet-format ambiguity; confirm them against packet content before treating them as final."
+        review_rationale = _merge_unique_strings([caution_note] + review_rationale, _issue_key)
+
     if concept_review_notes:
         review_rationale = _merge_unique_strings(concept_review_notes + review_rationale, _issue_key)
 
@@ -960,12 +1372,45 @@ def _build_intel_display(packet, packet_output):
             template_summary = f"Training or template scaffolding detected on pages {page_text}; reviewer should treat placeholder content cautiously."
             review_rationale = _merge_unique_strings([template_summary] + review_rationale, _issue_key)
 
+    try:
+        evidence_numeric = float(evidence_strength_score)
+    except Exception:
+        evidence_numeric = None
+
+    try:
+        assembly_numeric = float(assembly_score)
+    except Exception:
+        assembly_numeric = None
+
+    if (
+        evidence_numeric is not None
+        and assembly_numeric is not None
+        and evidence_numeric >= assembly_numeric + 12
+    ):
+        assembly_gap_summary = "Substantive support is stronger than packet assembly; paperwork completion is the main blocker."
+        review_rationale = _merge_unique_strings([assembly_gap_summary] + review_rationale, _issue_key)
+
     return {
         "packet_confidence": packet_output.get("packet_confidence", getattr(packet, "packet_confidence", None)),
         "approval_probability": packet_output.get("approval_probability", getattr(packet, "approval_probability", None)),
         "packet_strength": packet_output.get("packet_strength", getattr(packet, "packet_strength", None)),
+        "evidence_strength": _format_scored_band(evidence_strength_score, evidence_strength_band),
+        "evidence_strength_score": evidence_strength_score,
+        "evidence_strength_band": evidence_strength_band,
+        "packet_assembly": _format_scored_band(assembly_score, assembly_band),
+        "packet_assembly_score": assembly_score,
+        "packet_assembly_band": assembly_band,
+        "invariant_coverage": _format_scored_band(invariant_score, invariant_band),
+        "invariant_coverage_score": invariant_score,
+        "invariant_coverage_band": invariant_band,
+        "format_variability": _format_human_label(format_variability) if format_variability else None,
+        "format_variability_reasons": variability_reasons,
+        "classification_caution": classification_caution,
+        "failure_mode_summaries": failure_mode_summaries,
         "submission_readiness": packet_output.get("submission_readiness"),
         "packet_profile": PACKET_PROFILE_LABELS.get(packet_profile, str(packet_profile).replace("_", " ").title()) if packet_profile else None,
+        "packet_archetype": packet_archetype_label,
+        "packet_archetype_signals": packet_archetype_signals,
         "profile_confidence": success_pattern.get("confidence"),
         "expected_documents": expected_documents,
         "template_markers": template_markers,
@@ -1237,6 +1682,15 @@ def build_intel_result(file_path, approved_icd_codes=None, legacy_result=None):
             "display": _build_intel_display(packet, packet_output),
         },
     }
+
+    try:
+        authoritative_score = int(float(score))
+    except Exception:
+        authoritative_score = int(score or 0)
+
+    result["score"] = authoritative_score
+    result["intel"]["core_packet_score"] = authoritative_score
+    result["intel"]["display"]["core_packet_score"] = authoritative_score
 
     result = _apply_host_packet_rules(result, packet=packet)
 

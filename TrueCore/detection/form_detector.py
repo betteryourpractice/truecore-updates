@@ -27,6 +27,14 @@ FORM_KEYWORDS = {
         "community care",
     ],
 
+    "VA Form 10-7080": [
+        "10-7080",
+        "va form 10-7080",
+        "approved referral for medical care",
+        "referral number",
+        "veteran icn",
+    ],
+
     "SEOC": [
         "episode of care",
         "seoc",
@@ -133,6 +141,13 @@ FORM_CONTEXT_SIGNALS = {
         "community care",
         "referral authorization",
         "request for services"
+    ],
+
+    "VA Form 10-7080": [
+        "approved referral for medical care",
+        "referral number",
+        "veteran icn",
+        "referring va facility",
     ],
 
     "Letter of Medical Necessity": [

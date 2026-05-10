@@ -42,14 +42,14 @@ class ValidationIntelligenceAnalyzer:
             "label": "Request Intent",
             "fields": ("reason_for_request", "procedure", "service_date_range"),
             "section_roles": {"request_intent", "request_scope", "routing_followup"},
-            "preferred_documents": {"consult_request", "seoc", "rfs", "cover_sheet"},
+            "preferred_documents": {"consult_request", "seoc", "rfs", "approved_referral", "cover_sheet"},
         },
         {
             "concept": "diagnostic_basis",
             "label": "Diagnostic Basis",
             "fields": ("diagnosis", "icd_codes", "symptom"),
             "section_roles": {"diagnostic_basis", "clinical_support", "justification"},
-            "preferred_documents": {"clinical_notes", "lomn", "rfs", "cover_sheet", "imaging_report"},
+            "preferred_documents": {"clinical_notes", "lomn", "rfs", "approved_referral", "cover_sheet", "imaging_report"},
         },
         {
             "concept": "clinical_justification",
@@ -63,7 +63,7 @@ class ValidationIntelligenceAnalyzer:
             "label": "Routing / Admin",
             "fields": ("authorization_number", "ordering_provider", "referring_provider", "facility", "va_icn", "claim_number"),
             "section_roles": {"identity_admin", "routing_followup"},
-            "preferred_documents": {"cover_sheet", "rfs", "consult_request", "seoc"},
+            "preferred_documents": {"cover_sheet", "rfs", "approved_referral", "consult_request", "seoc"},
         },
     )
 

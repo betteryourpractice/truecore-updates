@@ -1,20 +1,19 @@
 import json
 import os
 import sqlite3
+import hashlib
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
+from TrueCore.core.office_rollout import load_office_profile
+from TrueCore.utils.runtime_info import runtime_data_path
 
 
-MEMORY_DB_PATH = os.path.join(
-    os.getcwd(),
-    "TrueCore",
-    "Outputs",
-    "truecore_memory.db",
-)
+MEMORY_DB_PATH = runtime_data_path("Outputs", "truecore_memory.db")
+STORAGE_PRIVACY_VERSION = "1"
 
 
 def utc_now_iso():
-    return datetime.utcnow().isoformat(timespec="microseconds") + "Z"
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def json_dumps(value):
@@ -52,6 +51,185 @@ def normalize_name(value):
         if cleaned.endswith(suffix):
             cleaned = cleaned[: -len(suffix)].strip()
     return cleaned
+
+
+def get_storage_salt():
+    try:
+        profile = dict(load_office_profile() or {})
+        salt = str(profile.get("deidentification_salt") or "").strip().lower()
+        if salt:
+            return salt
+    except Exception:
+        pass
+    return hashlib.sha256(b"truecore-local-storage").hexdigest()
+
+
+def hash_token(value):
+    raw = normalize_text(value)
+    if not raw:
+        return None
+    payload = f"{get_storage_salt()}|{raw}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def redact_identifier(value, label):
+    digest = hash_token(value)
+    if not digest:
+        return None
+    normalized_label = normalize_text(label).replace(" ", "_") or "token"
+    return f"{normalized_label}:{digest}"
+
+
+def redact_file_reference(value):
+    base_name = os.path.basename(str(value or "").strip())
+    if not base_name:
+        return None
+    _, extension = os.path.splitext(base_name)
+    extension = extension.lower() or ".file"
+    digest = hash_token(base_name)
+    if not digest:
+        return None
+    return f"{extension}:{digest}"
+
+
+def sanitize_case_key(case_key):
+    normalized = normalize_text(case_key)
+    if not normalized:
+        return "unknown_case"
+
+    if normalized.startswith("auth_hash:") or normalized.startswith("icn_hash:") or normalized.startswith("patient_hash:") or normalized.startswith("file_hash:"):
+        return normalized
+
+    if normalized.startswith("auth:"):
+        return f"auth_hash:{hash_token(normalized[5:])}"
+    if normalized.startswith("icn:"):
+        return f"icn_hash:{hash_token(normalized[4:])}"
+    if normalized.startswith("patient:"):
+        return f"patient_hash:{hash_token(normalized[8:])}"
+    if normalized.startswith("file:"):
+        return f"file_hash:{hash_token(normalized[5:])}"
+
+    return f"case_hash:{hash_token(normalized)}"
+
+
+def sanitize_fields_for_storage(fields):
+    sanitized = {}
+    for key, value in dict(fields or {}).items():
+        normalized_key = normalize_text(key)
+        if normalized_key in {"patient_name", "name"}:
+            sanitized[key] = redact_identifier(value, "patient")
+        elif normalized_key == "dob":
+            sanitized[key] = redact_identifier(value, "dob")
+        elif normalized_key == "authorization_number":
+            sanitized[key] = redact_identifier(value, "auth")
+        elif normalized_key in {"va_icn", "icn"}:
+            sanitized[key] = redact_identifier(value, "icn")
+        elif normalized_key in {"file", "file_name", "file_path", "packet_path"}:
+            sanitized[key] = None
+        else:
+            sanitized[key] = value
+    return sanitized
+
+
+def sanitize_note_for_storage(note):
+    text = str(note or "").strip()
+    if not text:
+        return ""
+    return f"Note captured ({len(text)} chars)"
+
+
+def _get_app_state(conn, key, default=None):
+    row = conn.execute(
+        "SELECT value FROM app_state WHERE key = ?",
+        (str(key),),
+    ).fetchone()
+    if not row:
+        return default
+    return row["value"]
+
+
+def _set_app_state(conn, key, value):
+    conn.execute(
+        """
+        INSERT INTO app_state (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (str(key), str(value)),
+    )
+
+
+def _apply_storage_privacy_migration(conn):
+    current_version = _get_app_state(conn, "storage_privacy_version")
+    if current_version == STORAGE_PRIVACY_VERSION:
+        return
+
+    run_rows = conn.execute(
+        """
+        SELECT id, file_name, file_path, case_key, patient_name, dob, authorization_number,
+               va_icn, fields_json
+        FROM packet_runs
+        """
+    ).fetchall()
+
+    for row in run_rows:
+        conn.execute(
+            """
+            UPDATE packet_runs
+            SET file_name = ?,
+                file_path = ?,
+                case_key = ?,
+                patient_name = ?,
+                dob = ?,
+                authorization_number = ?,
+                va_icn = ?,
+                fields_json = ?
+            WHERE id = ?
+            """,
+            (
+                redact_file_reference(row["file_name"]),
+                None,
+                sanitize_case_key(row["case_key"]),
+                redact_identifier(row["patient_name"], "patient"),
+                redact_identifier(row["dob"], "dob"),
+                redact_identifier(row["authorization_number"], "auth"),
+                redact_identifier(row["va_icn"], "icn"),
+                json_dumps(
+                    sanitize_fields_for_storage(
+                        json_loads(row["fields_json"], default={}) or {}
+                    )
+                ),
+                row["id"],
+            ),
+        )
+
+    event_rows = conn.execute(
+        """
+        SELECT id, file_name, file_path, case_key, note
+        FROM packet_events
+        """
+    ).fetchall()
+
+    for row in event_rows:
+        conn.execute(
+            """
+            UPDATE packet_events
+            SET file_name = ?,
+                file_path = ?,
+                case_key = ?,
+                note = ?
+            WHERE id = ?
+            """,
+            (
+                redact_file_reference(row["file_name"]),
+                None,
+                sanitize_case_key(row["case_key"]),
+                sanitize_note_for_storage(row["note"]),
+                row["id"],
+            ),
+        )
+
+    _set_app_state(conn, "storage_privacy_version", STORAGE_PRIVACY_VERSION)
 
 
 def ensure_memory_db():
@@ -116,6 +294,14 @@ def ensure_memory_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_state (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_packet_runs_case_key ON packet_runs(case_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_packet_runs_provider_key ON packet_runs(provider_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_packet_events_case_key ON packet_events(case_key)")
@@ -129,6 +315,7 @@ def ensure_memory_db():
             "analysis_mode": "TEXT",
         },
     )
+    _apply_storage_privacy_migration(conn)
     conn.commit()
     return conn
 
@@ -165,22 +352,22 @@ def build_case_key(fields, file_path=None):
 
     auth = normalize_text(fields.get("authorization_number"))
     if auth:
-        return f"auth:{auth}"
+        return sanitize_case_key(f"auth:{auth}")
 
     va_icn = normalize_text(fields.get("va_icn") or fields.get("icn"))
     if va_icn:
-        return f"icn:{va_icn}"
+        return sanitize_case_key(f"icn:{va_icn}")
 
     patient_name = normalize_name(fields.get("patient_name") or fields.get("name"))
     dob = normalize_text(fields.get("dob"))
     if patient_name and dob:
-        return f"patient:{patient_name}|{dob}"
+        return sanitize_case_key(f"patient:{patient_name}|{dob}")
 
     if patient_name:
-        return f"patient:{patient_name}"
+        return sanitize_case_key(f"patient:{patient_name}")
 
     if file_path:
-        return f"file:{normalize_text(os.path.basename(file_path))}"
+        return sanitize_case_key(f"file:{normalize_text(os.path.basename(file_path))}")
 
     return "unknown_case"
 
@@ -215,13 +402,13 @@ def build_run_snapshot(file_path, result):
 
     return {
         "analyzed_at": utc_now_iso(),
-        "file_name": os.path.basename(file_path),
-        "file_path": os.path.abspath(file_path),
+        "file_name": redact_file_reference(file_path),
+        "file_path": None,
         "case_key": build_case_key(fields, file_path=file_path),
-        "patient_name": fields.get("patient_name") or fields.get("name"),
-        "dob": fields.get("dob"),
-        "authorization_number": fields.get("authorization_number"),
-        "va_icn": fields.get("va_icn") or fields.get("icn"),
+        "patient_name": redact_identifier(fields.get("patient_name") or fields.get("name"), "patient"),
+        "dob": redact_identifier(fields.get("dob"), "dob"),
+        "authorization_number": redact_identifier(fields.get("authorization_number"), "auth"),
+        "va_icn": redact_identifier(fields.get("va_icn") or fields.get("icn"), "icn"),
         "provider_key": build_provider_key(fields),
         "provider_name": fields.get("provider") or fields.get("ordering_doctor"),
         "ordering_provider": fields.get("ordering_doctor") or fields.get("ordering_provider"),
@@ -244,7 +431,7 @@ def build_run_snapshot(file_path, result):
         "ocr_confidence": scan_summary.get("average_ocr_confidence"),
         "issues": list(result.get("issues", []) or []),
         "fixes": list(result.get("fixes", []) or []),
-        "fields": fields,
+        "fields": sanitize_fields_for_storage(fields),
         "intel_summary": {
             "missing_items": list(display.get("missing_items", []) or []),
             "why_weak": list(display.get("why_weak", []) or []),
@@ -382,11 +569,11 @@ def compute_memory_confidence(case_key, prior_runs):
     prior_count = len(prior_runs)
     score = 0.35
 
-    if case_key.startswith("auth:"):
+    if case_key.startswith("auth:") or case_key.startswith("auth_hash:"):
         score += 0.35
-    elif case_key.startswith("icn:"):
+    elif case_key.startswith("icn:") or case_key.startswith("icn_hash:"):
         score += 0.3
-    elif case_key.startswith("patient:"):
+    elif case_key.startswith("patient:") or case_key.startswith("patient_hash:"):
         score += 0.22
     else:
         score += 0.1
@@ -776,13 +963,26 @@ def record_packet_event(file_path, result, event_type, event_status, note="", de
                 snapshot["file_path"],
                 event_type,
                 event_status,
-                note,
+                sanitize_note_for_storage(note),
                 json_dumps(details or {}),
             ),
         )
         conn.commit()
     finally:
         conn.close()
+
+
+def purge_memory_database():
+    removed_paths = []
+    for path in [
+        MEMORY_DB_PATH,
+        f"{MEMORY_DB_PATH}-wal",
+        f"{MEMORY_DB_PATH}-shm",
+    ]:
+        if os.path.exists(path):
+            os.remove(path)
+            removed_paths.append(path)
+    return removed_paths
 
 
 def memory_totals():

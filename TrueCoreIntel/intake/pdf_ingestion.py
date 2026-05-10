@@ -58,7 +58,7 @@ TEXT_EXTENSIONS = {".txt"}
 
 
 AUTH_OCR_SIGNAL = re.compile(
-    r"\b(?:ref(?:\.|erral)?\b\s*[:#\-]?\s*va(?:[\- ]?\d){6,}|va(?:[\- ]?\d){8,}|authorization|member id|10[\s\-]*10172|community care)\b",
+    r"\b(?:ref(?:\.|erral)?\b\s*[:#\-]?\s*va(?:[\- ]?\d){6,}|va(?:[\- ]?\d){8,}|authorization|member id|10[\s\-]*10172|10[\s\-]*7080|approved referral for medical care|community care)\b",
     re.IGNORECASE,
 )
 
@@ -66,7 +66,7 @@ AUTH_OCR_SNIPPET_PATTERNS = [
     re.compile(r"\bicn\b[^\n\r]{0,60}\bref(?:\.|erral)?\b[^\n\r]{0,30}\bva(?:[\- ]?\d){8,18}\b", re.IGNORECASE),
     re.compile(r"\bref(?:\.|erral)?\b[^\n\r]{0,20}\bva(?:[\- ]?\d){8,18}\b", re.IGNORECASE),
     re.compile(
-        r"\b(?:authorization|auth|referral|member id|tracking number|reference number|case number|consult number|episode of care|seoc|10[\s\-]*10172|community care)\b[^\n\r]{0,120}\bva(?:[\- ]?\d){8,18}\b",
+        r"\b(?:authorization|auth|referral|member id|tracking number|reference number|case number|consult number|episode of care|seoc|10[\s\-]*10172|10[\s\-]*7080|approved referral|community care)\b[^\n\r]{0,120}\bva(?:[\- ]?\d){8,18}\b",
         re.IGNORECASE,
     ),
     re.compile(r"\bva(?:[\- ]?\d){8,18}\b", re.IGNORECASE),
@@ -74,6 +74,7 @@ AUTH_OCR_SNIPPET_PATTERNS = [
 
 DOC_TITLE_OCR_PATTERNS = [
     ("cover_sheet", re.compile(r"\b(?:va\s+)?submission\s+cover\s+sheet\b", re.IGNORECASE)),
+    ("approved_referral", re.compile(r"\bapproved\s+referral\s+for\s+medical\s+care\b|\b(?:va\s+form\s+)?10[\s\-]*7080\b", re.IGNORECASE)),
     ("rfs", re.compile(r"\b(?:medical\s+)?request\s+for\s+service(?:s)?\b|\b(?:va\s+form\s+)?10[\s\-]*10172\b", re.IGNORECASE)),
     ("seoc", re.compile(r"\bsingle\s+episode\s+of\s+care\b|\bseoc\b", re.IGNORECASE)),
     ("lomn", re.compile(r"\bletter\s+of\s+medical\s+necessity\b|\bmedical\s+necessity\s+letter\b", re.IGNORECASE)),
@@ -85,7 +86,7 @@ DOC_TITLE_OCR_PATTERNS = [
 OCR_STRUCTURED_LINE_PATTERNS = [
     re.compile(r"\b(?:veteran name|patient name|member name|name of veteran)\b", re.IGNORECASE),
     re.compile(r"\b(?:date of birth|dob|d\.o\.b\.)\b", re.IGNORECASE),
-    re.compile(r"\b(?:authorization(?: number)?|auth(?: number)?|ref(?:\.|erral)?(?: number)?|member id|tracking number|reference number|case number|consult number|episode of care|seoc|10[\s\-]*10172)\b", re.IGNORECASE),
+    re.compile(r"\b(?:authorization(?: number)?|auth(?: number)?|ref(?:\.|erral)?(?: number)?|member id|tracking number|reference number|case number|consult number|episode of care|seoc|10[\s\-]*10172|10[\s\-]*7080|approved referral)\b", re.IGNORECASE),
     re.compile(r"\b(?:ordering provider|ordering physician|requesting provider|requested by|referring provider|referring va provider|referring physician|referred by|ref provider|pcp|provider name|rendering provider|attending provider)\b", re.IGNORECASE),
     re.compile(r"\b(?:facility|medical facility|servicing facility|treating facility|requested facility|clinic|submitting office|practice name|city/state|location)\b", re.IGNORECASE),
     re.compile(r"\b(?:reason for request|reason for referral|chief complaint|requested service|requested procedure|diagnosis|assessment|impression|history of present illness)\b", re.IGNORECASE),
@@ -108,6 +109,7 @@ OCR_PAGE_DOC_HINT_PATTERNS = [
     re.compile(r"\bconsult(?:ation)?\s+and\s+treatment\s+request\b", re.IGNORECASE),
     re.compile(r"\bsingle\s+episode\s+of\s+care\b|\bseoc\b", re.IGNORECASE),
     re.compile(r"\bmedical\s+necessity\b|\bletter\s+of\s+medical\s+necessity\b", re.IGNORECASE),
+    re.compile(r"\bapproved\s+referral\s+for\s+medical\s+care\b|\b(?:va\s+form\s+)?10[\s\-]*7080\b", re.IGNORECASE),
     re.compile(r"\b(?:request|reo?uest)\s+for\s+service(?:s)?\b|\b10[\s'\-]*10172\b", re.IGNORECASE),
 ]
 

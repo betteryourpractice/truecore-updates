@@ -1,10 +1,12 @@
 import re
+from collections import Counter
 from datetime import datetime
 
 from TrueCoreIntel.detection.form_templates import FORM_TEMPLATES
+from TrueCoreIntel.extraction.extraction_normalization_mixin import ExtractorNormalizationMixin
 
 
-class ExtractorEngine:
+class ExtractorEngine(ExtractorNormalizationMixin):
 
     STOP_LABELS = (
         "dob",
@@ -86,6 +88,8 @@ class ExtractorEngine:
         "office staff",
         "submitting office",
         "reviewed",
+        "sex",
+        "age",
         "scope of requested episode",
         "duration and scope of care",
         "continuity of care",
@@ -132,7 +136,7 @@ class ExtractorEngine:
             r"(?:dob|d\.o\.b\.|date of birth|birth date)\s*[:\-]\s*([^\n\r]+)",
         ],
         "provider": [
-            r"(?:provider name|provider|treating provider|rendering provider|attending provider)\s*[:\-]\s*([^\n\r]+)",
+            r"(?:(?:treating provider|rendering provider|attending provider|treating physician|rendering physician|attending physician)|(?<!referring )(?<!ordering )\bprovider\b)\s*[:\-]\s*([^\n\r]+)",
         ],
         "ordering_provider": [
             r"(?:ordering provider|ordering physician|ordered by|requested by|requesting provider)\s*[:\-]\s*([^\n\r]+)",
@@ -233,6 +237,10 @@ class ExtractorEngine:
             doc_type = packet.document_types.get(idx, "unknown")
             page_metadata = packet.page_metadata[idx] if idx < len(getattr(packet, "page_metadata", []) or []) else {}
             text = str(page)
+            doc_type = self.infer_contextual_document_type(doc_type, text, page_metadata=page_metadata)
+            packet.document_types[idx] = doc_type
+            if doc_type and doc_type != "unknown":
+                packet.detected_documents.add(doc_type)
             section_role_details = self.detect_section_roles(text, doc_type)
             section_roles = [entry.get("role") for entry in section_role_details if entry.get("role")]
             primary_section_role = self.get_primary_section_role(section_roles)
@@ -260,10 +268,10 @@ class ExtractorEngine:
             data.update(self.route_extraction(page, doc_type, page_metadata=page_metadata, field_context=field_context))
             data = self.apply_document_context_boost(data, doc_type, text, field_context=field_context)
 
-            identity_data = self.extract_identity_fields(page, page_metadata=page_metadata, field_context=field_context)
+            identity_data = self.extract_identity_fields(page, doc_type=doc_type, page_metadata=page_metadata, field_context=field_context)
             data.update(identity_data)
 
-            labeled_data = self.extract_labeled_fields(page, page_metadata=page_metadata, field_context=field_context)
+            labeled_data = self.extract_labeled_fields(page, doc_type=doc_type, page_metadata=page_metadata, field_context=field_context)
             data.update(labeled_data)
 
             inferred_data = self.extract_inferred_medical_fields(page)
@@ -271,6 +279,7 @@ class ExtractorEngine:
 
             self.store_results(packet, data, page, idx, doc_type, page_metadata=page_metadata, field_context=field_context)
 
+        self.consolidate_packet_fields(packet)
         return packet
 
     def extract_template_fields(self, page, doc_type, page_metadata=None, field_context=None):
@@ -304,10 +313,10 @@ class ExtractorEngine:
     def route_extraction(self, page, doc_type, page_metadata=None, field_context=None):
         data = {}
 
-        if doc_type in {"authorization", "rfs", "seoc"}:
+        if doc_type in {"authorization", "rfs", "approved_referral", "seoc"}:
             data.update(self.extract_authorization(page, page_metadata=page_metadata, field_context=field_context))
 
-        if doc_type == "consult_request":
+        if doc_type in {"consult_request", "approved_referral"}:
             data.update(self.extract_authorization(page, page_metadata=page_metadata, field_context=field_context))
             data.update(self.extract_referral(page, page_metadata=page_metadata, field_context=field_context))
 
@@ -722,7 +731,9 @@ class ExtractorEngine:
         if any(re.search(pattern, normalized, re.IGNORECASE) for pattern in self.TEMPLATE_VALUE_PATTERNS):
             return True
 
-        if any(hint in normalized for hint in self.TEMPLATE_PLACEHOLDER_HINTS) and re.search(r"[a-z]", normalized):
+        alpha_tokens = re.findall(r"[a-z]+", normalized)
+
+        if len(alpha_tokens) >= 2 and len(normalized) <= 80 and any(hint in normalized for hint in self.TEMPLATE_PLACEHOLDER_HINTS):
             return True
 
         if re.fullmatch(r"[x✓✔ ]{0,4}", normalized):
@@ -842,6 +853,7 @@ class ExtractorEngine:
             "consent": ["consent_admin"],
             "consult_request": ["request_intent", "request_scope"],
             "seoc": ["diagnostic_basis", "request_scope", "routing_followup"],
+            "approved_referral": ["identity_admin", "routing_followup", "request_scope"],
             "lomn": ["justification", "diagnostic_basis"],
             "clinical_notes": ["clinical_support", "diagnostic_basis"],
             "imaging": ["imaging_support"],
@@ -953,6 +965,7 @@ class ExtractorEngine:
             text,
             anchors=[
                 r"\bthis request is for authorization of\b",
+                r"\bva order reason for request\b",
             ],
             max_follow_lines=3,
         )
@@ -1006,7 +1019,18 @@ class ExtractorEngine:
             "remains at risk",
             "failure of conservative",
         ]
+        weak_existing_patterns = [
+            r"\b\d+\s*(?:month|months|mnth|week|weeks|wk)\s*f/?u\b",
+            r"\bfollow\s*up\b",
+            r"\bf\/u\b",
+        ]
         if any(marker in existing_lower for marker in weak_existing_markers) and not any(marker in concept_lower for marker in weak_existing_markers):
+            return True
+
+        if any(re.search(pattern, existing_lower) for pattern in weak_existing_patterns):
+            return True
+
+        if len(existing_lower) <= 18 and concept_lower and len(concept_lower) > len(existing_lower):
             return True
 
         if len(existing) > 140 and len(concept) < len(existing):
@@ -1128,6 +1152,131 @@ class ExtractorEngine:
 
         return deduped
 
+    def infer_contextual_document_type(self, doc_type, text, page_metadata=None):
+        normalized_doc_type = str(doc_type or "unknown").strip().lower() or "unknown"
+        if normalized_doc_type != "unknown":
+            return normalized_doc_type
+
+        page_metadata = dict(page_metadata or {})
+        layout = dict(page_metadata.get("layout", {}) or {})
+        combined = f"{str(text or '').lower()}\n{str(layout.get('header_text') or '').lower()}"
+
+        if (
+            "approved referral for medical care" in combined
+            or " va form 10-7080" in combined
+            or "community care network" in combined
+        ):
+            return "approved_referral"
+
+        if "request for service" in combined and "approved referral" not in combined:
+            return "rfs"
+
+        if "consultation and treatment request" in combined:
+            return "consult_request"
+
+        if "letter of medical necessity" in combined:
+            return "lomn"
+
+        if any(marker in combined for marker in ["procedure note", "office clinic note", "office visit note"]):
+            return "clinical_notes"
+
+        return normalized_doc_type
+
+    def extract_preferred_provider_candidates(self, text, patterns, drop_middle_initial=False):
+        candidates = []
+        invalid_candidates = {"performed by", "verified by", "physician", "encounter info", "result title"}
+
+        for pattern in patterns:
+            for match in re.finditer(pattern, str(text or ""), re.IGNORECASE):
+                raw_value = match.group(1)
+                candidate = self.normalize_provider_role_candidate(raw_value) or self.normalize_provider(raw_value)
+                if not candidate:
+                    continue
+                if drop_middle_initial:
+                    candidate = self.drop_middle_initial_provider_candidate(candidate) or candidate
+                if str(candidate).strip().lower() in invalid_candidates:
+                    continue
+                candidates.append(candidate)
+
+        return candidates
+
+    def choose_most_common_value(self, values):
+        cleaned = [str(value).strip() for value in values if str(value or "").strip()]
+        if not cleaned:
+            return None
+        return Counter(cleaned).most_common(1)[0][0]
+
+    def extract_referral_community_fields(self, text):
+        facility_candidates = []
+        location_candidates = []
+
+        for match in re.finditer(r"Provider Name \(If known\)\s*:\s*([^\n\r]+)", str(text or ""), re.IGNORECASE):
+            facility = self.clean_referral_community_facility(match.group(1))
+            if facility:
+                facility_candidates.append(facility)
+
+        for match in re.finditer(
+            r"Initial Provider Location\s*:\s*([^\n\r]+(?:[\r\n]+\s*\d{5}(?:-\d+[A-Z]?)?)?)",
+            str(text or ""),
+            re.IGNORECASE,
+        ):
+            raw_value = match.group(1)
+            facility = self.clean_referral_community_facility(raw_value)
+            location = self.clean_referral_location(raw_value)
+            if facility:
+                facility_candidates.append(facility)
+            if location:
+                location_candidates.append(location)
+
+        return (
+            self.choose_most_common_value(facility_candidates),
+            self.choose_most_common_value(location_candidates),
+        )
+
+    def extract_contextual_provider_role_fields(self, text, doc_type, page_metadata=None):
+        data = {}
+        lowered = str(text or "").lower()
+        effective_doc_type = self.infer_contextual_document_type(doc_type, text, page_metadata=page_metadata)
+
+        if effective_doc_type == "approved_referral":
+            clinic_name, location = self.extract_referral_community_fields(text)
+            if clinic_name:
+                data["clinic_name"] = clinic_name
+            if location:
+                data["location"] = location
+
+        if "procedure note" in lowered:
+            treating_provider = self.choose_most_common_value(
+                self.extract_preferred_provider_candidates(
+                    text,
+                    [
+                        r"Physician\s*:\s*([^\n\r]+)",
+                        r"Performed by\s*:\s*([^\n\r]+)",
+                        r"Verified by\s*:\s*([^\n\r]+)",
+                    ],
+                    drop_middle_initial=True,
+                )
+            )
+            if treating_provider:
+                data["treating_provider"] = treating_provider
+                data["provider"] = treating_provider
+
+        if any(marker in lowered for marker in ["office clinic note", "office visit note"]):
+            followup_provider = self.choose_most_common_value(
+                self.extract_preferred_provider_candidates(
+                    text,
+                    [
+                        r"Performed by\s*:\s*([^\n\r]+)",
+                        r"Verified by\s*:\s*([^\n\r]+)",
+                    ],
+                )
+            )
+            if followup_provider:
+                data["followup_provider"] = followup_provider
+                data.setdefault("provider", followup_provider)
+
+        return data
+
     def get_page_metadata(self, packet, page_index):
         page_metadata = list(getattr(packet, "page_metadata", []) or [])
         if page_index < len(page_metadata):
@@ -1214,9 +1363,10 @@ class ExtractorEngine:
             })
         field_context[field_name] = context
 
-    def extract_identity_fields(self, page, page_metadata=None, field_context=None):
+    def extract_identity_fields(self, page, doc_type="unknown", page_metadata=None, field_context=None):
         text = str(page)
         data = {}
+        source_role = self.infer_source_role(doc_type, text, page_metadata=page_metadata)
 
         for field_name, patterns in self.IDENTITY_PATTERNS.items():
             zone_match = self.extract_from_field_zones(page_metadata, field_name)
@@ -1228,17 +1378,35 @@ class ExtractorEngine:
             if value:
                 data[field_name] = value
 
-        for field_name in ("ordering_provider", "referring_provider", "provider"):
+        if (
+            source_role == "va_clinic"
+            and data.get("provider")
+            and data.get("referring_provider")
+            and self.normalize_provider(data.get("provider")) == self.normalize_provider(data.get("referring_provider"))
+        ):
+            data.pop("provider", None)
+
+        fallback_fields = ["ordering_provider", "referring_provider"]
+        if source_role != "va_clinic":
+            fallback_fields.append("provider")
+
+        for field_name in fallback_fields:
             if field_name in data:
                 continue
             fallback_value = self.extract_provider_role_fallback(text, field_name)
             if fallback_value:
                 data[field_name] = fallback_value
 
+        data.update(self.extract_contextual_provider_role_fields(text, doc_type, page_metadata=page_metadata))
+
         if "provider" not in data:
-            if "ordering_provider" in data:
+            if "treating_provider" in data:
+                data["provider"] = data["treating_provider"]
+            elif "followup_provider" in data:
+                data["provider"] = data["followup_provider"]
+            elif "ordering_provider" in data:
                 data["provider"] = data["ordering_provider"]
-            elif "referring_provider" in data:
+            elif source_role != "va_clinic" and "referring_provider" in data:
                 data["provider"] = data["referring_provider"]
 
         if "va_icn" not in data:
@@ -1253,7 +1421,7 @@ class ExtractorEngine:
 
         return data
 
-    def extract_labeled_fields(self, page, page_metadata=None, field_context=None):
+    def extract_labeled_fields(self, page, doc_type="unknown", page_metadata=None, field_context=None):
         text = str(page)
         data = {}
 
@@ -1271,6 +1439,11 @@ class ExtractorEngine:
             inferred_facility = self.infer_facility(text)
             if inferred_facility:
                 data["facility"] = inferred_facility
+
+        contextual_fields = self.extract_contextual_provider_role_fields(text, doc_type, page_metadata=page_metadata)
+        for field_name in ("clinic_name", "location"):
+            if contextual_fields.get(field_name):
+                data[field_name] = contextual_fields[field_name]
 
         return data
 
@@ -1465,6 +1638,10 @@ class ExtractorEngine:
                 r"\baiken neurosciences(?:\s+and)?\s+pain management,?\s*l\.?l\.?c\.?\b",
                 "Aiken Neurosciences And Pain Management, Llc",
             ),
+            (
+                r"\boch\s+center\s+for\s+pain\s+management\b",
+                "OCH Center for Pain Management",
+            ),
         ]
         for pattern, canonical in known_patterns:
             if re.search(pattern, lowered, re.IGNORECASE):
@@ -1494,13 +1671,16 @@ class ExtractorEngine:
         if self.contains_template_value_marker(raw):
             return "template placeholder text captured as live field value"
 
-        if field_name in {"provider", "ordering_provider", "referring_provider"}:
+        if field_name in {"provider", "treating_provider", "followup_provider", "ordering_provider", "referring_provider"}:
             if re.search(r"\byear[- ]old\b|\bmale\b|\bfemale\b", combined):
                 return "demographic narrative misread as provider"
             if "care team" in combined:
                 return "care-team text misread as provider"
+            if "or other provider" in combined or "assigned by service line" in combined:
+                return "generic provider-language misread as a named provider"
             raw_tokens = re.findall(r"[A-Za-z']+", raw)
-            if raw_tokens and not raw.isupper() and any(token.isupper() and len(token) >= 3 for token in raw_tokens):
+            credential_tokens = {"MD", "DO", "PA", "PAC", "NP", "FNP", "APRN", "RN", "DC", "DDS"}
+            if raw_tokens and not raw.isupper() and any(token.isupper() and len(token) >= 3 and token.upper() not in credential_tokens for token in raw_tokens):
                 return "mixed-case OCR fragment in provider name"
             if len(raw_tokens) > 4:
                 return "provider value spilled into narrative text"
@@ -1531,8 +1711,27 @@ class ExtractorEngine:
         if field_name == "reason_for_request":
             if combined.strip() in {"patient's care team", "patients care team", "care team"}:
                 return "non-request care-team text captured as reason for request"
+            if "is the official clinical order" in combined:
+                return "instructional admin text captured as reason for request"
+            if "transport mode" in combined or raw.lower().startswith("pain inj"):
+                return "procedure logistics text captured as reason for request"
             if template_markers and "bracket_placeholder" in template_markers and self.contains_template_value_marker(raw):
                 return "template placeholder text captured as live request intent"
+
+        if field_name == "diagnosis":
+            lowered_raw = raw.lower()
+            if lowered_raw in {"of pain /", "pain /", "diagnosis of pain", "comments about patient s pain related condition"}:
+                return "section scaffolding text misread as diagnosis"
+            if lowered_raw.startswith("of ") and "/" in lowered_raw:
+                return "fragmented heading text misread as diagnosis"
+
+        if field_name == "authorization_number":
+            if any(marker in combined for marker in ["provider npi", "community provider npi", "referring provider npi", " npi "]):
+                return "npi value misread as authorization number"
+            if any(marker in combined for marker in ["preferred phone", "billing phone", "home phone", "mobile phone", "phone:"]):
+                return "phone number misread as authorization number"
+            if any(marker in combined for marker in ["veteran icn", "va icn", "integrated control number"]):
+                return "icn value misread as authorization number"
 
         return None
 
@@ -1652,6 +1851,12 @@ class ExtractorEngine:
 
     def normalize_provider(self, value):
         raw_value = str(value or "")
+        if "," in raw_value:
+            left, right = raw_value.split(",", 1)
+            left = left.strip()
+            right = right.strip()
+            if left and right:
+                raw_value = f"{right} {left}"
         had_provider_title = bool(
             re.search(r"\b(?:dr|doctor|md|m\.d\.|do|d\.o\.|pa|np|rn|fnp|aprn|dc|dds)\b\.?", raw_value, re.IGNORECASE)
         )
@@ -1912,676 +2117,13 @@ class ExtractorEngine:
 
         return value
 
-    def strip_trailing_label_suffixes(self, value):
-        cleaned = str(value or "").strip(" \t\r\n-")
-
-        suffix_pattern = re.compile(
-            r"(?:DATE|DATES|DOB|REF|ICN|PATIENT|MEMBER|PROVIDER|FACILITY|FORM|PHONE|FAX|SERVICE)+$"
-        )
-
-        while cleaned:
-            updated = suffix_pattern.sub("", cleaned).strip(" \t\r\n-")
-
-            if updated == cleaned:
-                break
-
-            cleaned = updated
-
-        return cleaned
-
-    def normalize_facility(self, value):
-        value = self.cut_at_stop_label(value)
-        value = re.sub(
-            r"^(?:facility(?: name)?|va facility|servicing facility|treating facility|requested facility|referring facility|rendering facility|medical facility|community care office|va community care office)\s*[:\-]?\s*",
-            "",
-            value,
-            flags=re.IGNORECASE,
-        )
-        value = re.split(
-            r"\b(?:phone|fax|npi|address|dob|provider|diagnosis|reason|city|state|zip|location)\b",
-            value,
-            maxsplit=1,
-            flags=re.IGNORECASE,
-        )[0]
-        value = re.sub(r"[^A-Za-z0-9,\-&\'\.()/ ]", " ", value)
-        value = re.sub(r"\s+", " ", value).strip(" ,.-")
-
-        if not value:
-            return None
-
-        value = re.split(r",\s*\d{1,5}\b", value, maxsplit=1)[0]
-        value = re.split(r"\bph\s*\(", value, maxsplit=1, flags=re.IGNORECASE)[0]
-        value = value.strip(" ,.-")
-
-        invalid_facility_values = {"lbp", "pain", "mri", "ct", "xray", "clinic", "office"}
-
-        if value.lower() in invalid_facility_values:
-            return None
-
-        lowered = value.lower()
-        if re.match(r"^\d{1,5}\s+", value):
-            return None
-        if re.search(r"charlie\s+n[0o]r[wv][o0]{2}d", lowered):
-            return "Charlie Norwood VA Medical Center"
-        facility_keywords = [
-            "medical center",
-            "hospital",
-            "health system",
-            "healthcare",
-            "clinic",
-            "center",
-            "vamc",
-            "va ",
-            "department of veterans affairs",
-        ]
-        if not any(keyword in lowered for keyword in facility_keywords):
-            if len(value.split()) < 3:
-                return None
-
-        if "pharmacy" in lowered:
-            return None
-
-        if re.fullmatch(r"[A-Za-z]+(?:\s+[A-Za-z]+){0,2}", value) and "va" not in lowered and "clinic" not in lowered:
-            return None
-
-        if len(value) < 3:
-            return None
-
-        return self.format_title_text(value)
-
-    def infer_facility(self, text):
-        compact = re.sub(r"[\r\n\t]+", " ", str(text or ""))
-        compact = re.sub(r"\s+", " ", compact).strip()
-        if not compact:
-            return None
-
-        patterns = [
-            r"\b([A-Z][A-Za-z&,\-\. ]{6,}VA Medical Center)\b",
-            r"\b([A-Z][A-Za-z&,\-\. ]{6,}VAMC)\b",
-            r"\b([A-Z][A-Za-z&,\-\. ]{6,}(?:Medical Center|Hospital|Health System))\b",
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, compact, re.IGNORECASE)
-            if not match:
-                continue
-            candidate = self.normalize_facility(match.group(1))
-            if candidate:
-                return candidate
-
-        return None
-
-    def infer_clinic_name(self, text):
-        compact = re.sub(r"[\r\n\t]+", " ", str(text or ""))
-        compact = re.sub(r"\s+", " ", compact).strip()
-        if not compact:
-            return None
-
-        patterns = [
-            r"\b([A-Z][A-Z&,\-\. ]{8,}(?:LLC|L\.L\.C\.|PC|P\.C\.|INC|CORP|CLINIC|MANAGEMENT))\b",
-            r"\b([A-Z][A-Z&,\-\. ]{8,}(?:NEUROSCIENCES|PAIN MANAGEMENT|MEDICAL GROUP|MEDICAL CENTER|CLINIC))\b",
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, compact)
-            if not match:
-                continue
-            candidate = self.normalize_clinic_name(match.group(1))
-            if candidate:
-                return candidate
-
-        return None
-
-    def infer_va_icn(self, text):
-        compact = re.sub(r"[\r\n\t]+", " ", str(text or ""))
-        compact = re.sub(r"\s+", " ", compact).strip()
-        lower_text = compact.lower()
-
-        if not lower_text:
-            return None
-
-        if "va community care" not in lower_text and "optum - va community care" not in lower_text:
-            return None
-
-        insurance_match = re.search(
-            r"insurance\s*(?:number|no\.?|#)\s*[:\-]?\s*([A-Z0-9]{8,24})\b",
-            compact,
-            re.IGNORECASE,
-        )
-        if not insurance_match:
-            return None
-
-        return self.normalize_identifier(insurance_match.group(1), min_length=8)
-
-    def normalize_location(self, value):
-        value = self.cut_at_stop_label(value)
-        value = re.sub(
-            r"^(?:office location|clinic location|facility location|city/state|city,\s*state|city|location)\s*[:\-]?\s*",
-            "",
-            value,
-            flags=re.IGNORECASE,
-        )
-        value = re.split(
-            r"\b(?:phone|fax|npi|address|provider|facility|diagnosis|reason|zip)\b",
-            value,
-            maxsplit=1,
-            flags=re.IGNORECASE,
-        )[0]
-        value = re.sub(r"[^A-Za-z0-9,\-&\'\.()/ ]", " ", value)
-        value = re.sub(r"\s+", " ", value).strip(" ,.-")
-
-        if not value or len(value) < 3:
-            return None
-
-        invalid_values = {
-            "lbp",
-            "low back pain",
-            "lumbar",
-            "cervical",
-            "hip pain",
-            "shoulder pain",
-            "neck pain",
-            "pain",
-        }
-        if value.lower() in invalid_values:
-            return None
-
-        if re.search(r"\d", value):
-            return None
-
-        symptom_like_markers = [
-            "radiating",
-            "bilateral",
-            "posterior",
-            "anterior",
-            "shoulder pain",
-            "neck pain",
-            "back pain",
-            "left shoulder",
-            "right shoulder",
-            "ue",
-            "le",
-        ]
-        if any(marker in value.lower() for marker in symptom_like_markers):
-            return None
-
-        city_state = re.search(r"^([A-Za-z .'\-]+?)(?:,\s*|\s+)([A-Za-z]{2})$", value)
-        if city_state:
-            city = self.format_title_text(city_state.group(1).strip())
-            state = city_state.group(2).upper()
-            return f"{city}, {state}"
-
-        if len(value) > 40:
-            return None
-
-        return self.format_title_text(value)
-
-    def normalize_clinic_name(self, value):
-        value = self.cut_at_stop_label(value)
-        value = re.sub(
-            r"^(?:clinic(?: name)?|practice(?: name)?|submitting office|office name|provider group|group name)\s*[:\-]?\s*",
-            "",
-            value,
-            flags=re.IGNORECASE,
-        )
-        value = re.split(
-            r"\b(?:phone|fax|npi|address|city|state|zip|location|facility|dob|provider)\b",
-            value,
-            maxsplit=1,
-            flags=re.IGNORECASE,
-        )[0]
-        value = re.sub(r"^(?:pm|p\.m\.)\s+", "", value, flags=re.IGNORECASE)
-        canonical = self.canonicalize_known_clinic_name(value)
-        if canonical:
-            return canonical
-        value = re.sub(r"[^A-Za-z0-9,\-&\'\.()/ ]", " ", value)
-        value = re.sub(r"\s+", " ", value).strip(" ,.-")
-
-        if not value or len(value) < 3:
-            return None
-
-        invalid_values = {"office", "clinic", "practice"}
-        if value.lower() in invalid_values:
-            return None
-
-        connector_fragments = {"and", "&", "of", "for"}
-        first_token = value.lower().split()[0] if value.split() else ""
-        if first_token in connector_fragments:
-            return None
-
-        lowered = value.lower()
-        if any(keyword in lowered for keyword in ["medical center", "hospital", "vamc"]) and "clinic" not in lowered:
-            return None
-
-        narrative_markers = [
-            "injected",
-            "fluoroscopic",
-            "revealed",
-            "spinal nerve",
-            "neural foramen",
-            "proximal spread",
-            "contrast",
-            "epidural",
-        ]
-        if any(marker in lowered for marker in narrative_markers):
-            return None
-
-        if len(value.split()) > 8:
-            return None
-
-        return self.format_title_text(value)
-
-    def normalize_reason_for_request(self, value):
-        value = self.cut_at_stop_label(value)
-        value = re.sub(
-            r"^(?:reason for request|reason for consultation|reason for consult|reason for referral|request rationale|chief complaint|history of present illness|requested service|requested procedure|reason)\s*[:\-]?\s*",
-            "",
-            value,
-            flags=re.IGNORECASE,
-        )
-        value = re.split(
-            r"\b(?:icd|diagnosis|provider|facility|dob|authorization|auth)\b",
-            value,
-            maxsplit=1,
-            flags=re.IGNORECASE,
-        )[0]
-        value = re.sub(r"\s+", " ", value).strip(" ,.-")
-
-        if not value or len(value) < 4:
-            return None
-
-        if value.lower() in {"patient's care team", "patients care team", "care team"}:
-            return None
-
-        return value
-
-    def normalize_npi(self, value):
-        digits = re.sub(r"\D", "", value)
-        if len(digits) != 10:
-            return None
-        return digits
-
-    def normalize_identifier(self, value, min_length=4):
-        original = str(value).strip()
-        cleaned = re.sub(
-            r"\b(?:claim(?: number| no\.?)?|va claim number|claim #|icn|va icn|integrated control number|icn/ssn|last four ssn|last four|ssn ending(?: in)?|ending in)\b",
-            "",
-            original,
-            flags=re.IGNORECASE,
-        )
-        cleaned = re.sub(r"[^A-Za-z0-9\-]", "", cleaned.upper())
-        cleaned = self.strip_trailing_label_suffixes(cleaned)
-        if len(cleaned) < min_length:
-            return None
-
-        invalid_cleaned_values = {
-            "NUMBER",
-            "CLAIMNUMBER",
-            "VACLAIMNUMBER",
-            "LASTFOUR",
-            "LASTFOURSS",
-            "LASTFOURSSN",
-            "REFERRING",
-            "PROVIDER",
-            "UNKNOWN",
-            "NONE",
-            "NA",
-            "NAN",
-        }
-        if cleaned in invalid_cleaned_values:
-            return None
-
-        if not re.search(r"\d", cleaned):
-            return None
-
-        date_like_patterns = [
-            r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
-            r"\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b",
-            r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*|\s+)\d{4}\b",
-        ]
-        if any(re.search(pattern, original, re.IGNORECASE) for pattern in date_like_patterns):
-            return None
-
-        if re.fullmatch(r"(?:19|20)\d{6}", cleaned):
-            return None
-        return cleaned
-
-    def normalize_service_date_range(self, value):
-        date_matches = re.finditer(
-            r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*|\s+)\d{4})\b",
-            str(value),
-            re.IGNORECASE,
-        )
-        dates = [match.group(1) for match in date_matches]
-        if not dates:
-            return None
-
-        normalized_dates = [self.parse_date_text(date) for date in dates if self.parse_date_text(date)]
-        if not normalized_dates:
-            return None
-
-        if len(normalized_dates) == 1:
-            return normalized_dates[0]
-
-        return f"{normalized_dates[0]} to {normalized_dates[-1]}"
-
-    def normalize_medications(self, value):
-        chunks = []
-        for part in re.split(r"[,;/]|\band\b", str(value), flags=re.IGNORECASE):
-            part = re.sub(r"\s+", " ", part).strip(" ,.-")
-            if part:
-                chunks.append(part.title())
-
-        unique = []
-        seen = set()
-        for item in chunks:
-            lowered = item.lower()
-            if lowered not in seen:
-                seen.add(lowered)
-                unique.append(item)
-
-        return unique or None
-
-    def normalize_procedure(self, value):
-        cleaned = str(value or "").strip()
-        if not cleaned:
-            return None
-
-        lowered = re.sub(r"\s+", " ", cleaned).lower()
-
-        if re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\)?", lowered):
-            return None
-
-        if any(marker in lowered for marker in [
-            "extremities",
-            "capillary",
-            "opioid use",
-            "pain management",
-            "provider signa",
-            "signature",
-        ]):
-            return None
-
-        if re.search(r"\bmri\b|\bmagnetic resonance imaging\b", lowered):
-            return "MRI"
-        if re.search(r"\bcat scan\b|\bcomputed tomography\b", lowered):
-            return "CT"
-        if re.search(r"\bx[- ]?ray\b|\bradiograph\b", lowered):
-            return "XRAY"
-        if re.search(r"\bphysical therapy\b|\bpt evaluation\b", lowered):
-            return "PHYSICAL_THERAPY"
-
-        return None
-
-    def normalize_diagnosis(self, value):
-        value = self.cut_at_stop_label(value)
-        value = re.sub(
-            r"^(?:episode diagnosis|primary diagnosis code|diagnosis|diagnoses|assessment|impression|clinical impression|primary|secondary)\s*[:\-]?\s*",
-            "",
-            value,
-            flags=re.IGNORECASE,
-        )
-        value = re.sub(r"\s+", " ", value).strip(" ,.-")
-
-        if not value:
-            return None
-
-        lowered = value.lower()
-
-        invalid_diagnosis_values = {
-            "pre",
-            "post",
-            "n/a",
-            "na",
-            "none",
-            "unknown",
-            "primary",
-            "secondary",
-        }
-        if lowered in invalid_diagnosis_values:
-            return None
-
-        if len(lowered) < 4:
-            return None
-
-        if len(lowered) > 90:
-            return None
-
-        if "primary:" in lowered and "secondary" in lowered:
-            return None
-
-        if any(marker in lowered for marker in ["optum", "community care netw", "med primary", "insurance"]):
-            return None
-
-        procedural_noise_markers = [
-            "annul",
-            "annulargram",
-            "fibrin injection",
-            "injection",
-            "pain management",
-            "requested service",
-            "scope of requested episode",
-            "continuity of care",
-            "postoperative",
-        ]
-
-        if len(lowered.split()) > 8 and any(marker in lowered for marker in procedural_noise_markers):
-            return None
-
-        problem_match = re.search(
-            r"(?:^|\bassessment\s*/\s*plan\b|\bdiagnosis\b)\s*(?:\d+\.\s*)?([A-Za-z][A-Za-z '\-]{3,80}?)(?:\s+M\d{2}(?:\.\d{1,4})?:|\s+G\d{2}(?:\.\d{1,4})?:|:|$)",
-            value,
-            re.IGNORECASE,
-        )
-        if problem_match:
-            candidate = re.sub(r"\s+", " ", problem_match.group(1)).strip(" ,.-")
-            candidate_lower = candidate.lower()
-            if candidate_lower and "radiculopathy" not in candidate_lower:
-                value = candidate
-                lowered = candidate_lower
-
-        for canonical, aliases in self.DIAGNOSIS_KEYWORDS.items():
-            if canonical in lowered or any(alias in lowered for alias in aliases):
-                return canonical
-
-        return lowered
-
-    def cut_at_stop_label(self, value):
-        lower_value = value.lower()
-        earliest_index = None
-
-        for label in self.STOP_LABELS:
-            idx = lower_value.find(label)
-            if idx > 0:
-                if earliest_index is None or idx < earliest_index:
-                    earliest_index = idx
-
-        if earliest_index is not None:
-            value = value[:earliest_index].strip()
-
-        return value
-
-    def extract_contextual_icd_codes(self, text):
-        contextual_patterns = [
-            r"(?:icd(?:-10)?(?: code)?s?|diagnosis code(?:s)?)\s*[:\-]\s*([^\n\r]+)",
-        ]
-
-        codes = []
-        for pattern in contextual_patterns:
-            for match in re.finditer(pattern, text, re.IGNORECASE):
-                block = match.group(1)
-                codes.extend(self.extract_regex_icd_codes(block))
-
-        return sorted(set(codes))
-
-    def extract_regex_icd_codes(self, text):
-        matches = re.findall(r"\b[A-Z][0-9]{2}(?:\.[0-9A-Z]{1,4})?\b", text)
-        return sorted(set(matches))
-
-    def infer_icd_codes_from_diagnosis_text(self, text):
-        lower_text = text.lower()
-        inferred = []
-
-        if any(term in lower_text for term in ["migraine", "migraines"]):
-            inferred.append("G43.909")
-
-        if any(term in lower_text for term in ["osteoarthritis", "degenerative joint disease", "djd"]):
-            inferred.append("M19.90")
-
-        if any(term in lower_text for term in ["low back pain", "lumbar pain", "back pain"]):
-            inferred.append("M54.50")
-
-        if any(term in lower_text for term in ["neck pain", "cervicalgia"]):
-            inferred.append("M54.2")
-
-        return sorted(set(inferred))
-
-    def merge_icd_codes(self, contextual_icds, regex_icds, inferred_icds):
-        if contextual_icds:
-            combined = contextual_icds + inferred_icds
-        else:
-            combined = regex_icds + inferred_icds
-
-        normalized = [self.normalize_icd(code) for code in combined if code]
-        normalized = [code for code in normalized if code]
-
-        specific_prefixes = {
-            code.split(".")[0]
-            for code in normalized
-            if "." in code
-        }
-        normalized = [
-            code for code in normalized
-            if ("." in code) or (code.split(".")[0] not in specific_prefixes)
-        ]
-
-        return sorted(set(normalized))
-    
-    def normalize_icd(self, code):
-        code = code.upper().strip()
-
-        # Common normalization cases
-        ICD_NORMALIZATION_MAP = {
-            "M54.5": "M54.50",
-            "M54.50": "M54.50",
-            "M54.2": "M54.2",
-            "G43.9": "G43.909",
-            "G43.909": "G43.909",
-            "M19.9": "M19.90",
-            "M19.90": "M19.90",
-        }
-
-        if code in ICD_NORMALIZATION_MAP:
-            return ICD_NORMALIZATION_MAP[code]
-
-        if re.fullmatch(r"[A-Z][0-9]{2}", code):
-            return None
-
-        return code
-
-    def infer_diagnosis(self, text):
-        lower_text = text.lower()
-
-        for canonical, aliases in self.DIAGNOSIS_KEYWORDS.items():
-            if canonical in lower_text:
-                return canonical
-            for alias in aliases:
-                if alias in lower_text:
-                    return canonical
-
-        return None
-
-    def infer_facility(self, text):
-        compact = re.sub(r"[\r\n\t]+", " ", str(text or ""))
-        compact = re.sub(r"\s+", " ", compact).strip()
-        lower_text = compact.lower()
-
-        if not lower_text:
-            return None
-
-        if re.search(r"charlie\s+n[0o]r[vw][o0]{2}d", lower_text):
-            return "Charlie Norwood VA Medical Center"
-
-        if "va medical center" in lower_text and "augusta" in lower_text:
-            return "Charlie Norwood VA Medical Center"
-
-        match = re.search(r"(va medical center[^\n\r]{0,80})", compact, re.IGNORECASE)
-        if match:
-            candidate = self.normalize_facility(match.group(1))
-            if candidate:
-                return candidate
-
-        return None
-
-    def infer_symptom(self, text):
-        lower_text = text.lower()
-
-        for canonical, aliases in self.SYMPTOM_KEYWORDS.items():
-            if canonical in lower_text:
-                return canonical
-            for alias in aliases:
-                if alias in lower_text:
-                    return canonical
-
-        return None
-
-    def infer_procedure(self, text):
-        request_windows = [
-            r"(?:requested procedure|requested service|authorization is requested for|authorization requested for|plan includes|candidate for|procedure(?:s)? performed)\s*[:\-]?\s*([^\n\r]{0,120})",
-            r"([^\n\r]{0,120})\s*(?:requested procedure|requested service|authorization is requested for)",
-        ]
-
-        candidates = []
-        for pattern in request_windows:
-            for match in re.finditer(pattern, text, re.IGNORECASE):
-                candidates.append(match.group(1))
-
-        if not candidates:
-            return None
-
-        combined = " ".join(candidates).lower()
-
-        if re.search(r"\bmri\b|\bmagnetic resonance imaging\b", combined):
-            return "MRI"
-
-        if re.search(r"\bcat scan\b|\bcomputed tomography\b", combined):
-            return "CT"
-
-        if re.search(r"\bx[- ]?ray\b|\bradiograph\b", combined):
-            return "XRAY"
-
-        if re.search(r"\bphysical therapy\b|\bpt evaluation\b", combined):
-            return "PHYSICAL_THERAPY"
-
-        return None
-
-    def infer_medications(self, text):
-        lower_text = text.lower()
-        medication_context_terms = [
-            "medication",
-            "medications",
-            "current meds",
-            "current medications",
-            "taking",
-            "prescribed",
-            "rx",
-        ]
-        if not any(term in lower_text for term in medication_context_terms):
-            return []
-
-        found = []
-
-        for canonical, aliases in self.MEDICATION_KEYWORDS.items():
-            if canonical in lower_text or any(alias in lower_text for alias in aliases):
-                found.append(canonical.title())
-
-        return sorted(set(found))
-
     def get_field_label_hints(self):
         return {
             "name": ["veteran name", "patient name", "full name", "member name"],
             "dob": ["dob", "date of birth", "birth date", "d.o.b."],
             "provider": ["provider", "provider name", "treating provider", "rendering provider", "attending provider"],
+            "treating_provider": ["treating provider", "rendering provider", "attending provider", "treating physician", "physician"],
+            "followup_provider": ["performed by", "verified by", "follow-up provider", "office provider", "clinic provider"],
             "ordering_provider": ["ordering provider", "ordering physician", "ordered by", "requested by", "requesting provider"],
             "referring_provider": ["referring provider", "referring va provider", "referred by", "ref provider", "pcp", "referring physician"],
             "authorization_number": ["authorization number", "auth number", "auth no", "auth #", "authorization #", "referral number", "referral #", "member id", "tracking number", "reference number", "ref"],
@@ -2617,6 +2159,7 @@ class ExtractorEngine:
         return excerpt[:240]
 
     def infer_source_role(self, doc_type, text, page_metadata=None):
+        doc_type = self.infer_contextual_document_type(doc_type, text, page_metadata=page_metadata)
         lowered = str(text or "").lower()
         page_metadata = dict(page_metadata or {})
         layout = dict(page_metadata.get("layout", {}) or {})
@@ -2635,6 +2178,12 @@ class ExtractorEngine:
         if doc_type in {"cover_sheet", "rfs"}:
             return "shared"
 
+        if doc_type == "approved_referral":
+            return "va_clinic"
+
+        if "procedure note" in combined or "office clinic note" in combined or "office visit note" in combined:
+            return "community_provider"
+
         va_markers = [
             "referring va provider",
             "va facility",
@@ -2646,6 +2195,8 @@ class ExtractorEngine:
             "community care network",
             "charlie norwood",
             "10-10172",
+            "10-7080",
+            "approved referral for medical care",
             "request for service",
         ]
         provider_markers = [
@@ -2765,6 +2316,121 @@ class ExtractorEngine:
             },
         }
 
+    def consolidate_packet_fields(self, packet):
+        self.consolidate_provider_role_fields(packet)
+        self.consolidate_service_date_range(packet)
+
+    def select_best_observation(self, packet, field_name, predicate=None):
+        observations = list((getattr(packet, "field_observations", {}) or {}).get(field_name, []) or [])
+        if predicate is not None:
+            observations = [entry for entry in observations if predicate(entry)]
+        if not observations:
+            return None
+
+        observations.sort(
+            key=lambda entry: (
+                float(entry.get("confidence") or 0.0),
+                len(str(entry.get("value") or "")),
+                1 if str(entry.get("document_type") or "").lower() != "unknown" else 0,
+            ),
+            reverse=True,
+        )
+        return dict(observations[0])
+
+    def _apply_observation_to_field(self, packet, target_field, observation, force_history_reset=False):
+        if not observation:
+            return
+
+        packet.fields[target_field] = observation.get("value")
+        packet.field_sources[target_field] = observation.get("source_file")
+        packet.field_mappings[target_field] = dict(observation)
+        packet.field_confidence[target_field] = float(observation.get("confidence") or 0.0)
+
+        if force_history_reset or target_field not in packet.field_values:
+            packet.field_values[target_field] = [observation.get("value")]
+        elif observation.get("value") not in packet.field_values[target_field]:
+            packet.field_values[target_field].append(observation.get("value"))
+
+        if force_history_reset or target_field not in packet.field_observations:
+            packet.field_observations[target_field] = [dict(observation)]
+        else:
+            packet.field_observations[target_field].append(dict(observation))
+
+        if target_field in packet.identity_fields:
+            if force_history_reset or target_field not in packet.identity_fields:
+                packet.identity_fields[target_field] = [observation.get("value")]
+            else:
+                packet.identity_fields[target_field] = [observation.get("value")]
+
+    def consolidate_provider_role_fields(self, packet):
+        treating_observation = self.select_best_observation(packet, "treating_provider")
+        followup_observation = self.select_best_observation(packet, "followup_provider")
+
+        if treating_observation:
+            self._apply_observation_to_field(packet, "provider", treating_observation, force_history_reset=True)
+
+        if followup_observation:
+            self._apply_observation_to_field(packet, "followup_provider", followup_observation, force_history_reset=True)
+
+        clinic_observation = self.select_best_observation(
+            packet,
+            "clinic_name",
+            predicate=lambda entry: (
+                str(entry.get("document_type") or "").lower() == "approved_referral"
+                or len(str(entry.get("value") or "")) >= 18
+            ),
+        )
+        if clinic_observation and (
+            self.looks_truncated_packet_value(packet.fields.get("clinic_name"))
+            or len(str(packet.fields.get("clinic_name") or "")) < len(str(clinic_observation.get("value") or ""))
+        ):
+            self._apply_observation_to_field(packet, "clinic_name", clinic_observation, force_history_reset=True)
+
+        location_observation = self.select_best_observation(
+            packet,
+            "location",
+            predicate=lambda entry: str(entry.get("document_type") or "").lower() == "approved_referral",
+        )
+        if location_observation and (
+            self.looks_truncated_packet_value(packet.fields.get("location"))
+            or len(str(packet.fields.get("location") or "")) < len(str(location_observation.get("value") or ""))
+        ):
+            self._apply_observation_to_field(packet, "location", location_observation, force_history_reset=True)
+
+    def consolidate_service_date_range(self, packet):
+        values = list((packet.field_values or {}).get("service_date_range", []) or [])
+        if not values:
+            return
+
+        parsed_ranges = []
+        for value in values:
+            normalized = self.normalize_service_date_range(value)
+            if not normalized:
+                continue
+
+            if " to " in normalized:
+                start_text, end_text = normalized.split(" to ", 1)
+            else:
+                start_text = normalized
+                end_text = normalized
+
+            if not start_text or not end_text:
+                continue
+
+            try:
+                start_date = datetime.strptime(start_text, "%m/%d/%Y")
+                end_date = datetime.strptime(end_text, "%m/%d/%Y")
+            except ValueError:
+                continue
+
+            parsed_ranges.append((start_date, end_date))
+
+        if len(parsed_ranges) < 2:
+            return
+
+        overall = f"{min(start for start, _ in parsed_ranges).strftime('%m/%d/%Y')} to {max(end for _, end in parsed_ranges).strftime('%m/%d/%Y')}"
+        packet.fields["service_date_range"] = overall
+
     def store_results(self, packet, data, page, page_index, doc_type, page_metadata=None, field_context=None):
         for key, value in data.items():
             page_level_context = {
@@ -2856,7 +2522,7 @@ class ExtractorEngine:
             base = 0.93
             if key == "authorization_number":
                 base = 0.99
-            elif key in {"ordering_provider", "referring_provider", "provider"}:
+            elif key in {"ordering_provider", "referring_provider", "provider", "treating_provider", "followup_provider"}:
                 base = 0.97
             elif key in {"name", "dob", "va_icn"}:
                 base = 0.98

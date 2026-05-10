@@ -3,10 +3,14 @@ from TrueCoreIntel.review.data_engine import DataIntelligenceBuilder
 from TrueCoreIntel.review.integration_engine import IntegrationIntelligenceBuilder
 from TrueCoreIntel.review.knowledge_engine import KnowledgeIntelligenceBuilder
 from TrueCoreIntel.review.monitoring_engine import MonitoringIntelligenceBuilder
+from TrueCoreIntel.review.review_compliance_mixin import ReviewComplianceMixin
+from TrueCoreIntel.review.review_predictive_mixin import ReviewPredictiveMixin
+from TrueCoreIntel.review.review_summary_builder import ReviewSummaryBuilder
 from TrueCoreIntel.review.security_engine import SecurityIntelligenceBuilder
 from TrueCoreIntel.review.simulation_engine import SimulationIntelligenceBuilder
 from TrueCoreIntel.review.strategy_engine import StrategicIntelligenceBuilder
 from TrueCoreIntel.review.ux_engine import UXIntelligenceBuilder
+from TrueCoreIntel.core import packet_archetypes
 from TrueCore.core.statistical_scoring import (
     build_outcome_model,
     build_packet_feature_map,
@@ -15,10 +19,12 @@ from TrueCore.core.statistical_scoring import (
 )
 
 
-class ReviewEngine:
+class ReviewEngine(ReviewComplianceMixin, ReviewPredictiveMixin):
+    AUTHORIZATION_DOCUMENT_TYPES = packet_archetypes.AUTHORIZATION_DOCUMENT_TYPES
 
     HIGH_PRIORITY_FIELDS = {"name", "dob", "authorization_number"}
     MEDIUM_PRIORITY_FIELDS = {"icd_codes", "reason_for_request", "ordering_provider", "referring_provider"}
+    SUMMARY_BUILDER = ReviewSummaryBuilder(HIGH_PRIORITY_FIELDS, MEDIUM_PRIORITY_FIELDS)
     NON_BLOCKING_REVIEW_FLAGS = {
         "partial_diagnosis_icd_alignment",
         "moderate_mri_justification",
@@ -29,72 +35,17 @@ class ReviewEngine:
         "weak_mri_justification",
     }
     SUCCESS_PACKET_PROFILES = {
-        "full_submission": {
-            "required_documents": {
-                "cover_sheet",
-                "rfs",
-                "consult_request",
-                "seoc",
-                "lomn",
-                "consent",
-                "clinical_notes",
-            },
-            "expected_fields": {
-                "name",
-                "dob",
-                "authorization_number",
-                "reason_for_request",
-                "diagnosis",
-                "icd_codes",
-            },
-            "supportive_fields": {
-                "ordering_provider",
-                "referring_provider",
-                "service_date_range",
-                "signature_present",
-                "va_icn",
-                "facility",
-            },
-        },
-        "authorization_request": {
-            "required_documents": {
-                "consult_request",
-                "clinical_notes",
-                "rfs",
-            },
-            "expected_fields": {
-                "name",
-                "dob",
-                "authorization_number",
-                "reason_for_request",
-                "icd_codes",
-            },
-            "supportive_fields": {
-                "diagnosis",
-                "procedure",
-                "ordering_provider",
-                "va_icn",
-            },
-        },
-        "clinical_minimal": {
-            "required_documents": {
-                "clinical_notes",
-            },
-            "expected_fields": {
-                "name",
-                "dob",
-                "icd_codes",
-            },
-            "supportive_fields": {
-                "diagnosis",
-                "procedure",
-                "service_date_range",
-            },
-        },
+        key: {
+            "required_documents": set(config.get("required_documents", set()) or set()),
+            "expected_fields": set(config.get("expected_fields", set()) or set()),
+            "supportive_fields": set(config.get("supportive_fields", set()) or set()),
+        }
+        for key, config in packet_archetypes.SUBMISSION_PROFILES.items()
     }
     DOC_SEQUENCE_REASONS = {
         "cover_sheet": "Lead with the routing summary and veteran identifiers.",
         "rfs": "Place the authorization or Request for Service early so downstream reviewers can anchor the referral.",
+        "approved_referral": "Place the VA referral early so downstream reviewers can anchor the authorization context.",
         "consult_request": "Keep the consult request near the front so ordering context is visible before clinical detail.",
         "seoc": "Place the episode-of-care document before the medical-necessity narrative.",
         "lomn": "Follow the request documents with the medical-necessity narrative.",
@@ -131,6 +82,7 @@ class ReviewEngine:
     COMPLIANCE_SECURE_FIELDS = {"name", "dob", "authorization_number", "va_icn", "claim_number"}
 
     def review(self, packet):
+        packet_archetypes.annotate_packet_context(packet)
         self.build_review_summary(packet)
 
         if self.requires_review(packet):
@@ -252,131 +204,15 @@ class ReviewEngine:
         return modeling
 
     def build_review_summary(self, packet):
-        why_weak = []
-        missing_items = []
-        conflict_items = []
-        fix_recommendations = []
-
-        prioritized_fixes = self.build_prioritized_fixes(packet)
-
-        if packet.missing_fields:
-            high_missing = [f for f in packet.missing_fields if f in self.HIGH_PRIORITY_FIELDS]
-            medium_missing = [f for f in packet.missing_fields if f in self.MEDIUM_PRIORITY_FIELDS]
-            low_missing = [
-                f for f in packet.missing_fields
-                if f not in self.HIGH_PRIORITY_FIELDS and f not in self.MEDIUM_PRIORITY_FIELDS
-            ]
-
-            if high_missing:
-                why_weak.append(
-                    f"Critical required fields are missing: {', '.join(sorted(high_missing))}."
-                )
-
-            if medium_missing:
-                why_weak.append(
-                    f"Important clinical/review fields are missing: {', '.join(sorted(medium_missing))}."
-                )
-
-            if low_missing:
-                why_weak.append(
-                    f"Additional required fields are missing: {', '.join(sorted(low_missing))}."
-                )
-
-            for field in packet.missing_fields:
-                missing_items.append(f"Missing required field: {field}.")
-                fix_recommendations.append(f"Add or verify {field} in the packet.")
-
-        if packet.missing_documents:
-            sorted_docs = sorted(packet.missing_documents)
-            why_weak.append(
-                f"Required supporting documents are missing ({len(sorted_docs)}): {', '.join(sorted_docs)}."
-            )
-
-            for doc in sorted_docs:
-                missing_items.append(f"Missing required document: {doc}.")
-                fix_recommendations.append(f"Attach required document: {doc}.")
-
-        if packet.conflicts:
-            high_conflicts = [c.get("field", "unknown_field") for c in packet.conflicts if c.get("severity") == "high"]
-            medium_conflicts = [c.get("field", "unknown_field") for c in packet.conflicts if c.get("severity") == "medium"]
-            low_conflicts = [c.get("field", "unknown_field") for c in packet.conflicts if c.get("severity") == "low"]
-
-            if high_conflicts:
-                why_weak.append(
-                    f"High-severity conflicts were found: {', '.join(sorted(set(high_conflicts)))}."
-                )
-
-            if medium_conflicts:
-                why_weak.append(
-                    f"Moderate conflicts were found: {', '.join(sorted(set(medium_conflicts)))}."
-                )
-
-            if low_conflicts:
-                why_weak.append(
-                    f"Low-severity conflicts were found: {', '.join(sorted(set(low_conflicts)))}."
-                )
-
-            for conflict in packet.conflicts:
-                message = conflict.get("message", f"Conflict detected for {conflict.get('field', 'unknown_field')}.")
-                conflict_items.append(message)
-                fix_recommendations.append(
-                    f"Resolve conflicting values for {conflict.get('field', 'unknown_field')}."
-                )
-
-        review_flags = set(packet.review_flags)
-
-        if "weak_mri_justification" in review_flags:
-            why_weak.append("MRI request has weak clinical justification.")
-            fix_recommendations.append("Add clearer diagnosis or symptom support for MRI necessity.")
-
-        if "moderate_mri_justification" in review_flags:
-            why_weak.append("MRI request has only moderate clinical justification.")
-            fix_recommendations.append("Strengthen the clinical rationale supporting MRI necessity.")
-
-        if "procedure_without_medical_support" in review_flags:
-            why_weak.append("Requested procedure is not supported by diagnosis or symptom evidence.")
-            fix_recommendations.append("Add clinical documentation supporting the requested procedure.")
-
-        if "diagnosis_without_icd_support" in review_flags:
-            why_weak.append("Diagnosis is present without corresponding ICD support.")
-            fix_recommendations.append("Add supporting ICD codes for the stated diagnosis.")
-
-        if "icd_without_diagnosis_support" in review_flags:
-            why_weak.append("ICD codes are present without clear diagnosis language.")
-            fix_recommendations.append("Add diagnosis language matching the ICD codes.")
-
-        if "diagnosis_icd_mismatch" in review_flags:
-            why_weak.append("Diagnosis and ICD coding do not appear clinically aligned.")
-            fix_recommendations.append("Correct the diagnosis language or update ICD coding so they match.")
-
-        if "missing_reason_for_request" in review_flags and "reason_for_request" not in packet.missing_fields:
-            why_weak.append("Reason for request is missing or unclear.")
-            fix_recommendations.append("Add a clear reason for request or referral statement.")
-
-        if "packet_integrity_risk" in review_flags:
-            why_weak.append("Packet may contain mixed patient or case identifiers.")
-            fix_recommendations.append("Confirm that all pages belong to the same veteran and case.")
-
-        if "chronology_review_needed" in review_flags:
-            why_weak.append("Service dates appear out of sequence or need chronology review.")
-            fix_recommendations.append("Verify the service date range and correct reversed dates.")
-
-        if "duplicate_pages_present" in review_flags:
-            why_weak.append("Packet contains duplicate or repeated pages.")
-            fix_recommendations.append("Remove repeated pages to keep the submission clean.")
-
-        if packet.packet_strength == "weak":
-            why_weak.append("Overall packet strength is weak based on missing support, conflicts, and justification gaps.")
-
-        compressed_why = self.compress_why_weak(why_weak)
+        summary_artifacts = self.SUMMARY_BUILDER.build(packet)
         self.apply_statistical_outcome_model(packet)
 
         packet.output["review_summary"] = {
-            "why_weak": compressed_why,
-            "missing_items": self.unique_preserve_order(missing_items),
-            "conflict_items": self.unique_preserve_order(conflict_items),
-            "fix_recommendations": self.unique_preserve_order(fix_recommendations),
-            "priority_fixes": prioritized_fixes,
+            "why_weak": summary_artifacts.why_weak,
+            "missing_items": summary_artifacts.missing_items,
+            "conflict_items": summary_artifacts.conflict_items,
+            "fix_recommendations": summary_artifacts.fix_recommendations,
+            "priority_fixes": summary_artifacts.prioritized_fixes,
         }
 
         submission_decision = self.build_submission_decision(packet)
@@ -630,196 +466,20 @@ class ReviewEngine:
         packet.output["approval_rationale"] = self.build_approval_rationale(packet)
 
     def compress_why_weak(self, reasons):
-        """
-        Reduce redundancy and limit to highest-signal explanations.
-        """
-
-        if not reasons:
-            return []
-        grouped = {
-            "critical": [],
-            "clinical": [],
-            "documents": [],
-            "conflicts": [],
-            "other": [],
-        }
-
-        for r in reasons:
-            rl = r.lower()
-
-            if "critical" in rl or "missing required field" in rl:
-                grouped["critical"].append(r)
-            elif "clinical" in rl or "diagnosis" in rl or "mri" in rl:
-                grouped["clinical"].append(r)
-            elif "document" in rl:
-                grouped["documents"].append(r)
-            elif "conflict" in rl:
-                grouped["conflicts"].append(r)
-            else:
-                grouped["other"].append(r)
-
-        ordered = (
-            grouped["critical"] +
-            grouped["clinical"] +
-            grouped["documents"] +
-            grouped["conflicts"] +
-            grouped["other"]
-        )
-
-        # Deduplicate while preserving order
-        seen = set()
-        deduped = []
-        for item in ordered:
-            if item not in seen:
-                seen.add(item)
-                deduped.append(item)
-
-        # Cap output (important)
-        return deduped[:5]
+        return self.SUMMARY_BUILDER.compress_why_weak(reasons)
 
 
     def build_prioritized_fixes(self, packet):
-        fixes = []
-
-        for field in packet.missing_fields:
-            fixes.append({
-                "priority": self.get_field_priority(field),
-                "type": "missing_field",
-                "target": field,
-                "action": f"Add or verify {field}.",
-            })
-
-        missing_docs = sorted(packet.missing_documents)
-        if missing_docs:
-            if len(missing_docs) <= 2:
-                for doc in missing_docs:
-                    fixes.append({
-                        "priority": "medium",
-                        "type": "missing_document",
-                        "target": doc,
-                        "action": f"Attach required document: {doc}.",
-                    })
-            else:
-                fixes.append({
-                    "priority": "medium",
-                    "type": "missing_document_bundle",
-                    "target": "required_documents",
-                    "action": f"Attach missing required documents ({len(missing_docs)}): {', '.join(missing_docs)}.",
-                })
-
-        for conflict in packet.conflicts:
-            fixes.append({
-                "priority": conflict.get("severity", "low"),
-                "type": "conflict",
-                "target": conflict.get("field", "unknown_field"),
-                "action": f"Resolve conflicting values for {conflict.get('field', 'unknown_field')}.",
-            })
-
-        review_flags = set(packet.review_flags)
-
-        if "procedure_without_medical_support" in review_flags:
-            fixes.append({
-                "priority": "high",
-                "type": "medical_support",
-                "target": "procedure_support",
-                "action": "Add clinical documentation supporting the requested procedure.",
-            })
-        elif "weak_mri_justification" in review_flags:
-            fixes.append({
-                "priority": "medium",
-                "type": "medical_support",
-                "target": "mri_justification",
-                "action": "Add clearer diagnosis or symptom support for MRI necessity.",
-            })
-        elif "moderate_mri_justification" in review_flags:
-            fixes.append({
-                "priority": "low",
-                "type": "medical_support",
-                "target": "mri_justification",
-                "action": "Strengthen the clinical rationale supporting MRI necessity.",
-            })
-
-        if "diagnosis_icd_mismatch" in review_flags:
-            fixes.append({
-                "priority": "medium",
-                "type": "clinical_alignment",
-                "target": "diagnosis_icd_alignment",
-                "action": "Correct the diagnosis language or update ICD coding so they match.",
-            })
-
-        if "diagnosis_without_icd_support" in review_flags:
-            fixes.append({
-                "priority": "medium",
-                "type": "clinical_alignment",
-                "target": "diagnosis_icd_alignment",
-                "action": "Add supporting ICD codes for the stated diagnosis.",
-            })
-
-        if "icd_without_diagnosis_support" in review_flags:
-            fixes.append({
-                "priority": "medium",
-                "type": "clinical_alignment",
-                "target": "diagnosis_icd_alignment",
-                "action": "Add diagnosis language matching the ICD codes.",
-            })
-
-        if "reason_for_request" in packet.missing_fields or "missing_reason_for_request" in review_flags:
-            fixes.append({
-                "priority": "medium",
-                "type": "missing_field",
-                "target": "reason_for_request",
-                "action": "Add a clear reason for request or referral statement.",
-            })
-
-        if "packet_integrity_risk" in review_flags:
-            fixes.append({
-                "priority": "high",
-                "type": "packet_integrity",
-                "target": "packet_identity",
-                "action": "Confirm all packet pages belong to the same veteran and case.",
-            })
-
-        if "chronology_review_needed" in review_flags:
-            fixes.append({
-                "priority": "medium",
-                "type": "chronology",
-                "target": "service_date_range",
-                "action": "Correct or verify the service date range chronology.",
-            })
-
-        if "duplicate_pages_present" in review_flags:
-            fixes.append({
-                "priority": "low",
-                "type": "packet_cleanup",
-                "target": "duplicate_pages",
-                "action": "Remove duplicate or repeated packet pages.",
-            })
-
-        priority_order = {"high": 0, "medium": 1, "low": 2}
-        fixes.sort(key=lambda item: (priority_order.get(item["priority"], 3), item["target"]))
-
-        deduped = []
-        seen = set()
-
-        for item in fixes:
-            key = (item["type"], item["target"])
-            if key not in seen:
-                seen.add(key)
-                deduped.append(item)
-
-        return deduped[:6]
+        return self.SUMMARY_BUILDER.build_prioritized_fixes(packet)
 
     def get_field_priority(self, field):
-        if field in self.HIGH_PRIORITY_FIELDS:
-            return "high"
-        if field in self.MEDIUM_PRIORITY_FIELDS:
-            return "medium"
-        return "low"
+        return self.SUMMARY_BUILDER.get_field_priority(field)
 
     def build_submission_decision(self, packet):
         actionable_flags = set(self.get_actionable_review_flags(packet))
         hold_reasons = []
         review_reasons = []
+        assembly_score = getattr(packet, "packet_assembly_score", None)
 
         if packet.missing_fields:
             hold_reasons.append(
@@ -844,6 +504,9 @@ class ReviewEngine:
         if packet.packet_strength == "weak":
             hold_reasons.append("Overall packet strength is weak and should be corrected before submission.")
 
+        if assembly_score is not None and assembly_score < 55:
+            hold_reasons.append("Packet assembly quality is too weak for submission and should be corrected first.")
+
         if self.HOLD_REVIEW_FLAGS.intersection(actionable_flags):
             for flag in sorted(self.HOLD_REVIEW_FLAGS.intersection(actionable_flags)):
                 hold_reasons.append(self.describe_decision_flag(flag, hold=True))
@@ -863,6 +526,9 @@ class ReviewEngine:
             description = self.describe_decision_flag(flag, hold=False)
             if description:
                 review_reasons.append(description)
+
+        if assembly_score is not None and 55 <= assembly_score < 72 and not hold_reasons:
+            review_reasons.append("Packet assembly is incomplete enough to require reviewer confirmation.")
 
         if packet.packet_confidence is not None and packet.packet_confidence < 0.78 and not hold_reasons:
             review_reasons.append("Packet confidence is below the auto-submit threshold.")
@@ -927,91 +593,6 @@ class ReviewEngine:
             "escalation_trigger": escalation,
             "resubmission_strategy": resubmission_strategy,
             "packet_success_pattern_match": success_pattern,
-        }
-
-    def build_predictive_intelligence(self, packet, submission_decision, decision_intelligence):
-        procedure_fit = decision_intelligence["procedure_to_documentation_fit"]
-        success_pattern = decision_intelligence["packet_success_pattern_match"]
-        denial_risk = decision_intelligence["denial_risk_prediction"]
-        workflow_route = decision_intelligence["workflow_decision_routing"]
-        missing_evidence = decision_intelligence["missing_evidence_recommendations"]
-        escalation = decision_intelligence["escalation_trigger"]
-        packet_type = decision_intelligence["packet_type"]
-
-        case_complexity = self.build_case_complexity_scoring(
-            packet,
-            submission_decision,
-            procedure_fit,
-        )
-        bottleneck_detection = self.build_bottleneck_detection(
-            packet,
-            submission_decision,
-            workflow_route,
-            procedure_fit,
-            missing_evidence,
-        )
-        provider_performance = self.build_provider_performance_prediction(packet, case_complexity)
-        approval_outcome = self.build_approval_outcome_prediction(
-            packet,
-            submission_decision,
-            denial_risk,
-            success_pattern,
-            case_complexity,
-        )
-        denial_reason_forecasting = self.build_denial_reason_forecasting(
-            packet,
-            denial_risk,
-            procedure_fit,
-            missing_evidence,
-        )
-        volume_trend = self.build_volume_trend_prediction(
-            packet,
-            packet_type,
-            workflow_route,
-            case_complexity,
-        )
-        staffing_demand = self.build_staffing_demand_forecasting(
-            packet,
-            workflow_route,
-            case_complexity,
-            volume_trend,
-        )
-        turnaround_prediction = self.build_turnaround_time_prediction(
-            packet,
-            submission_decision,
-            workflow_route,
-            denial_risk,
-            case_complexity,
-            bottleneck_detection,
-        )
-        submission_timing = self.build_submission_timing_optimization(
-            packet,
-            submission_decision,
-            workflow_route,
-            turnaround_prediction,
-            case_complexity,
-        )
-        predictive_escalation = self.build_predictive_escalation(
-            packet,
-            submission_decision,
-            denial_risk,
-            escalation,
-            case_complexity,
-            bottleneck_detection,
-            provider_performance,
-        )
-
-        return {
-            "approval_outcome_prediction": approval_outcome,
-            "turnaround_time_prediction": turnaround_prediction,
-            "bottleneck_detection": bottleneck_detection,
-            "provider_performance_prediction": provider_performance,
-            "denial_reason_forecasting": denial_reason_forecasting,
-            "volume_trend_prediction": volume_trend,
-            "staffing_demand_forecasting": staffing_demand,
-            "submission_timing_optimization": submission_timing,
-            "case_complexity_scoring": case_complexity,
-            "predictive_escalation": predictive_escalation,
         }
 
     def build_workflow_efficiency_optimization(self, packet, submission_decision, predictive_intelligence):
@@ -1453,462 +1034,21 @@ class ReviewEngine:
             "continuous_performance_tuning": tuning,
         }
 
-    def build_regulatory_rule_engine(self, packet, decision_intelligence):
-        packet_type = decision_intelligence["packet_type"]
-        profile = self.SUCCESS_PACKET_PROFILES.get(
-            packet_type,
-            self.SUCCESS_PACKET_PROFILES["authorization_request"],
-        )
-        required_documents = sorted(profile["required_documents"])
-        required_fields = sorted(profile["expected_fields"])
-        signature_documents = sorted(
-            self.COMPLIANCE_SIGNATURE_REQUIRED_DOCS.intersection(set(packet.detected_documents) | set(required_documents))
-        )
-        authorization_required = packet_type != "clinical_minimal" or bool({"rfs", "consult_request"}.intersection(set(packet.detected_documents)))
-
-        return {
-            "policy_version": self.COMPLIANCE_POLICY_VERSION,
-            "policy_effective_date": self.COMPLIANCE_POLICY_EFFECTIVE_DATE,
-            "packet_type": packet_type,
-            "rules": [
-                {
-                    "rule_id": "required_documents_present",
-                    "description": "Packet must contain required document components for its packet profile.",
-                    "required_targets": required_documents,
-                },
-                {
-                    "rule_id": "required_fields_present",
-                    "description": "Packet must contain required identity and clinical fields for its packet profile.",
-                    "required_targets": required_fields,
-                },
-                {
-                    "rule_id": "identity_consistency",
-                    "description": "Identity fields must remain internally consistent across packet documents.",
-                    "required_targets": ["name", "dob"],
-                },
-                {
-                    "rule_id": "authorization_traceability",
-                    "description": "Authorization or referral traceability must exist for authorization-driven packets.",
-                    "required_targets": ["authorization_number"] if authorization_required else [],
-                },
-                {
-                    "rule_id": "signature_control",
-                    "description": "Signature-sensitive documents must show signed completion when present.",
-                    "required_targets": signature_documents,
-                },
-                {
-                    "rule_id": "secure_local_handling",
-                    "description": "Packet handling should stay within local paths and avoid raw full-SSN exposure.",
-                    "required_targets": sorted(self.COMPLIANCE_SECURE_FIELDS),
-                },
-            ],
-        }
-
-    def build_compliance_validation_checks(self, packet, regulatory_rules, decision_intelligence, secure_validation):
-        required_documents = set()
-        required_fields = set()
-        for rule in regulatory_rules["rules"]:
-            if rule["rule_id"] == "required_documents_present":
-                required_documents.update(rule["required_targets"])
-            elif rule["rule_id"] == "required_fields_present":
-                required_fields.update(rule["required_targets"])
-
-        failed_checks = []
-        checks = []
-
-        def add_check(check_id, status, detail, severity):
-            checks.append({
-                "check_id": check_id,
-                "status": status,
-                "severity": severity,
-                "detail": detail,
-            })
-            if status != "pass":
-                failed_checks.append(check_id)
-
-        missing_docs = sorted(required_documents.difference(set(packet.detected_documents)))
-        add_check(
-            "required_documents_present",
-            "pass" if not missing_docs else "fail",
-            "All required documents are present." if not missing_docs else f"Missing required documents: {', '.join(missing_docs)}.",
-            "high",
-        )
-
-        missing_fields = sorted(required_fields.difference(set(packet.fields)))
-        add_check(
-            "required_fields_present",
-            "pass" if not missing_fields else "fail",
-            "All required fields are present." if not missing_fields else f"Missing required fields: {', '.join(missing_fields)}.",
-            "high" if {"name", "dob", "authorization_number"}.intersection(missing_fields) else "medium",
-        )
-
-        identity_issues = sorted({
-            conflict.get("field")
-            for conflict in packet.conflicts
-            if conflict.get("type") == "identity_mismatch"
-        })
-        add_check(
-            "identity_consistency",
-            "pass" if not identity_issues else "fail",
-            "Identity signals are internally consistent." if not identity_issues else f"Identity conflicts were detected in: {', '.join(identity_issues)}.",
-            "high",
-        )
-
-        auth_required = any(
-            rule["rule_id"] == "authorization_traceability" and rule["required_targets"]
-            for rule in regulatory_rules["rules"]
-        )
-        auth_present = bool(packet.fields.get("authorization_number"))
-        add_check(
-            "authorization_traceability",
-            "pass" if (not auth_required or auth_present) else "fail",
-            "Authorization traceability is present." if (not auth_required or auth_present) else "Authorization traceability is missing for an authorization-driven packet.",
-            "high" if auth_required else "low",
-        )
-
-        missing_signature_docs = []
-        signature_docs = next(
-            (rule["required_targets"] for rule in regulatory_rules["rules"] if rule["rule_id"] == "signature_control"),
-            [],
-        )
-        if signature_docs and packet.fields.get("signature_present") is not True:
-            missing_signature_docs = list(signature_docs)
-        add_check(
-            "signature_control",
-            "pass" if not missing_signature_docs else "fail",
-            "Signature-sensitive documents show signed completion." if not missing_signature_docs else f"Missing signature evidence for: {', '.join(missing_signature_docs)}.",
-            "high" if "consent" in missing_signature_docs else "medium",
-        )
-
-        add_check(
-            "secure_local_handling",
-            "pass" if secure_validation["status"] == "compliant" else "fail",
-            secure_validation["summary"],
-            "high" if secure_validation["status"] == "violation" else "medium",
-        )
-
-        overall_status = "compliant" if not failed_checks else "non_compliant"
-        return {
-            "overall_status": overall_status,
-            "checks": checks,
-            "failed_checks": failed_checks,
-        }
-
-    def build_documentation_requirement_enforcement(self, packet, regulatory_rules, compliance_validation):
-        required_documents = []
-        required_fields = []
-        for rule in regulatory_rules["rules"]:
-            if rule["rule_id"] == "required_documents_present":
-                required_documents.extend(rule["required_targets"])
-            elif rule["rule_id"] == "required_fields_present":
-                required_fields.extend(rule["required_targets"])
-
-        missing_documents = sorted(set(required_documents).difference(set(packet.detected_documents)))
-        missing_fields = sorted(set(required_fields).difference(set(packet.fields)))
-        enforced = bool(required_documents or required_fields)
-
-        return {
-            "enforced": enforced,
-            "missing_documents": missing_documents,
-            "missing_fields": missing_fields,
-            "summary": (
-                "Documentation requirements are satisfied."
-                if not missing_documents and not missing_fields else
-                f"Documentation requirements are not satisfied: {', '.join(missing_documents + missing_fields)}."
-            ),
-        }
-
-    def build_secure_data_handling_validation(self, packet):
-        issues = []
-        source_paths = list(packet.files or []) + list(packet.page_sources or [])
-        local_only = True
-        for path in source_paths:
-            value = str(path or "")
-            if value.lower().startswith(("http://", "https://", "ftp://")):
-                local_only = False
-                issues.append("Packet source path points to a non-local location.")
-                break
-
-        for field_name, value in packet.fields.items():
-            if field_name.lower() in {"ssn", "social_security_number", "full_ssn"} and value:
-                issues.append(f"Field {field_name} appears to contain raw SSN content.")
-            digits = "".join(ch for ch in str(value) if ch.isdigit())
-            if len(digits) == 9 and field_name.lower() not in {"claim_number"}:
-                issues.append(f"Field {field_name} may expose a 9-digit sensitive identifier.")
-
-        if not local_only:
-            status = "violation"
-        elif issues:
-            status = "warning"
-        else:
-            status = "compliant"
-
-        return {
-            "status": status,
-            "local_storage_only": local_only,
-            "issues": self.unique_preserve_order(issues),
-            "summary": (
-                "Secure data handling checks passed."
-                if not issues and local_only else
-                "; ".join(self.unique_preserve_order(issues)) or "Secure data handling needs review."
-            ),
-        }
-
-    def build_violation_detection(self, packet, compliance_validation, documentation_enforcement, secure_validation, decision_intelligence):
-        violations = []
-
-        if documentation_enforcement["missing_documents"]:
-            violations.append({
-                "code": "missing_required_documents",
-                "severity": "high",
-                "detail": f"Missing required documents: {', '.join(documentation_enforcement['missing_documents'])}.",
-            })
-        if documentation_enforcement["missing_fields"]:
-            severity = "high" if {"name", "dob", "authorization_number"}.intersection(set(documentation_enforcement["missing_fields"])) else "medium"
-            violations.append({
-                "code": "missing_required_fields",
-                "severity": severity,
-                "detail": f"Missing required fields: {', '.join(documentation_enforcement['missing_fields'])}.",
-            })
-
-        for check in compliance_validation["checks"]:
-            if check["status"] == "fail" and check["check_id"] not in {"required_documents_present", "required_fields_present"}:
-                violations.append({
-                    "code": check["check_id"],
-                    "severity": check["severity"],
-                    "detail": check["detail"],
-                })
-
-        if secure_validation["status"] in {"warning", "violation"}:
-            violations.append({
-                "code": "secure_data_handling",
-                "severity": "high" if secure_validation["status"] == "violation" else "medium",
-                "detail": secure_validation["summary"],
-            })
-
-        for conflict in packet.conflicts:
-            if conflict.get("severity") == "high":
-                violations.append({
-                    "code": "high_severity_conflict",
-                    "severity": "high",
-                    "detail": conflict.get("message", "High-severity conflict detected."),
-                })
-
-        if decision_intelligence["denial_risk_prediction"]["level"] in {"high", "critical"} and packet.missing_documents:
-            violations.append({
-                "code": "submission_risk_control",
-                "severity": "medium",
-                "detail": "Compliance-sensitive packet is still carrying high denial risk with unresolved document gaps.",
-            })
-
-        severity_order = {"high": 0, "medium": 1, "low": 2}
-        violations = sorted(
-            self.unique_preserve_order(tuple(sorted(item.items())) for item in violations),
-            key=lambda item: (severity_order.get(dict(item)["severity"], 3), dict(item)["code"]),
-        )
-        normalized = [dict(item) for item in violations]
-        return {
-            "count": len(normalized),
-            "violations": normalized,
-            "highest_severity": normalized[0]["severity"] if normalized else None,
-        }
-
-    def build_compliance_risk_scoring(self, packet, compliance_validation, secure_validation, violation_detection, predictive_intelligence):
-        risk_score = 0.08
-        drivers = []
-
-        if compliance_validation["overall_status"] != "compliant":
-            risk_score += 0.24
-            drivers.append("Compliance validation checks failed.")
-
-        risk_score += min(0.26, 0.09 * len(packet.missing_documents))
-        if packet.missing_documents:
-            drivers.append("Missing required documents raise regulatory handling risk.")
-
-        risk_score += min(0.18, 0.06 * len(packet.missing_fields))
-        if packet.missing_fields:
-            drivers.append("Missing required fields raise regulatory handling risk.")
-
-        if secure_validation["status"] == "violation":
-            risk_score += 0.3
-            drivers.append("Secure data handling check produced a violation.")
-        elif secure_validation["status"] == "warning":
-            risk_score += 0.12
-            drivers.append("Secure data handling requires review.")
-
-        high_violations = sum(1 for item in violation_detection["violations"] if item["severity"] == "high")
-        medium_violations = sum(1 for item in violation_detection["violations"] if item["severity"] == "medium")
-        risk_score += min(0.22, 0.08 * high_violations)
-        risk_score += min(0.14, 0.04 * medium_violations)
-
-        denial_risk = predictive_intelligence["approval_outcome_prediction"]["forecast_probability"]
-        if denial_risk < 0.55:
-            risk_score += 0.08
-            drivers.append("Low approval outlook also increases compliance sensitivity.")
-
-        risk_score = round(max(0.03, min(risk_score, 0.99)), 2)
-        if risk_score >= 0.78:
-            level = "critical"
-        elif risk_score >= 0.56:
-            level = "high"
-        elif risk_score >= 0.3:
-            level = "moderate"
-        else:
-            level = "low"
-
-        return {
-            "level": level,
-            "risk_score": risk_score,
-            "drivers": self.unique_preserve_order(drivers),
-            "summary": f"Compliance risk is {level} based on missing requirements, validation failures, and secure-handling checks.",
-        }
-
-    def build_audit_trail_automation(self, packet, decision_intelligence, predictive_intelligence, optimization_intelligence, compliance_risk):
-        tracked_actions = [
-            "document_detection",
-            "field_extraction",
-            "validation",
-            "medical_reasoning",
-            "review_decision",
-            "predictive_forecasting",
-            "optimization_analysis",
-            "compliance_evaluation",
-        ]
-        return {
-            "tracked_actions": tracked_actions,
-            "artifact_generated": False,
-            "audit_scope": {
-                "packet_label": packet.output.get("packet_label"),
-                "workflow_route": decision_intelligence["workflow_decision_routing"]["queue"],
-                "predicted_turnaround_band": predictive_intelligence["turnaround_time_prediction"]["band"],
-                "queue_priority": optimization_intelligence["smart_queue_prioritization"]["priority_bucket"],
-                "compliance_risk": compliance_risk["level"],
-            },
-        }
-
-    def build_policy_change_detection(self):
-        return {
-            "active_policy_version": self.COMPLIANCE_POLICY_VERSION,
-            "policy_effective_date": self.COMPLIANCE_POLICY_EFFECTIVE_DATE,
-            "change_detected": False,
-            "detection_mode": "embedded_policy_manifest",
-            "summary": "Embedded compliance policy is active; no runtime policy change has been detected locally.",
-        }
-
-    def build_audit_report_generation(self, packet, violation_detection, compliance_risk):
-        return {
-            "report_type": "packet_compliance_report",
-            "artifact_generated": False,
-            "violation_count": violation_detection["count"],
-            "compliance_risk": compliance_risk["level"],
-            "summary": (
-                "Compliance report is ready to generate."
-                if violation_detection["count"] else
-                "Packet is compliant enough for a minimal audit report."
-            ),
-        }
-
-    def build_compliance_workflow_routing(self, packet, compliance_risk, violation_detection, secure_validation):
-        if secure_validation["status"] == "violation":
-            queue = "compliance_escalation_queue"
-            reason = secure_validation["summary"]
-        elif violation_detection["highest_severity"] == "high":
-            queue = "compliance_correction_queue"
-            reason = violation_detection["violations"][0]["detail"] if violation_detection["violations"] else "High-severity compliance issue detected."
-        elif compliance_risk["level"] in {"high", "critical"}:
-            queue = "compliance_review_queue"
-            reason = compliance_risk["summary"]
-        elif violation_detection["count"]:
-            queue = "compliance_correction_queue"
-            reason = violation_detection["violations"][0]["detail"]
-        else:
-            queue = "submission_queue"
-            reason = "No material compliance issues were detected."
-
-        return {
-            "queue": queue,
-            "requires_compliance_review": queue != "submission_queue",
-            "reason": reason,
-        }
-
-    def build_compliance_intelligence(self, packet, submission_decision, decision_intelligence, predictive_intelligence, optimization_intelligence):
-        regulatory_rules = self.build_regulatory_rule_engine(packet, decision_intelligence)
-        secure_validation = self.build_secure_data_handling_validation(packet)
-        compliance_validation = self.build_compliance_validation_checks(
-            packet,
-            regulatory_rules,
-            decision_intelligence,
-            secure_validation,
-        )
-        documentation_enforcement = self.build_documentation_requirement_enforcement(
-            packet,
-            regulatory_rules,
-            compliance_validation,
-        )
-        violation_detection = self.build_violation_detection(
-            packet,
-            compliance_validation,
-            documentation_enforcement,
-            secure_validation,
-            decision_intelligence,
-        )
-        compliance_risk = self.build_compliance_risk_scoring(
-            packet,
-            compliance_validation,
-            secure_validation,
-            violation_detection,
-            predictive_intelligence,
-        )
-        audit_trail = self.build_audit_trail_automation(
-            packet,
-            decision_intelligence,
-            predictive_intelligence,
-            optimization_intelligence,
-            compliance_risk,
-        )
-        policy_change = self.build_policy_change_detection()
-        audit_report = self.build_audit_report_generation(packet, violation_detection, compliance_risk)
-        compliance_route = self.build_compliance_workflow_routing(
-            packet,
-            compliance_risk,
-            violation_detection,
-            secure_validation,
-        )
-
-        return {
-            "regulatory_rule_engine": regulatory_rules,
-            "compliance_validation_checks": compliance_validation,
-            "audit_trail_automation": audit_trail,
-            "policy_change_detection": policy_change,
-            "compliance_risk_scoring": compliance_risk,
-            "documentation_requirement_enforcement": documentation_enforcement,
-            "secure_data_handling_validation": secure_validation,
-            "audit_report_generation": audit_report,
-            "violation_detection": violation_detection,
-            "compliance_workflow_routing": compliance_route,
-        }
-
     def infer_review_packet_type(self, packet):
-        detected = set(packet.detected_documents)
-        full_submission_docs = set(self.SUCCESS_PACKET_PROFILES["full_submission"]["required_documents"])
-        full_submission_hits = detected.intersection(full_submission_docs)
+        profile = packet_archetypes.infer_submission_profile(packet)
+        packet.packet_profile = profile
+        packet.packet_profile_label = packet_archetypes.get_submission_profile_label(profile)
+        return profile
 
-        if not detected:
-            return "clinical_minimal"
+    def has_equivalent_document(self, packet, document_type):
+        return packet_archetypes.has_equivalent_document(packet, document_type)
 
-        if "clinical_notes" in detected and len(detected) <= 2 and not ({"rfs", "consult_request"} & detected):
-            return "clinical_minimal"
-
-        if len(full_submission_hits) >= 4:
-            return "full_submission"
-
-        if {"cover_sheet", "lomn", "seoc"} & detected and len(full_submission_hits) >= 3:
-            return "full_submission"
-
-        if "rfs" in detected or "consult_request" in detected:
-            return "authorization_request"
-
-        return "full_submission"
+    def get_missing_required_documents(self, packet, required_documents):
+        missing = []
+        for document_type in sorted(set(required_documents or [])):
+            if not self.has_equivalent_document(packet, document_type):
+                missing.append(document_type)
+        return missing
 
     def map_legacy_submission_readiness(self, readiness):
         mapping = {
@@ -1966,7 +1106,7 @@ class ReviewEngine:
         detected_documents = set(packet.detected_documents)
         present_fields = set(packet.fields)
 
-        missing_profile_documents = sorted(required_documents.difference(detected_documents))
+        missing_profile_documents = self.get_missing_required_documents(packet, required_documents)
         missing_profile_fields = sorted(expected_fields.difference(present_fields))
         missing_supportive_fields = sorted(
             field for field in supportive_fields
@@ -1974,7 +1114,7 @@ class ReviewEngine:
         )
 
         document_ratio = (
-            len(required_documents.intersection(detected_documents)) / len(required_documents)
+            (len(required_documents) - len(missing_profile_documents)) / len(required_documents)
             if required_documents else 1.0
         )
         field_ratio = (
@@ -2072,527 +1212,6 @@ class ReviewEngine:
             "confidence": round(profile_confidence, 2),
             "matched_signals": self.unique_preserve_order(matched_signals),
             "gaps": self.unique_preserve_order(gaps),
-        }
-
-    def build_case_complexity_scoring(self, packet, submission_decision, procedure_fit):
-        score = 8
-        drivers = []
-        actionable_flags = [
-            flag
-            for flag in packet.review_flags
-            if flag != "manual_review_required"
-        ]
-        high_conflicts = sum(1 for conflict in packet.conflicts if conflict.get("severity") == "high")
-        medium_conflicts = sum(1 for conflict in packet.conflicts if conflict.get("severity") == "medium")
-        low_conflicts = sum(1 for conflict in packet.conflicts if conflict.get("severity") == "low")
-
-        if len(packet.detected_documents) >= 4:
-            score += 10
-            drivers.append("Multiple document types increase packet coordination complexity.")
-        elif len(packet.detected_documents) >= 2:
-            score += 5
-            drivers.append("Packet spans more than one document type.")
-
-        if len(packet.pages) >= 25:
-            score += 10
-            drivers.append("Large packet size increases review complexity.")
-        elif len(packet.pages) >= 8:
-            score += 5
-            drivers.append("Packet has enough pages to require broader page-level review.")
-
-        if packet.missing_documents:
-            score += min(24, 10 * len(packet.missing_documents))
-            drivers.append("Missing required documents create completion complexity.")
-
-        if packet.missing_fields:
-            score += min(18, 6 * len(packet.missing_fields))
-            drivers.append("Missing fields increase correction and validation effort.")
-
-        if high_conflicts:
-            score += min(28, 18 * high_conflicts)
-            drivers.append("High-severity conflicts materially increase case risk.")
-        if medium_conflicts:
-            score += min(20, 9 * medium_conflicts)
-            drivers.append("Medium-severity conflicts increase review workload.")
-        if low_conflicts:
-            score += min(8, 4 * low_conflicts)
-            drivers.append("Low-severity conflicts still add cleanup overhead.")
-
-        if actionable_flags:
-            score += min(16, 4 * len(actionable_flags))
-            drivers.append("Clinical review flags add reasoning complexity.")
-
-        if packet.duplicate_pages:
-            score += 6
-            drivers.append("Duplicate-page cleanup increases packet handling effort.")
-
-        if "chronology_review_needed" in packet.review_flags:
-            score += 8
-            drivers.append("Chronology issues add timeline validation work.")
-
-        if procedure_fit["status"] == "weak":
-            score += 14
-            drivers.append("Weak procedure support makes the packet clinically complex.")
-        elif procedure_fit["status"] == "moderate":
-            score += 6
-            drivers.append("Moderate procedure support still requires more reviewer judgment.")
-
-        if packet.packet_confidence is not None and packet.packet_confidence < 0.75:
-            score += 8
-            drivers.append("Lower packet confidence increases verification burden.")
-
-        if submission_decision["readiness"] == "hold":
-            score += 10
-            drivers.append("Hold status indicates operationally complex correction work.")
-        elif submission_decision["readiness"] == "requires_review":
-            score += 4
-            drivers.append("Reviewer routing adds operational complexity.")
-
-        score = max(5, min(score, 100))
-        if score >= 76:
-            level = "critical"
-        elif score >= 56:
-            level = "high"
-        elif score >= 31:
-            level = "moderate"
-        else:
-            level = "low"
-
-        return {
-            "score": score,
-            "level": level,
-            "drivers": self.unique_preserve_order(drivers),
-            "summary": {
-                "critical": "Packet is operationally complex and likely to demand senior or multi-step handling.",
-                "high": "Packet carries high coordination and review complexity.",
-                "moderate": "Packet has moderate complexity with manageable but real review burden.",
-                "low": "Packet complexity is low and should move predictably through routine handling.",
-            }[level],
-        }
-
-    def build_approval_outcome_prediction(self, packet, submission_decision, denial_risk, success_pattern, case_complexity):
-        modeling = dict((packet.metrics or {}).get("statistical_outcome_modeling", {}) or {})
-        forecast_probability = packet.approval_probability if packet.approval_probability is not None else 0.5
-        forecast_probability += (success_pattern.get("match_score", 0.5) - 0.5) * 0.14
-        forecast_probability += ((packet.packet_confidence or 0.8) - 0.7) * 0.2
-        forecast_probability -= max(0.0, denial_risk.get("risk_score", 0.5) - 0.35) * 0.22
-        forecast_probability -= (case_complexity.get("score", 40) / 100.0) * 0.08
-
-        if submission_decision["readiness"] == "hold":
-            forecast_probability -= 0.15
-        elif submission_decision["readiness"] == "requires_review":
-            forecast_probability -= 0.06
-
-        if packet.missing_documents:
-            forecast_probability -= min(0.18, 0.08 * len(packet.missing_documents))
-        if any(conflict.get("severity") == "high" for conflict in packet.conflicts):
-            forecast_probability = min(forecast_probability, 0.38)
-
-        forecast_probability = round(max(0.02, min(forecast_probability, 0.99)), 2)
-        if forecast_probability >= 0.9:
-            level = "very_likely"
-        elif forecast_probability >= 0.75:
-            level = "likely"
-        elif forecast_probability >= 0.55:
-            level = "possible"
-        elif forecast_probability >= 0.35:
-            level = "unlikely"
-        else:
-            level = "very_unlikely"
-
-        confidence = 0.52 + (success_pattern.get("confidence", 0.6) * 0.28) + ((packet.packet_confidence or 0.8) * 0.14)
-        confidence = round(max(0.25, min(confidence, 0.97)), 2)
-
-        drivers = []
-        if success_pattern.get("similarity") in {"strong", "moderate"}:
-            drivers.append("Packet shape remains aligned with known successful submission patterns.")
-        if packet.packet_confidence is not None and packet.packet_confidence >= 0.82:
-            drivers.append("Packet confidence is strong enough to support a cleaner forecast.")
-        if denial_risk.get("level") in {"high", "critical"}:
-            drivers.append("Denial risk remains a strong negative approval driver.")
-        if packet.missing_documents:
-            drivers.append("Missing required documents still materially suppress approval likelihood.")
-        if case_complexity.get("level") in {"high", "critical"}:
-            drivers.append("Higher case complexity lowers forecast certainty.")
-        if modeling.get("available") and modeling.get("reliability_band") in {"moderate", "high"}:
-            calibrated_probability = modeling.get("calibrated_probability")
-            if calibrated_probability is not None and calibrated_probability >= 0.7:
-                drivers.append("Historical outcome modeling supports approval likelihood for similar packets.")
-            elif calibrated_probability is not None and calibrated_probability <= 0.4:
-                drivers.append("Historical outcome modeling still sees lower approval odds for similar packets.")
-
-        return {
-            "level": level,
-            "forecast_probability": forecast_probability,
-            "confidence": confidence,
-            "drivers": self.unique_preserve_order(drivers),
-            "summary": f"Forecasted approval likelihood is {level.replace('_', ' ')} based on readiness, denial risk, packet confidence, and successful-pattern similarity.",
-            "statistical_modeling": {
-                "available": bool(modeling.get("available")),
-                "heuristic_probability": modeling.get("heuristic_probability"),
-                "calibrated_probability": modeling.get("calibrated_probability"),
-                "final_probability": modeling.get("final_probability"),
-                "blend_weight": modeling.get("blend_weight"),
-                "reliability_band": modeling.get("reliability_band"),
-                "reliability_score": modeling.get("reliability_score"),
-                "sample_size": modeling.get("sample_size"),
-                "brier_score": modeling.get("brier_score"),
-                "roc_auc": modeling.get("roc_auc"),
-                "ece": modeling.get("ece"),
-            },
-        }
-
-    def build_turnaround_time_prediction(self, packet, submission_decision, workflow_route, denial_risk, case_complexity, bottleneck_detection):
-        queue = workflow_route.get("queue", "review_queue")
-        prep_hours = self.TURNAROUND_QUEUE_HOURS.get(queue, 24)
-        prep_hours += len(packet.missing_documents) * 14
-        prep_hours += len(packet.missing_fields) * 5
-        prep_hours += sum(18 for conflict in packet.conflicts if conflict.get("severity") == "high")
-        prep_hours += sum(9 for conflict in packet.conflicts if conflict.get("severity") == "medium")
-        prep_hours += 10 if any(stage.get("severity") == "high" for stage in bottleneck_detection.get("stages", [])) else 0
-        prep_hours += 8 if denial_risk.get("level") in {"high", "critical"} else 0
-        prep_hours += round(case_complexity.get("score", 40) * 0.32)
-
-        if submission_decision["readiness"] == "ready":
-            prep_hours = max(4, prep_hours - 10)
-
-        final_hours = prep_hours + self.FINAL_DECISION_BUFFER_HOURS.get(queue, 48)
-        final_hours = max(final_hours, prep_hours + 12)
-
-        if final_hours <= 24:
-            band = "same_day"
-        elif final_hours <= 72:
-            band = "one_to_three_days"
-        elif final_hours <= 168:
-            band = "three_to_seven_days"
-        else:
-            band = "over_one_week"
-
-        return {
-            "queue": queue,
-            "estimated_submission_ready_hours": int(prep_hours),
-            "estimated_final_decision_hours": int(final_hours),
-            "band": band,
-            "summary": {
-                "same_day": "Packet should be operationally ready within the same business day.",
-                "one_to_three_days": "Packet is likely to clear review and operational handling within one to three days.",
-                "three_to_seven_days": "Packet will likely require a multi-day correction or review cycle.",
-                "over_one_week": "Packet is likely to need extended handling before a final submission outcome.",
-            }[band],
-        }
-
-    def build_bottleneck_detection(self, packet, submission_decision, workflow_route, procedure_fit, missing_evidence):
-        stages = []
-
-        if packet.missing_documents:
-            stages.append({
-                "stage": "document_collection",
-                "severity": "high",
-                "reason": f"Missing required documents: {', '.join(sorted(packet.missing_documents))}.",
-            })
-
-        if packet.missing_fields:
-            stages.append({
-                "stage": "field_completion",
-                "severity": "medium" if not packet.missing_documents else "high",
-                "reason": f"Missing required fields: {', '.join(packet.missing_fields)}.",
-            })
-
-        if packet.conflicts:
-            highest = "low"
-            if any(conflict.get("severity") == "high" for conflict in packet.conflicts):
-                highest = "high"
-            elif any(conflict.get("severity") == "medium" for conflict in packet.conflicts):
-                highest = "medium"
-            stages.append({
-                "stage": "conflict_resolution",
-                "severity": highest,
-                "reason": "Cross-document conflicts are slowing packet clearance.",
-            })
-
-        if procedure_fit["status"] in {"moderate", "weak"}:
-            stages.append({
-                "stage": "clinical_support",
-                "severity": "high" if procedure_fit["status"] == "weak" else "medium",
-                "reason": procedure_fit["summary"],
-            })
-
-        if workflow_route.get("queue") == "senior_review_queue":
-            stages.append({
-                "stage": "senior_review",
-                "severity": "high",
-                "reason": "Senior review routing adds escalation latency.",
-            })
-        elif submission_decision["readiness"] == "requires_review":
-            stages.append({
-                "stage": "review_queue",
-                "severity": "medium",
-                "reason": "Reviewer confirmation is required before submission can proceed.",
-            })
-
-        if not stages and missing_evidence:
-            stages.append({
-                "stage": "submission_clearance",
-                "severity": "low",
-                "reason": missing_evidence[0].get("why", "Packet needs minor evidence cleanup before routine submission."),
-            })
-
-        severity_order = {"high": 0, "medium": 1, "low": 2}
-        ordered = sorted(stages, key=lambda item: (severity_order.get(item["severity"], 3), item["stage"]))
-        primary_stage = ordered[0]["stage"] if ordered else "clear"
-
-        return {
-            "primary_stage": primary_stage,
-            "stages": ordered,
-            "summary": ordered[0]["reason"] if ordered else "No material operational bottleneck is currently predicted.",
-        }
-
-    def build_provider_performance_prediction(self, packet, case_complexity):
-        provider_values = []
-        for key in ("provider", "ordering_provider", "referring_provider"):
-            value = packet.fields.get(key)
-            if value and value not in provider_values:
-                provider_values.append(value)
-
-        provider_conflicts = [
-            conflict for conflict in packet.conflicts
-            if conflict.get("field") in {"provider", "ordering_provider", "referring_provider"}
-        ]
-
-        provider_score = 0.25 if not provider_values else 0.58
-        if provider_values:
-            provider_score += min(0.14, 0.07 * len(provider_values))
-        if packet.fields.get("signature_present") is True:
-            provider_score += 0.14
-        if packet.field_confidence.get("provider", 0) >= 0.9 or packet.field_confidence.get("ordering_provider", 0) >= 0.9:
-            provider_score += 0.08
-        if provider_conflicts:
-            provider_score -= 0.28
-        if any(doc in packet.detected_documents for doc in {"cover_sheet", "consult_request", "lomn"}) and not provider_values:
-            provider_score -= 0.12
-        if case_complexity.get("level") in {"high", "critical"} and provider_conflicts:
-            provider_score -= 0.08
-
-        provider_score = round(max(0.05, min(provider_score, 0.97)), 2)
-        if provider_score >= 0.82:
-            level = "reliable"
-        elif provider_score >= 0.62:
-            level = "generally_reliable"
-        elif provider_score >= 0.4:
-            level = "variable"
-        else:
-            level = "at_risk"
-
-        drivers = []
-        if provider_values:
-            drivers.append("Provider identity is present in the packet.")
-        if packet.fields.get("signature_present") is True:
-            drivers.append("Signature evidence strengthens provider reliability.")
-        if provider_conflicts:
-            drivers.append("Provider-role conflicts reduce confidence in provider reliability.")
-        if not provider_values:
-            drivers.append("Provider identity is sparse or missing.")
-
-        return {
-            "provider": provider_values[0] if provider_values else None,
-            "level": level,
-            "score": provider_score,
-            "drivers": self.unique_preserve_order(drivers),
-            "summary": {
-                "reliable": "Provider documentation looks consistently reliable in the current packet.",
-                "generally_reliable": "Provider documentation is mostly reliable with minor review sensitivity.",
-                "variable": "Provider documentation quality is variable and may need targeted cleanup.",
-                "at_risk": "Provider documentation quality is at risk and could slow or weaken submission handling.",
-            }[level],
-        }
-
-    def build_denial_reason_forecasting(self, packet, denial_risk, procedure_fit, missing_evidence):
-        reasons = []
-
-        def add_reason(code, likelihood, summary):
-            reasons.append({
-                "code": code,
-                "likelihood": round(likelihood, 2),
-                "summary": summary,
-            })
-
-        if packet.missing_documents:
-            add_reason("missing_required_documents", 0.9, f"Missing required documents: {', '.join(sorted(packet.missing_documents))}.")
-        if packet.missing_fields:
-            add_reason("missing_required_fields", min(0.82, 0.52 + (0.08 * len(packet.missing_fields))), "Required fields are still missing or incomplete.")
-        if any(conflict.get("severity") == "high" for conflict in packet.conflicts):
-            add_reason("high_severity_conflicts", 0.88, "High-severity cross-document conflicts can trigger denial or hold decisions.")
-        elif any(conflict.get("severity") == "medium" for conflict in packet.conflicts):
-            add_reason("cross_document_conflicts", 0.64, "Medium-severity conflicts can trigger reviewer rejection or delay.")
-        if procedure_fit["status"] == "weak":
-            add_reason("weak_procedure_support", 0.78, "Requested procedure lacks strong clinical support.")
-        elif procedure_fit["status"] == "moderate":
-            add_reason("moderate_procedure_support", 0.46, "Procedure support is only moderate and may still draw scrutiny.")
-        if "diagnosis_icd_mismatch" in packet.review_flags or "partial_diagnosis_icd_alignment" in packet.review_flags:
-            add_reason("diagnosis_icd_alignment", 0.55, "Diagnosis and ICD alignment may be viewed as incomplete.")
-        if "chronology_review_needed" in packet.review_flags:
-            add_reason("chronology_issue", 0.58, "Timeline inconsistency can trigger operational rejection or hold.")
-        if "packet_integrity_risk" in packet.review_flags:
-            add_reason("identity_integrity_risk", 0.95, "Mixed identity or case signals represent a major denial risk.")
-        if not reasons and denial_risk.get("level") in {"high", "critical"}:
-            add_reason("general_packet_risk", denial_risk.get("risk_score", 0.65), "Overall packet risk remains elevated even without one dominant failure mode.")
-        if not reasons and missing_evidence:
-            add_reason("supporting_evidence_gap", 0.38, missing_evidence[0].get("why", "Supportive evidence remains incomplete."))
-
-        reasons = sorted(reasons, key=lambda item: (-item["likelihood"], item["code"]))
-        return {
-            "primary_reason": reasons[0]["code"] if reasons else None,
-            "reasons": reasons[:6],
-            "summary": reasons[0]["summary"] if reasons else "No strong denial cause is currently forecasted beyond routine packet variance.",
-        }
-
-    def build_volume_trend_prediction(self, packet, packet_type, workflow_route, case_complexity):
-        trend_score = self.VOLUME_PROXY_BASELINES.get(packet_type, 0.85)
-        queue = workflow_route.get("queue")
-
-        if queue == "review_queue":
-            trend_score += 0.08
-        elif queue == "correction_queue":
-            trend_score += 0.12
-        elif queue == "senior_review_queue":
-            trend_score += 0.1
-        else:
-            trend_score -= 0.04
-
-        trend_score += {
-            "low": -0.05,
-            "moderate": 0.03,
-            "high": 0.09,
-            "critical": 0.14,
-        }.get(case_complexity.get("level"), 0.0)
-
-        trend_score = round(max(0.45, min(trend_score, 1.35)), 2)
-        if trend_score >= 1.15:
-            band = "high"
-            direction = "rising"
-        elif trend_score >= 0.95:
-            band = "elevated"
-            direction = "rising"
-        elif trend_score >= 0.72:
-            band = "steady"
-            direction = "stable"
-        else:
-            band = "light"
-            direction = "stable"
-
-        return {
-            "band": band,
-            "direction": direction,
-            "trend_score": trend_score,
-            "basis": "deterministic_packet_mix_proxy_v1",
-            "summary": "Volume forecast uses the current packet mix, routing pressure, and case complexity as a local operational proxy.",
-        }
-
-    def build_staffing_demand_forecasting(self, packet, workflow_route, case_complexity, volume_trend):
-        per_packet_minutes = 12 + round(case_complexity.get("score", 40) * 0.8)
-        queue = workflow_route.get("queue")
-        if queue == "review_queue":
-            per_packet_minutes += 12
-        elif queue == "correction_queue":
-            per_packet_minutes += 22
-        elif queue == "senior_review_queue":
-            per_packet_minutes += 32
-
-        demand_score = (per_packet_minutes / 60.0) + {
-            "light": 0.2,
-            "steady": 0.45,
-            "elevated": 0.7,
-            "high": 0.95,
-        }.get(volume_trend.get("band"), 0.45)
-
-        if demand_score >= 2.1:
-            level = "high"
-        elif demand_score >= 1.35:
-            level = "elevated"
-        elif demand_score >= 0.8:
-            level = "standard"
-        else:
-            level = "light"
-
-        return {
-            "level": level,
-            "estimated_staff_minutes_per_packet": per_packet_minutes,
-            "recommended_staffing_signal": {
-                "high": "Allocate senior review or correction bandwidth before intake volume stacks further.",
-                "elevated": "Plan for elevated reviewer load and tighter queue monitoring.",
-                "standard": "Current staffing demand looks normal for this packet profile.",
-                "light": "This packet should not materially strain routine staffing.",
-            }[level],
-            "summary": f"Staffing demand is {level} based on queue routing, packet complexity, and the current volume proxy.",
-        }
-
-    def build_submission_timing_optimization(self, packet, submission_decision, workflow_route, turnaround_prediction, case_complexity):
-        readiness = submission_decision["readiness"]
-        queue = workflow_route.get("queue")
-
-        if readiness == "ready" and queue == "submission_queue" and case_complexity.get("level") in {"low", "moderate"}:
-            action = "submit_now"
-            recommended_window = "same_business_day"
-            reason = "Packet is ready and does not carry complexity high enough to justify holding for a later window."
-        elif readiness == "ready":
-            action = "submit_next_business_morning"
-            recommended_window = "next_business_morning"
-            reason = "Packet is ready, but a controlled next-morning submission gives staff time to absorb any last-minute issues."
-        elif readiness == "requires_review":
-            action = "submit_after_review_clearance"
-            recommended_window = "after_review"
-            reason = "Reviewer confirmation should happen before submission timing is committed."
-        else:
-            action = "wait_for_correction_completion"
-            recommended_window = "after_corrections"
-            reason = "Correction work should finish before submission is attempted."
-
-        return {
-            "action": action,
-            "recommended_window": recommended_window,
-            "estimated_wait_hours": turnaround_prediction.get("estimated_submission_ready_hours"),
-            "reason": reason,
-        }
-
-    def build_predictive_escalation(self, packet, submission_decision, denial_risk, escalation, case_complexity, bottleneck_detection, provider_performance):
-        reasons = []
-        provider_sensitive_docs = {"consult_request", "cover_sheet", "lomn", "rfs", "seoc"}
-        provider_conflicts = any(
-            conflict.get("field") in {"provider", "ordering_provider", "referring_provider"}
-            and conflict.get("severity") in {"medium", "high"}
-            for conflict in packet.conflicts
-        )
-
-        if escalation.get("escalate"):
-            reasons.extend(escalation.get("reasons", []))
-        else:
-            if denial_risk.get("level") in {"high", "critical"}:
-                reasons.append("Predicted denial risk is already high enough to justify earlier escalation.")
-            if case_complexity.get("level") == "critical":
-                reasons.append("Critical case complexity suggests routine routing may under-handle future problems.")
-            if bottleneck_detection.get("primary_stage") in {"conflict_resolution", "senior_review"} and any(
-                stage.get("severity") == "high" for stage in bottleneck_detection.get("stages", [])
-            ):
-                reasons.append("Current bottlenecks point toward likely escalation before submission is cleared.")
-            if (
-                provider_performance.get("level") == "at_risk"
-                and (
-                    provider_conflicts
-                    or bool(provider_sensitive_docs.intersection(set(packet.detected_documents)))
-                )
-            ):
-                reasons.append("Provider documentation reliability is poor enough to justify earlier intervention.")
-
-        escalate = bool(reasons)
-        return {
-            "escalate": escalate,
-            "predicted_queue": "senior_review_queue" if escalate else submission_decision.get("workflow_route"),
-            "reasons": self.unique_preserve_order(reasons),
-            "summary": (
-                "Packet should be escalated before routine handling fully fails."
-                if escalate else
-                "No predictive escalation is currently needed beyond the active workflow route."
-            ),
         }
 
     def estimate_success_pattern_confidence(self, packet, packet_type):
@@ -2703,7 +1322,7 @@ class ReviewEngine:
             recommendations.append({
                 "type": "document",
                 "target": doc,
-                "priority": "high" if doc in {"clinical_notes", "lomn", "rfs", "consent"} else "medium",
+                "priority": "high" if doc in {"clinical_notes", "lomn", "rfs", "approved_referral", "consent"} else "medium",
                 "recommendation": f"Attach the missing {doc} document.",
                 "why": f"{doc} is missing from the current packet and weakens submission readiness.",
             })
@@ -2850,6 +1469,7 @@ class ReviewEngine:
         priorities = {
             "cover_sheet": 10,
             "rfs": 20,
+            "approved_referral": 25,
             "consult_request": 30,
             "seoc": 40,
             "lomn": 50,

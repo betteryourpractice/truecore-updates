@@ -49,6 +49,7 @@ release/*.zip
 # ===============================
 
 TrueCore/dev_system/*.json
+TrueCore/dev_system/release_signing_private.pem
 
 # ===============================
 # OS junk

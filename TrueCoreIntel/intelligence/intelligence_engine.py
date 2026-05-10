@@ -1,14 +1,31 @@
 import re
 
+from TrueCoreIntel.core import packet_archetypes
+from TrueCoreIntel.core import packet_failure_modes
+from TrueCoreIntel.core import packet_robustness
 from TrueCoreIntel.intelligence.clinical_intelligence import ClinicalIntelligenceAnalyzer
 from TrueCoreIntel.intelligence.evidence_intelligence import EvidenceIntelligenceAnalyzer
 
 
 class IntelligenceEngine:
 
+    AUTHORIZATION_DOCUMENT_TYPES = packet_archetypes.AUTHORIZATION_DOCUMENT_TYPES
     HIGH_IMPACT_FIELDS = {"name", "dob", "authorization_number"}
     MEDIUM_IMPACT_FIELDS = {"icd_codes", "reason_for_request", "ordering_provider", "referring_provider"}
-
+    ASSEMBLY_ADMIN_FIELDS = {
+        "name",
+        "dob",
+        "authorization_number",
+        "va_icn",
+        "claim_number",
+        "ordering_provider",
+        "referring_provider",
+        "provider",
+        "facility",
+        "clinic_name",
+        "location",
+        "service_date_range",
+    }
     MRI_SUPPORT_TERMS = {
         "symptoms_strong": {"numbness", "weakness", "tingling"},
         "symptoms_moderate": {"pain", "limited_range_of_motion"},
@@ -32,12 +49,19 @@ class IntelligenceEngine:
     def evaluate(self, packet):
         packet.evidence_intelligence = {}
         packet.clinical_intelligence = {}
+        packet_archetypes.annotate_packet_context(packet)
+        packet_robustness.annotate_packet_robustness(packet)
+        packet_failure_modes.annotate_packet_failure_modes(packet)
         self.link_medical_evidence(packet)
         self.evaluate_medical_necessity(packet)
         self.evaluate_packet_integrity(packet)
         packet = self.evidence_intelligence_analyzer.analyze(packet)
         packet = self.clinical_intelligence_analyzer.analyze(packet)
 
+        packet.packet_evidence_score = self.calculate_evidence_strength_score(packet)
+        packet.packet_evidence_band = self.classify_support_band(packet.packet_evidence_score)
+        packet.packet_assembly_score = self.calculate_packet_assembly_score(packet)
+        packet.packet_assembly_band = self.classify_assembly_band(packet.packet_assembly_score)
         packet.packet_score = self.calculate_score(packet)
         packet.packet_confidence = self.calculate_packet_confidence(packet)
         packet.packet_strength = self.classify_strength(packet)
@@ -256,67 +280,148 @@ class IntelligenceEngine:
 
         return "weak"
 
-    def calculate_score(self, packet):
-        score = 100
+    def infer_packet_profile(self, packet):
+        profile = packet_archetypes.infer_submission_profile(packet)
+        packet.packet_profile = profile
+        packet.packet_profile_label = packet_archetypes.get_submission_profile_label(profile)
+        return profile
 
-        for field in packet.missing_fields:
-            if field in self.HIGH_IMPACT_FIELDS:
-                score -= 20
-            elif field in self.MEDIUM_IMPACT_FIELDS:
-                score -= 12
-            else:
-                score -= 8
+    def has_equivalent_document(self, packet, document_type):
+        return packet_archetypes.has_equivalent_document(packet, document_type)
 
-        missing_doc_count = len(packet.missing_documents)
-        if missing_doc_count > 0:
-            # Diminishing penalty - first docs matter most, not linear destruction
-            score -= min(18, missing_doc_count * 4)
+    def get_profile_requirements(self, packet):
+        profile = self.infer_packet_profile(packet)
+        requirements = packet_archetypes.get_submission_profile_requirements(profile)
+        return (
+            profile,
+            set(requirements.get("required_documents", set()) or set()),
+            set(requirements.get("expected_fields", set()) or set()),
+        )
 
-        if "icd_codes" in packet.fields:
-            score += 6
-        if "diagnosis" in packet.fields:
-            score += 8
-        if "reason_for_request" in packet.fields:
-            score += 5
-        if "npi" in packet.fields:
-            score += 2
-        if "service_date_range" in packet.fields:
-            score += 2
+    def calculate_evidence_strength_score(self, packet):
+        evidence_model = dict(getattr(packet, "evidence_intelligence", {}) or {}).get("evidence_sufficiency_modeling", {}) or {}
+        score = evidence_model.get("score")
+        try:
+            evidence_score = float(score)
+        except Exception:
+            evidence_score = None
 
-        for conflict in packet.conflicts:
-            severity = conflict.get("severity", "low")
+        if evidence_score is None:
+            evidence_score = 28.0
+            if "clinical_notes" in packet.detected_documents:
+                evidence_score += 18
+            if "diagnosis" in packet.fields:
+                evidence_score += 16
+            if "icd_codes" in packet.fields:
+                evidence_score += 14
+            if "reason_for_request" in packet.fields:
+                evidence_score += 10
+            if "procedure" in packet.fields:
+                evidence_score += 7
+            if "authorization_number" in packet.fields or "va_icn" in packet.fields:
+                evidence_score += 6
 
-            if severity == "high":
-                score -= 22
-            elif severity == "medium":
-                score -= 12
-            else:
-                score -= 6
-
-        for flag in set(packet.review_flags):
-            if flag == "procedure_without_medical_support":
-                score -= 15
-            elif flag == "weak_mri_justification":
-                score -= 12
+        for flag in set(packet.review_flags or []):
+            if flag == "weak_mri_justification":
+                evidence_score -= 10
             elif flag == "moderate_mri_justification":
-                score -= 5
+                evidence_score -= 4
             elif flag in {
                 "diagnosis_without_icd_support",
                 "icd_without_diagnosis_support",
                 "missing_reason_for_request",
                 "diagnosis_icd_mismatch",
+                "partial_diagnosis_icd_alignment",
             }:
-                score -= 10
-            elif flag == "packet_integrity_risk":
-                score -= 15
-            elif flag == "chronology_review_needed":
-                score -= 6
-            elif flag == "duplicate_pages_present":
-                score -= 3
+                evidence_score -= 6
+            elif flag == "procedure_without_medical_support":
+                evidence_score -= 12
+
+        clinical_conflicts = sum(
+            1 for conflict in packet.conflicts
+            if conflict.get("field") in {"diagnosis", "icd_codes", "reason_for_request", "procedure", "symptom"}
+        )
+        if clinical_conflicts:
+            evidence_score -= min(14, clinical_conflicts * 3)
+
+        return round(max(0.0, min(evidence_score, 100.0)), 2)
+
+    def calculate_packet_assembly_score(self, packet):
+        _profile, required_documents, expected_fields = self.get_profile_requirements(packet)
+
+        required_document_count = len(required_documents)
+        present_required_documents = sum(
+            1 for document_type in required_documents
+            if self.has_equivalent_document(packet, document_type)
+        )
+        document_ratio = (
+            present_required_documents / required_document_count
+            if required_document_count else 1.0
+        )
+        document_score = 100.0 * (document_ratio ** 1.85)
+
+        expected_field_count = len(expected_fields)
+        present_expected_fields = sum(1 for field_name in expected_fields if packet.fields.get(field_name) not in (None, "", []))
+        field_ratio = (
+            present_expected_fields / expected_field_count
+            if expected_field_count else 1.0
+        )
+        field_score = 100.0 * (field_ratio ** 1.25)
+
+        cleanliness_score = 100.0
+        admin_conflicts = 0
+        for conflict in packet.conflicts:
+            field_name = conflict.get("field")
+            if field_name not in self.ASSEMBLY_ADMIN_FIELDS:
+                continue
+            admin_conflicts += 1
+            severity = conflict.get("severity", "low")
+            if severity == "high":
+                cleanliness_score -= 16
+            elif severity == "medium":
+                cleanliness_score -= 8
+            else:
+                cleanliness_score -= 4
+
+        if packet.missing_fields:
+            for field in packet.missing_fields:
+                if field in self.HIGH_IMPACT_FIELDS:
+                    cleanliness_score -= 10
+                elif field in self.MEDIUM_IMPACT_FIELDS:
+                    cleanliness_score -= 6
+                else:
+                    cleanliness_score -= 4
+
+        if getattr(packet, "unfilled_documents", set()):
+            cleanliness_score -= min(18, len(packet.unfilled_documents) * 9)
+
+        if "packet_integrity_risk" in set(packet.review_flags or []):
+            cleanliness_score -= 16
+
+        if "duplicate_pages_present" in set(packet.review_flags or []):
+            cleanliness_score -= 6
+
+        if "chronology_review_needed" in set(packet.review_flags or []):
+            cleanliness_score -= 4
+
+        cleanliness_score = max(0.0, min(cleanliness_score, 100.0))
+
+        assembly_score = (document_score * 0.72) + (field_score * 0.18) + (cleanliness_score * 0.10)
+        missing_doc_count = len(packet.missing_documents or [])
+        if missing_doc_count:
+            assembly_score -= min(18, 6 + max(0, missing_doc_count - 1) * 4)
+
+        return round(max(0.0, min(assembly_score, 100.0)), 2)
+
+    def calculate_score(self, packet):
+        evidence_score = float(getattr(packet, "packet_evidence_score", 0.0) or 0.0)
+        assembly_score = float(getattr(packet, "packet_assembly_score", 0.0) or 0.0)
+
+        score = (evidence_score * 0.35) + (assembly_score * 0.65)
 
         if packet.field_confidence:
             avg_conf = sum(packet.field_confidence.values()) / len(packet.field_confidence)
-            score *= avg_conf
+            score *= 0.9 + (0.1 * avg_conf)
 
         score = self.apply_score_caps(packet, score)
         return max(min(round(score, 2), 100), 0)
@@ -350,9 +455,32 @@ class IntelligenceEngine:
         if packet.missing_fields or packet.missing_documents:
             confidence -= 0.05
 
+        invariant_score = float(getattr(packet, "packet_invariant_coverage_score", 0.0) or 0.0) / 100.0
+        variability_level = str(getattr(packet, "packet_format_variability", "")).strip().lower()
+        if invariant_score >= 0.85:
+            confidence += 0.03
+        elif invariant_score < 0.55:
+            confidence -= 0.07
+
+        if variability_level == "high" and invariant_score < 0.75:
+            confidence -= 0.04
+        elif variability_level == "low" and invariant_score >= 0.8:
+            confidence += 0.02
+
+        confidence -= float(getattr(packet, "packet_confidence_penalty", 0.0) or 0.0)
+
         return round(max(min(confidence, 1.0), 0.0), 2)
 
     def apply_score_caps(self, packet, score):
+        assembly_score = float(getattr(packet, "packet_assembly_score", 0.0) or 0.0)
+
+        if assembly_score < 45:
+            score = min(score, 58)
+        elif assembly_score < 60:
+            score = min(score, 68)
+        elif assembly_score < 75:
+            score = min(score, 79)
+
         if packet.missing_fields:
             if any(field in self.HIGH_IMPACT_FIELDS for field in packet.missing_fields):
                 score = min(score, 62)
@@ -383,21 +511,45 @@ class IntelligenceEngine:
 
         return score
 
-    def classify_strength(self, packet):
-        score = packet.packet_score
-        has_high_conflict = any(conflict.get("severity") == "high" for conflict in packet.conflicts)
-
-        if has_high_conflict and score < 80:
-            return "weak"
-
-        if score >= 80:
+    def classify_support_band(self, score):
+        score = float(score or 0.0)
+        if score >= 90:
+            return "very_strong"
+        if score >= 75:
             return "strong"
         if score >= 55:
             return "moderate"
         return "weak"
 
+    def classify_assembly_band(self, score):
+        score = float(score or 0.0)
+        if score >= 85:
+            return "strong"
+        if score >= 65:
+            return "moderate"
+        return "weak"
+
+    def classify_strength(self, packet):
+        score = packet.packet_score
+        has_high_conflict = any(conflict.get("severity") == "high" for conflict in packet.conflicts)
+        assembly_score = float(getattr(packet, "packet_assembly_score", 0.0) or 0.0)
+
+        if has_high_conflict and score < 80:
+            return "weak"
+
+        if assembly_score < 60:
+            return "weak"
+
+        if score >= 80 and assembly_score >= 75:
+            return "strong"
+        if score >= 58:
+            return "moderate"
+        return "weak"
+
     def estimate_approval(self, packet):
-        probability = packet.packet_score / 100
+        overall_score = float(packet.packet_score or 0.0) / 100.0
+        assembly_score = float(getattr(packet, "packet_assembly_score", 0.0) or 0.0) / 100.0
+        probability = (overall_score * 0.55) + (assembly_score * 0.45)
 
         if packet.missing_fields:
             if any(field in self.HIGH_IMPACT_FIELDS for field in packet.missing_fields):
@@ -408,7 +560,14 @@ class IntelligenceEngine:
                 probability -= 0.07
 
         if packet.missing_documents:
-            probability -= min(0.24, 0.10 * len(packet.missing_documents))
+            missing_document_count = len(packet.missing_documents)
+            probability -= min(0.30, 0.12 * missing_document_count)
+            if missing_document_count == 1:
+                probability = min(probability, 0.48)
+            elif missing_document_count == 2:
+                probability = min(probability, 0.38)
+            else:
+                probability = min(probability, 0.28)
 
         if any(conflict.get("severity") == "high" for conflict in packet.conflicts):
             probability -= 0.15
@@ -422,5 +581,10 @@ class IntelligenceEngine:
             probability -= 0.08
         elif "moderate_mri_justification" in packet.review_flags:
             probability -= 0.03
+
+        if assembly_score < 0.60:
+            probability = min(probability, 0.44)
+        elif assembly_score < 0.75:
+            probability = min(probability, 0.62)
 
         return round(max(min(probability, 1.0), 0.0), 2)

@@ -5,6 +5,7 @@ from TrueCore.core.insight_intelligence import build_insight_intelligence
 from TrueCore.core.learning_intelligence import build_learning_intelligence
 from TrueCore.core.operator_support import build_operator_support
 from TrueCore.core.benchmark_intelligence import build_benchmark_intelligence
+from TrueCore.core.office_rollout import record_packet_analyzed, record_real_outcome
 from TrueCore.core.triage_intelligence import build_triage_intelligence
 from TrueCore.utils.logging_system import log_event
 
@@ -46,9 +47,13 @@ def build_host_display(
     outcomes = dict(learning.get("outcome_feedback_ingestion", {}) or {})
     calibration = dict(learning.get("confidence_calibration_engine", {}) or {})
     overrides = dict(learning.get("reviewer_override_learning", {}) or {})
+    predictive = dict(learning.get("predictive_outcome_modeling", {}) or {})
+    outcome_health = dict(learning.get("outcome_learning_health", {}) or {})
+    provider_outcomes = dict(learning.get("provider_outcome_learning", {}) or {})
     refinement = dict(learning.get("continuous_intelligence_refinement", {}) or {})
     workflow = dict(learning.get("workflow_learning_loop", {}) or {})
     adjustments = dict(learning.get("rule_adjustment_recommendation", {}) or {})
+    watchpoints = dict(learning.get("prediction_watchpoints", {}) or {})
     hidden_trend = dict(insight.get("hidden_trend_detection", {}) or {})
     high_yield = dict(insight.get("high_yield_improvement_discovery", {}) or {})
     provider_network = dict(insight.get("provider_network_insight_engine", {}) or {})
@@ -87,6 +92,16 @@ def build_host_display(
         "calibration_delta": calibration.get("delta"),
         "override_status": overrides.get("status"),
         "override_rate": overrides.get("override_rate"),
+        "learned_approval_probability": predictive.get("learned_approval_probability"),
+        "prediction_blended_probability": predictive.get("blended_probability"),
+        "prediction_alignment": predictive.get("agreement_status"),
+        "prediction_trust_band": predictive.get("honesty_band"),
+        "outcome_model_reliability": outcome_health.get("reliability_band"),
+        "outcome_model_sample_size": outcome_health.get("labeled_sample_size"),
+        "outcome_learning_maturity": outcome_health.get("maturity_band"),
+        "provider_outcome_status": provider_outcomes.get("status"),
+        "provider_outcome_delta": provider_outcomes.get("delta_vs_global"),
+        "prediction_watchpoints": _safe_list(watchpoints.get("items"), limit=4),
         "learning_readiness": refinement.get("readiness_band"),
         "learning_readiness_score": refinement.get("readiness_score"),
         "learned_route": workflow.get("learned_route"),
@@ -143,6 +158,7 @@ def enrich_result_with_host_intelligence(file_path, result, persist=True):
 
         if persist:
             record_packet_analysis(file_path, result, triage_intelligence=triage_intelligence)
+            record_packet_analyzed()
             log_event("host_intelligence_active", os.path.basename(file_path))
 
         return result
@@ -175,5 +191,6 @@ def record_manual_outcome(file_path, result, outcome, note=""):
         details=details,
     )
 
+    record_real_outcome()
     log_event("manual_outcome_recorded", f"{os.path.basename(file_path)} | {normalized}")
     return refresh_result_host_intelligence(file_path, result)

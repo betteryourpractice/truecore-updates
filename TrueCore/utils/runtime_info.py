@@ -16,24 +16,55 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
+def get_runtime_root():
+
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(os.path.abspath(sys.executable))
+
+        if os.path.basename(base_dir).strip().lower() == "engine":
+            return os.path.dirname(base_dir)
+
+        return base_dir
+
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def get_runtime_project_dir():
+    return os.path.join(get_runtime_root(), "TrueCore")
+
+
+def runtime_data_path(*parts, ensure_parent=False):
+
+    path = os.path.join(get_runtime_project_dir(), *parts)
+
+    if ensure_parent:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    return path
+
+
+def runtime_dir_path(*parts):
+
+    path = runtime_data_path(*parts)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 # -------------------------------------------------
 # RUNTIME ENVIRONMENT
 # -------------------------------------------------
 
 def ensure_runtime_environment():
 
-    logs_path = resource_path("logs")
-    dev_path = resource_path("dev_system")
+    logs_path = runtime_dir_path("logs")
+    dev_path = runtime_dir_path("dev_system")
 
-    os.makedirs(logs_path, exist_ok=True)
-    os.makedirs(dev_path, exist_ok=True)
-
-    log_file = resource_path("logs/activity.log")
+    log_file = runtime_data_path("logs", "activity.log", ensure_parent=True)
 
     if not os.path.exists(log_file):
         open(log_file, "w").close()
 
-    tracker_file = resource_path("dev_system/dev_tracker.json")
+    tracker_file = runtime_data_path("dev_system", "dev_tracker.json", ensure_parent=True)
 
     if not os.path.exists(tracker_file):
 
@@ -45,7 +76,7 @@ def ensure_runtime_environment():
                 indent=4
             )
 
-    rotation_file = resource_path("dev_system/rotation_state.json")
+    rotation_file = runtime_data_path("dev_system", "rotation_state.json", ensure_parent=True)
 
     if not os.path.exists(rotation_file):
 
@@ -98,6 +129,24 @@ def get_build_info():
         pass
 
     return build_id, timestamp
+
+
+def get_release_manifest():
+
+    path = resource_path("release_manifest.json")
+
+    if not os.path.exists(path):
+        return None
+
+    try:
+
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    except Exception:
+        return None
+
+
 def get_latest_update_title():
 
     path = resource_path("CHANGELOG.txt")

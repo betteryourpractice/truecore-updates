@@ -12,7 +12,7 @@ issues + suggestions.
 REQUIRED_PACKET_FORMS = [
 
     "Virtual Consent Form",
-    "VA Form 10-10172",
+    "VA Authorization / Referral",
     "SEOC",
     "Consultation & Treatment Request",
     "Letter of Medical Necessity",
@@ -78,8 +78,8 @@ def validate_packet(fields, detected_forms):
         issues.append("Missing Clinical Notes")
         score -= 5
 
-    if "VA Form 10-10172" not in detected_forms:
-        issues.append("Missing VA Form 10-10172")
+    if "VA Form 10-10172" not in detected_forms and "VA Form 10-7080" not in detected_forms:
+        issues.append("Missing VA authorization / referral document")
 
     if "Virtual Consent Form" not in detected_forms:
         issues.append("Missing Virtual Consent Form")

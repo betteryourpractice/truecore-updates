@@ -110,6 +110,29 @@ def _attach_profiling(result, profiling):
     return payload
 
 
+def _stabilize_score(result, authoritative_score, score_source):
+
+    payload = dict(result or {})
+
+    try:
+        stable_score = int(float(authoritative_score))
+    except Exception:
+        stable_score = int(authoritative_score or 0)
+
+    payload["score"] = stable_score
+    intel = dict(payload.get("intel", {}) or {})
+
+    if intel:
+        display = dict(intel.get("display", {}) or {})
+        display["core_packet_score"] = stable_score
+        intel["display"] = display
+        intel["core_packet_score"] = stable_score
+        intel["score_source"] = score_source
+        payload["intel"] = intel
+
+    return payload
+
+
 def process_file(file_path, approved_icd_codes=None):
 
     filename = os.path.basename(file_path)
@@ -130,6 +153,7 @@ def process_file(file_path, approved_icd_codes=None):
     intel_elapsed = perf_counter() - intel_start
 
     if intel_result:
+        authoritative_score = intel_result.get("score", 0)
         profiled_result = _attach_profiling(
             intel_result,
             {
@@ -144,6 +168,7 @@ def process_file(file_path, approved_icd_codes=None):
         final_result = enrich_result_with_host_intelligence(file_path, profiled_result, persist=False)
         host_elapsed = perf_counter() - host_start
         total_elapsed = perf_counter() - overall_start
+        final_result = _stabilize_score(final_result, authoritative_score, "intel_core")
         final_result = _attach_profiling(
             final_result,
             {
@@ -169,6 +194,7 @@ def process_file(file_path, approved_icd_codes=None):
         approved_icd_codes=approved_icd_codes,
     )
     legacy_elapsed = perf_counter() - legacy_start
+    authoritative_score = legacy_result.get("score", 0)
 
     profiled_legacy_result = _attach_profiling(
         legacy_result,
@@ -184,6 +210,7 @@ def process_file(file_path, approved_icd_codes=None):
     final_result = enrich_result_with_host_intelligence(file_path, profiled_legacy_result, persist=False)
     host_elapsed = perf_counter() - host_start
     total_elapsed = perf_counter() - overall_start
+    final_result = _stabilize_score(final_result, authoritative_score, "legacy_core")
     final_result = _attach_profiling(
         final_result,
         {

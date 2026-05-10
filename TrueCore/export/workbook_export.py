@@ -1,13 +1,14 @@
 import time
 import os
 from openpyxl import load_workbook, Workbook
+from TrueCore.utils.runtime_info import runtime_data_path
 
 
 # -------------------------------------------------
 # WORKBOOK LOCATION
 # -------------------------------------------------
 
-WORKBOOK_PATH = os.path.join(os.getcwd(), "TrueCore", "Outputs", "TrueValour Operations.xlsx")
+WORKBOOK_PATH = runtime_data_path("Outputs", "TrueValour Operations.xlsx")
 
 INTEL_HEADERS = [
     "Packet Confidence",

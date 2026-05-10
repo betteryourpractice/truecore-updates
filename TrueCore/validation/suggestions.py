@@ -44,8 +44,8 @@ def generate_suggestions(issues, fields, detected_forms, text=None):
     if "Missing Virtual Consent Form" in issues:
         suggestions.append("Add Virtual Consent Form")
 
-    if "Missing VA Form 10-10172" in issues:
-        suggestions.append("Add VA Form 10-10172")
+    if "Missing VA Form 10-10172" in issues or "Missing VA authorization / referral document" in issues:
+        suggestions.append("Add VA authorization / referral document")
 
     if "Missing Letter of Medical Necessity (LOMN)" in issues:
         suggestions.append("Add Letter of Medical Necessity")

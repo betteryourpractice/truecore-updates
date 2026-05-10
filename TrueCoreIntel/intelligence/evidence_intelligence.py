@@ -9,6 +9,7 @@ class EvidenceIntelligenceAnalyzer:
         "lomn": 1.0,
         "clinical_notes": 0.96,
         "rfs": 0.9,
+        "approved_referral": 0.88,
         "consult_request": 0.88,
         "seoc": 0.72,
         "cover_sheet": 0.58,
@@ -20,6 +21,7 @@ class EvidenceIntelligenceAnalyzer:
         "lomn": ("diagnosis", "reason_for_request", "service_date_range", "signature_present"),
         "clinical_notes": ("diagnosis", "symptom", "procedure", "icd_codes", "service_date_range", "signature_present"),
         "rfs": ("authorization_number", "va_icn", "ordering_provider", "referring_provider", "service_date_range"),
+        "approved_referral": ("authorization_number", "va_icn", "referring_provider", "facility", "clinic_name", "reason_for_request"),
         "consult_request": ("ordering_provider", "referring_provider", "authorization_number", "reason_for_request"),
         "seoc": ("authorization_number", "referring_provider", "service_date_range"),
         "cover_sheet": ("name", "dob", "ordering_provider", "clinic_name", "facility"),
@@ -29,11 +31,11 @@ class EvidenceIntelligenceAnalyzer:
     REQUIREMENTS = {
         "patient_identity": {
             "fields": ("name", "dob"),
-            "documents": ("cover_sheet", "rfs", "consult_request", "clinical_notes"),
+            "documents": ("cover_sheet", "rfs", "approved_referral", "consult_request", "clinical_notes"),
         },
         "authorization_support": {
             "fields": ("authorization_number",),
-            "documents": ("rfs", "consult_request", "seoc"),
+            "documents": ("rfs", "approved_referral", "consult_request", "seoc"),
         },
         "clinical_justification": {
             "fields": ("diagnosis", "symptom", "reason_for_request"),
@@ -49,7 +51,7 @@ class EvidenceIntelligenceAnalyzer:
         },
         "provider_routing": {
             "fields": ("ordering_provider", "referring_provider"),
-            "documents": ("consult_request", "rfs", "seoc"),
+            "documents": ("consult_request", "rfs", "approved_referral", "seoc"),
         },
         "signature_attestation": {
             "fields": ("signature_present",),
@@ -57,7 +59,7 @@ class EvidenceIntelligenceAnalyzer:
         },
         "date_recency": {
             "fields": ("service_date_range",),
-            "documents": ("clinical_notes", "rfs", "seoc", "lomn"),
+            "documents": ("clinical_notes", "rfs", "approved_referral", "seoc", "lomn"),
         },
     }
 

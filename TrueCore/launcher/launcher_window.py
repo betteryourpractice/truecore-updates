@@ -9,8 +9,11 @@ import subprocess
 import os
 import sys
 
+from TrueCore.launcher.docs_catalog import export_docs_bundle
 from TrueCore.launcher.launcher_logging import log
-from TrueCore.launcher.updater import check_updates, download_update, install_update
+from TrueCore.launcher.updater import check_updates, download_update, install_update, verify_installed_engine_integrity
+from TrueCore.core.office_rollout import record_docs_kit_exported
+from TrueCore.utils.launcher_auth import ensure_launcher_auth_config, verify_launcher_credentials
 
 
 ENGINE_DIR = "engine"
@@ -195,6 +198,8 @@ class LauncherWindow(QWidget):
         self.play_button = QPushButton("Launch TrueCore")
         self.play_button.setIcon(QIcon(resource_path("assets/icons/launch.svg")))
         self.play_button.clicked.connect(self.launch_engine)
+        self.username.returnPressed.connect(self.launch_engine)
+        self.password.returnPressed.connect(self.launch_engine)
 
         login_layout.addWidget(login_title)
         login_layout.addWidget(self.username)
@@ -248,6 +253,7 @@ class LauncherWindow(QWidget):
 
         main_layout.addLayout(footer_layout)
 
+        ensure_launcher_auth_config()
         self.auto_update()
 
     # -------------------------------------------------
@@ -288,22 +294,29 @@ class LauncherWindow(QWidget):
 
         update_data = check_updates()
 
-        if update_data is None:
-            self.news_box.append("Update server unreachable.")
+        status = update_data.get("status") if update_data else "error"
+
+        if status == "error":
+            self.news_box.append(update_data.get("message", "Update server unreachable."))
             return
 
-        server_version = update_data.get("version")
+        server_version = (update_data.get("version") or "").strip()
+        manifest_auth = dict(update_data.get("manifest_authentication") or {})
 
         if server_version:
-            server_version = server_version.strip()
             self.server_version.setText(f"Server v{server_version}")
 
-        local_version = "1.0" # Launcher version
+        local_version = (update_data.get("local_version") or "-").strip()
 
-        self.news_box.append(f"Latest version: {server_version}")
+        self.news_box.append(f"Latest engine version: {server_version}")
+        self.news_box.append(f"Installed engine version: {local_version}")
+        if manifest_auth.get("status") == "verified":
+            self.news_box.append("Update manifest signature verified.")
+        elif manifest_auth.get("status") == "unsigned_compatibility":
+            self.news_box.append("Update manifest is running in compatibility mode.")
 
-        if server_version == local_version:
-            self.news_box.append("Launcher is up to date.")
+        if status == "up_to_date":
+            self.news_box.append("Engine is already up to date.")
             return
         
         download_url = update_data.get("download")
@@ -324,7 +337,13 @@ class LauncherWindow(QWidget):
         # INSTALL UPDATE (PASS SERVER VERSION)
         # ----------------------------------------------
 
-        success = install_update(zip_data, server_version)
+        success = install_update(
+            zip_data,
+            version=server_version,
+            expected_sha256=update_data.get("sha256"),
+            expected_size=update_data.get("size"),
+            manifest_authentication=update_data.get("manifest_authentication"),
+        )
 
         if success:
             self.news_box.append("Update installed successfully.")
@@ -338,6 +357,16 @@ class LauncherWindow(QWidget):
 
     def launch_engine(self):
 
+        username = self.username.text()
+        password = self.password.text()
+
+        if not verify_launcher_credentials(username, password):
+            log("Launcher sign-in failed.")
+            self.news_box.append("\nAccess denied. Invalid username or password.")
+            self.password.clear()
+            self.password.setFocus()
+            return
+
         engine = find_engine()
 
         if engine is None:
@@ -347,6 +376,18 @@ class LauncherWindow(QWidget):
 
         try:
             log(f"Launching TrueCore engine: {engine}")
+            integrity_result = {"status": "source_mode"} if isinstance(engine, list) else verify_installed_engine_integrity()
+            integrity_status = integrity_result.get("status")
+
+            if integrity_status == "tampered":
+                log("Blocked engine launch because local engine integrity verification failed.")
+                self.news_box.append("\nEngine integrity check failed. Local engine files appear to have changed unexpectedly.")
+                self.news_box.append("Please reinstall or update the engine before launching.")
+                return
+
+            if integrity_status == "compatibility_mode":
+                self.news_box.append("\nEngine integrity metadata not found. Launching in compatibility mode.")
+
             popen_kwargs = {}
 
             if os.name == "nt":
@@ -380,23 +421,21 @@ class LauncherWindow(QWidget):
         QDesktopServices.openUrl(QUrl("mailto:aaron@betteryourpractice.com"))
 
     def open_docs(self):
-
-        import shutil
-
         docs_source = resource_path("assets/docs/TrueCoreDocs.zip")
-
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-        docs_dest = os.path.join(desktop, "TrueCoreDocs.zip")
 
         if not os.path.exists(docs_source):
             self.news_box.append(f"Docs not found: {docs_source}")
             return
 
         try:
-            if not os.path.exists(docs_dest):
-                shutil.copyfile(docs_source, docs_dest)
-
-            QDesktopServices.openUrl(QUrl.fromLocalFile(docs_dest))
+            exported = export_docs_bundle(docs_source, desktop)
+            bundle_dir = exported["bundle_dir"]
+            index_path = exported["index_path"]
+            record_docs_kit_exported()
+            self.news_box.append("\nDocumentation kit exported to desktop.")
+            self.news_box.append(f"Open the index first: {os.path.basename(index_path)}")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(bundle_dir))
 
         except Exception as e:
             self.news_box.append(f"Docs error: {e}")

@@ -14,6 +14,14 @@ import sys
 import shutil
 import compileall
 import time
+import hashlib
+import json
+from TrueCore.utils.release_signing import (
+    SIGNATURE_ALGORITHM,
+    ensure_signing_keypair,
+    public_key_id,
+    sign_manifest,
+)
 
 print("=====================================")
 print("        TRUECORE BUILD SYSTEM")
@@ -94,6 +102,63 @@ CHANGES
 
     with open(CHANGELOG_PATH, "a", encoding="utf-8") as f:
         f.write(entry)
+
+
+def compute_file_sha256(path):
+
+    digest = hashlib.sha256()
+
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    return digest.hexdigest()
+
+
+def run_git_command(args):
+    return subprocess.call(args, cwd=ROOT_DIR)
+
+
+def has_git_changes():
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=ROOT_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return bool((result.stdout or "").strip())
+
+
+def publish_release_changes(version, notes):
+    commit_message = f"Release v{version}"
+    cleaned_notes = str(notes or "").strip()
+    if cleaned_notes:
+        commit_message += f": {cleaned_notes[:72]}"
+
+    print("\nPreparing Git publish...\n")
+
+    add_result = run_git_command(["git", "add", "-A"])
+    if add_result != 0:
+        print("ERROR: git add failed.")
+        return False
+
+    if not has_git_changes():
+        print("No git changes detected after build. Nothing to commit.\n")
+        return True
+
+    commit_result = run_git_command(["git", "commit", "-m", commit_message])
+    if commit_result != 0:
+        print("ERROR: git commit failed.")
+        return False
+
+    push_result = run_git_command(["git", "push"])
+    if push_result != 0:
+        print("ERROR: git push failed.")
+        return False
+
+    print("\nGit publish completed successfully.\n")
+    return True
 
 
 # -------------------------------------------------
@@ -241,6 +306,9 @@ build_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 build_id = f"TC{new_version.replace('.', '')}-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}"
 
 BUILD_INFO_PATH = os.path.join(CORE_DIR, "build_info.txt")
+RELEASE_MANIFEST_PATH = os.path.join(CORE_DIR, "release_manifest.json")
+SIGNING_PRIVATE_KEY_PATH = os.path.join(DEV_SYSTEM_DIR, "release_signing_private.pem")
+SIGNING_PUBLIC_KEY_PATH = os.path.join(ASSETS_DIR, "release_signing_public.pem")
 
 with open(BUILD_INFO_PATH, "w") as f:
     f.write(f"VERSION={new_version}\n")
@@ -254,6 +322,17 @@ with open(BUILD_INFO_PATH, "w") as f:
 ensure_folder(LOGS_DIR)
 ensure_folder(DEV_SYSTEM_DIR)
 ensure_folder(ASSETS_DIR)
+
+private_signing_key, public_signing_key, generated_signing_keys = ensure_signing_keypair(
+    SIGNING_PRIVATE_KEY_PATH,
+    SIGNING_PUBLIC_KEY_PATH,
+)
+signing_key_id = public_key_id(public_signing_key)
+
+if generated_signing_keys:
+    print("\nRelease signing keypair generated.")
+    print(f"Private key (keep local): {SIGNING_PRIVATE_KEY_PATH}")
+    print(f"Public key (bundled with launcher): {SIGNING_PUBLIC_KEY_PATH}\n")
 
 # -------------------------------------------------
 # VALIDATION CHECKS
@@ -404,28 +483,68 @@ except Exception as e:
 
 print("\nUpdating version.json...\n")
 
-import json
-
 version_json_path = os.path.join(ROOT_DIR, "version.json")
 
 download_url = f"https://github.com/betteryourpractice/truecore-updates/releases/download/v{new_version}/TrueCore_v{new_version}.zip"
+release_size = os.path.getsize(zip_path)
+release_sha256 = compute_file_sha256(zip_path)
 
 version_data = {
     "version": new_version,
-    "download": download_url
+    "download": download_url,
+    "sha256": release_sha256,
+    "size": release_size,
+    "build_id": build_id,
+    "published_at": build_timestamp,
+    "signature_algorithm": SIGNATURE_ALGORITHM,
+    "signature_key_id": signing_key_id,
 }
+version_data["signature"] = sign_manifest(version_data, private_signing_key)
 
 with open(version_json_path, "w") as f:
     json.dump(version_data, f, indent=4)
 
+release_manifest = {
+    "version": new_version,
+    "build_id": build_id,
+    "published_at": build_timestamp,
+    "download": download_url,
+    "sha256": release_sha256,
+    "size": release_size,
+    "release_zip": os.path.basename(zip_path),
+    "signature_algorithm": SIGNATURE_ALGORITHM,
+    "signature_key_id": signing_key_id,
+}
+release_manifest["signature"] = sign_manifest(release_manifest, private_signing_key)
+
+with open(RELEASE_MANIFEST_PATH, "w", encoding="utf-8") as f:
+    json.dump(release_manifest, f, indent=4)
+
 print("version.json updated.")
+print("release_manifest.json updated.")
+print(f"SHA256: {release_sha256}")
+print(f"Size: {release_size} bytes")
 
-# commit + push update server changes
-subprocess.call("git add version.json", shell=True)
-subprocess.call(f'git commit -m "Update version.json for v{new_version}"', shell=True)
-subprocess.call("git push", shell=True)
+publish_choice = input(
+    "\nCommit and push the current release changes to GitHub now? (y/N): "
+).strip().lower()
 
-print("version.json pushed to GitHub.\n")
+git_publish_succeeded = False
+
+if publish_choice in {"y", "yes"}:
+    git_publish_succeeded = publish_release_changes(new_version, notes)
+else:
+    print("\nGit publish skipped. Your build files remain local until you commit and push them.\n")
+
+print("Manual release follow-up:")
+if git_publish_succeeded:
+    print("1. Create/publish the GitHub release tag when ready.")
+    print(f"2. Tag/release name: v{new_version}")
+    print(f"3. Upload: {zip_path}\n")
+else:
+    print("1. Commit and push source/release metadata when you are ready.")
+    print(f"2. Create/publish GitHub release tag: v{new_version}")
+    print(f"3. Upload: {zip_path}\n")
 
 # -------------------------------------------------
 # BUILD COMPLETE
