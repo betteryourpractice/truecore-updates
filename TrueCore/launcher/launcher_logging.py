@@ -1,33 +1,20 @@
 import logging
 import os
-import sys
-
-
-# -------------------------------------------------
-# DETERMINE BASE DIRECTORY
-# -------------------------------------------------
-
-if getattr(sys, "frozen", False):
-    # Running as packaged EXE
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    # Running from source
-    BASE_DIR = os.path.abspath(".")
+from TrueCore.utils.runtime_info import runtime_dir_path, runtime_data_path
 
 
 # -------------------------------------------------
 # LOG DIRECTORY
 # -------------------------------------------------
 
-LOG_DIR = os.path.join(BASE_DIR, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
+LOG_DIR = runtime_dir_path("logs")
 
 
 # -------------------------------------------------
 # LOG FILE
 # -------------------------------------------------
 
-LOG_FILE = os.path.join(LOG_DIR, "launcher.log")
+LOG_FILE = runtime_data_path("logs", "launcher.log", ensure_parent=True)
 
 
 # -------------------------------------------------

@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
+    QWidget,
 )
 
 from TrueCore.core.case_memory import get_recent_packet_runs

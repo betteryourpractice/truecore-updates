@@ -1,12 +1,18 @@
 {
-    "version": "4.3",
-    "build_id": "TC43-20260509-2049",
-    "published_at": "2026-05-09 20:49:54",
-    "download": "https://github.com/betteryourpractice/truecore-updates/releases/download/v4.3/TrueCore_v4.3.zip",
-    "sha256": "e8683713d499582f4bbfab67dab13f555732e9f9aa752d4c0cd07be5013c09fa",
-    "size": 339330818,
-    "release_zip": "TrueCore_v4.3.zip",
+    "version": "4.4",
+    "build_id": "TC44-20260510-0007",
+    "published_at": "2026-05-10 00:07:48",
+    "download": "https://github.com/betteryourpractice/truecore-updates/releases/download/v4.4/TrueCore_v4.4.zip",
+    "sha256": "78c534c68d796b65787b544857c4f8e1d4591df05a664a6e3927e9f73ae29c88",
+    "size": 339332154,
+    "release_zip": "TrueCore_v4.4.zip",
+    "launcher_release_zip": "TrueCoreLauncher_v4.4.zip",
+    "launcher_release_sha256": "cd01284e7d8cfd910a2b50b1406bae856d4ec4b438503123692913d73db3803a",
+    "launcher_release_size": 60057624,
+    "suite_release_zip": "TrueCoreSuite_v4.4.zip",
+    "suite_release_sha256": "912875677d9b41c62c1c86ede8643e213cb19855106beef01bd7e6518eabfff4",
+    "suite_release_size": 399389756,
     "signature_algorithm": "ed25519",
     "signature_key_id": "d45f23a852c8fc86",
-    "signature": "yA2OEao1xdjJ4UIaGCfCOFn4dOcMbKimNlDDT91f/eTqaBD2D5BBhsS8vShXlHlCUEHeE6zzoquD3Kdrs+Q3Bg=="
+    "signature": "PFCaoomFPTT1CMyIoOo4n2DHoIngvAlmOPdYfKBoYquc7dX6F2cCNDGNSNMYhC4WuYvsa0o3ZmtCwBmbJvNoCQ=="
 }

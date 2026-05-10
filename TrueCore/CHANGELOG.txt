@@ -430,3 +430,12 @@ CHANGES
 
 * Launcher auth enforcement, admin build info fix, and responsive admin layout
 
+
+
+VERSION: 4.4
+DATE: 2026-05-10
+
+CHANGES
+
+* Launcher overhaul, admin panel recovery, hidden PowerShell subprocesses, and credential support snapshots
+

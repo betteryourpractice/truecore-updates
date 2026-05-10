@@ -57,6 +57,7 @@ CHANGELOG_PATH = os.path.join(CORE_DIR, "CHANGELOG.txt")
 ASSETS_DIR = os.path.join(CORE_DIR, "launcher","assets")
 DEV_SYSTEM_DIR = os.path.join(CORE_DIR, "dev_system")
 LOGS_DIR = os.path.join(CORE_DIR, "logs")
+LAUNCHER_RELEASE_INFO_PATH = os.path.join(ASSETS_DIR, "launcher_release_info.json")
 
 GUI_DIR = os.path.join(CORE_DIR, "ui", "pyside_gui")
 
@@ -323,6 +324,18 @@ ensure_folder(LOGS_DIR)
 ensure_folder(DEV_SYSTEM_DIR)
 ensure_folder(ASSETS_DIR)
 
+with open(LAUNCHER_RELEASE_INFO_PATH, "w", encoding="utf-8") as f:
+    json.dump(
+        {
+            "version": new_version,
+            "build_id": build_id,
+            "build_timestamp": build_timestamp,
+            "release_channel": "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version.json",
+        },
+        f,
+        indent=4,
+    )
+
 private_signing_key, public_signing_key, generated_signing_keys = ensure_signing_keypair(
     SIGNING_PRIVATE_KEY_PATH,
     SIGNING_PUBLIC_KEY_PATH,
@@ -438,16 +451,28 @@ release_dir = os.path.join(ROOT_DIR, "release")
 os.makedirs(release_dir, exist_ok=True)
 
 engine_src = os.path.join(ROOT_DIR, "dist", "dist", "TrueCoreEngine.exe")
+launcher_src = os.path.join(ROOT_DIR, "dist", "TrueCoreLauncher.exe")
 
 zip_path = os.path.join(release_dir, f"TrueCore_v{new_version}.zip")
+launcher_zip_path = os.path.join(release_dir, f"TrueCoreLauncher_v{new_version}.zip")
+suite_zip_path = os.path.join(release_dir, f"TrueCoreSuite_v{new_version}.zip")
 
 import zipfile
 
 with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
     z.write(engine_src, "TrueCoreEngine.exe")
 
+with zipfile.ZipFile(launcher_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+    z.write(launcher_src, "TrueCoreLauncher.exe")
+
+with zipfile.ZipFile(suite_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+    z.write(launcher_src, "TrueCoreLauncher.exe")
+    z.write(engine_src, "TrueCoreEngine.exe")
+
 print("\nRelease ZIP created:")
 print(zip_path)
+print(launcher_zip_path)
+print(suite_zip_path)
 
 
 # -------------------------------------------------
@@ -488,6 +513,10 @@ version_json_path = os.path.join(ROOT_DIR, "version.json")
 download_url = f"https://github.com/betteryourpractice/truecore-updates/releases/download/v{new_version}/TrueCore_v{new_version}.zip"
 release_size = os.path.getsize(zip_path)
 release_sha256 = compute_file_sha256(zip_path)
+launcher_release_size = os.path.getsize(launcher_zip_path)
+launcher_release_sha256 = compute_file_sha256(launcher_zip_path)
+suite_release_size = os.path.getsize(suite_zip_path)
+suite_release_sha256 = compute_file_sha256(suite_zip_path)
 
 version_data = {
     "version": new_version,
@@ -512,6 +541,12 @@ release_manifest = {
     "sha256": release_sha256,
     "size": release_size,
     "release_zip": os.path.basename(zip_path),
+    "launcher_release_zip": os.path.basename(launcher_zip_path),
+    "launcher_release_sha256": launcher_release_sha256,
+    "launcher_release_size": launcher_release_size,
+    "suite_release_zip": os.path.basename(suite_zip_path),
+    "suite_release_sha256": suite_release_sha256,
+    "suite_release_size": suite_release_size,
     "signature_algorithm": SIGNATURE_ALGORITHM,
     "signature_key_id": signing_key_id,
 }
@@ -524,6 +559,10 @@ print("version.json updated.")
 print("release_manifest.json updated.")
 print(f"SHA256: {release_sha256}")
 print(f"Size: {release_size} bytes")
+print(f"Launcher SHA256: {launcher_release_sha256}")
+print(f"Launcher Size: {launcher_release_size} bytes")
+print(f"Suite SHA256: {suite_release_sha256}")
+print(f"Suite Size: {suite_release_size} bytes")
 
 publish_choice = input(
     "\nCommit and push the current release changes to GitHub now? (y/N): "
@@ -540,11 +579,15 @@ print("Manual release follow-up:")
 if git_publish_succeeded:
     print("1. Create/publish the GitHub release tag when ready.")
     print(f"2. Tag/release name: v{new_version}")
-    print(f"3. Upload: {zip_path}\n")
+    print(f"3. Upload engine: {zip_path}")
+    print(f"4. Launcher package: {launcher_zip_path}")
+    print(f"5. Full suite package: {suite_zip_path}\n")
 else:
     print("1. Commit and push source/release metadata when you are ready.")
     print(f"2. Create/publish GitHub release tag: v{new_version}")
-    print(f"3. Upload: {zip_path}\n")
+    print(f"3. Upload engine: {zip_path}")
+    print(f"4. Launcher package: {launcher_zip_path}")
+    print(f"5. Full suite package: {suite_zip_path}\n")
 
 # -------------------------------------------------
 # BUILD COMPLETE

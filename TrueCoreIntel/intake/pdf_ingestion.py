@@ -241,6 +241,29 @@ def get_powershell_command():
     return None
 
 
+def build_hidden_subprocess_kwargs():
+    kwargs = {}
+
+    if os.name != "nt":
+        return kwargs
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if creationflags:
+        kwargs["creationflags"] = creationflags
+
+    startupinfo_factory = getattr(subprocess, "STARTUPINFO", None)
+    startf_use_show_window = getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+    sw_hide = getattr(subprocess, "SW_HIDE", 0)
+
+    if startupinfo_factory and startf_use_show_window:
+        startupinfo = startupinfo_factory()
+        startupinfo.dwFlags |= startf_use_show_window
+        startupinfo.wShowWindow = sw_hide
+        kwargs["startupinfo"] = startupinfo
+
+    return kwargs
+
+
 def run_text_capture_command(arguments, log_fn=None, timeout=240):
     try:
         completed = subprocess.run(
@@ -250,6 +273,7 @@ def run_text_capture_command(arguments, log_fn=None, timeout=240):
             timeout=timeout,
             env=build_execution_env(),
             check=False,
+            **build_hidden_subprocess_kwargs(),
         )
     except Exception as exc:
         emit(log_fn, f"[DEBUG] Text capture command failed to start: {exc}")
@@ -322,6 +346,7 @@ def build_searchable_pdf_with_ocrmypdf(pdf_path, log_fn=None):
             timeout=900,
             env=build_execution_env(),
             check=False,
+            **build_hidden_subprocess_kwargs(),
         )
     except Exception as exc:
         emit(log_fn, f"[DEBUG] OCRmyPDF failed to start: {exc}")
@@ -367,6 +392,7 @@ def run_windows_ocr_script(script, env, log_fn=None, timeout=240):
             timeout=timeout,
             env=env,
             check=False,
+            **build_hidden_subprocess_kwargs(),
         )
     except Exception as exc:
         emit(log_fn, f"[DEBUG] OCR fallback failed to start: {exc}")
