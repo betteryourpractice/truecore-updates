@@ -61,7 +61,7 @@ from TrueCore.core.case_memory import (
 from TrueCore.core.cross_office_learning import (
     OFFICE_PROFILE_PATH,
     SNAPSHOT_OUTPUT_PATH,
-    build_cross_office_snapshot,
+    build_full_cross_office_snapshot,
     export_cross_office_snapshot,
 )
 from TrueCore.core.cross_office_benchmarking import (
@@ -2058,7 +2058,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         self.ensure_admin_history_cache()
 
         office_profile = load_office_profile()
-        current_snapshot = build_cross_office_snapshot()
+        current_snapshot = build_full_cross_office_snapshot()
         current_snapshot_summary = dict(current_snapshot.get("summary") or {})
         snapshot_file_exists = os.path.exists(SNAPSHOT_OUTPUT_PATH)
         imported_snapshot_paths = list_imported_snapshot_files()

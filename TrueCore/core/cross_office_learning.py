@@ -207,6 +207,10 @@ def build_cross_office_snapshot(limit_runs=250, limit_events=250):
     }
 
 
+def build_full_cross_office_snapshot():
+    return build_cross_office_snapshot(limit_runs=None, limit_events=None)
+
+
 def export_cross_office_snapshot(path=None, limit_runs=250, limit_events=250):
     snapshot = build_cross_office_snapshot(limit_runs=limit_runs, limit_events=limit_events)
     output_path = path or SNAPSHOT_OUTPUT_PATH

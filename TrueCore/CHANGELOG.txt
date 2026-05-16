@@ -484,3 +484,12 @@ CHANGES
 
 * Admin history rendering hardening and local cache refresh
 
+
+
+VERSION: 4.10
+DATE: 2026-05-15
+
+CHANGES
+
+* Use full local history for Admin and local rollups 
+

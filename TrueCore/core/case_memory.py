@@ -480,14 +480,22 @@ def get_case_history(case_key, limit=25):
 def get_recent_packet_runs(limit=250):
     conn = ensure_memory_db()
     try:
-        rows = conn.execute(
-            """
-            SELECT * FROM packet_runs
-            ORDER BY analyzed_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        if limit in (None, "", 0):
+            rows = conn.execute(
+                """
+                SELECT * FROM packet_runs
+                ORDER BY analyzed_at DESC
+                """
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM packet_runs
+                ORDER BY analyzed_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
         return rows_to_dicts(rows)
     finally:
         conn.close()
@@ -496,14 +504,22 @@ def get_recent_packet_runs(limit=250):
 def get_recent_packet_events(limit=250):
     conn = ensure_memory_db()
     try:
-        rows = conn.execute(
-            """
-            SELECT * FROM packet_events
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        if limit in (None, "", 0):
+            rows = conn.execute(
+                """
+                SELECT * FROM packet_events
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM packet_events
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
         return rows_to_dicts(rows)
     finally:
         conn.close()

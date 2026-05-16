@@ -110,7 +110,7 @@ class CrossOfficeBenchmarkingTests(unittest.TestCase):
             self.assertEqual(len(cross_office_benchmarking.list_imported_snapshot_files(directory=imported_dir)), 1)
 
             local_snapshot = make_snapshot("local", "Local Office", [88])
-            with mock.patch.object(cross_office_benchmarking, "build_cross_office_snapshot", return_value=local_snapshot):
+            with mock.patch.object(cross_office_benchmarking, "build_full_cross_office_snapshot", return_value=local_snapshot):
                 output = cross_office_benchmarking.build_local_network_rollup(
                     include_current_office=True,
                     imported_directory=imported_dir,

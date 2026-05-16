@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from TrueCore.core.cross_office_learning import (
     SNAPSHOT_SCHEMA_VERSION,
     build_cross_office_snapshot,
+    build_full_cross_office_snapshot,
     utc_now_iso,
 )
 from TrueCore.utils.runtime_info import runtime_data_path
@@ -384,7 +385,7 @@ def build_local_network_rollup(include_current_office=True, imported_directory=N
     snapshots = load_imported_cross_office_snapshots(directory=imported_directory)
 
     if include_current_office:
-        snapshots.insert(0, build_cross_office_snapshot())
+        snapshots.insert(0, build_full_cross_office_snapshot())
 
     if not snapshots:
         raise ValueError("No snapshots available to build a network rollup.")

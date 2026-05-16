@@ -39,7 +39,10 @@ from TrueCore.core.cross_office_benchmarking import (
     list_imported_snapshot_files,
     load_network_rollup,
 )
-from TrueCore.core.cross_office_learning import build_cross_office_snapshot, export_cross_office_snapshot
+from TrueCore.core.cross_office_learning import (
+    build_full_cross_office_snapshot,
+    export_cross_office_snapshot,
+)
 from TrueCore.core.office_rollout import (
     load_office_profile,
     record_office_profile_confirmed,
@@ -60,14 +63,14 @@ class MainWindowAdminMixin:
             return
 
         try:
-            snapshot = build_cross_office_snapshot()
+            snapshot = build_full_cross_office_snapshot()
             snapshot_summary = dict(snapshot.get("summary") or {})
             snapshot_packet_count = int(snapshot_summary.get("packet_count") or 0)
 
             if snapshot_packet_count <= 0:
                 return
 
-            export_cross_office_snapshot()
+            export_cross_office_snapshot(limit_runs=None, limit_events=None)
 
             imported_snapshot_count = len(list_imported_snapshot_files())
             current_rollup = load_network_rollup()
@@ -748,7 +751,7 @@ class MainWindowAdminMixin:
                 recurring_issue_counter[issue] = recurring_issue_counter.get(issue, 0) + 1
 
         office_profile = load_office_profile()
-        current_snapshot = build_cross_office_snapshot()
+        current_snapshot = build_full_cross_office_snapshot()
         current_summary = dict(current_snapshot.get("summary") or {})
         network_rollup = load_network_rollup()
         imported_snapshot_count = len(list_imported_snapshot_files())
