@@ -1,203 +1,39 @@
 PROJECT: TrueCore Packet Assistant
 
 Purpose:
-Desktop Python tool that audits VA medical packet submissions.
+TrueCore reviews patient packet files, extracts structured fields, validates packet readiness,
+scores packet quality, and presents operator guidance through the desktop GUI and launcher.
 
-System Overview:
-TrueCore analyzes medical packet submissions from provider offices and determines whether the packet meets VA documentation requirements.
-It detects forms, extracts fields, validates ICD codes, scores packet completeness, and produces structured results for review.
+Core Runtime Areas:
+- TrueCore/
+  Application runtime, GUI, launcher, support utilities, and host-side orchestration.
+- TrueCoreIntel/
+  Extraction, validation, intelligence, review, and scoring layers.
 
-Main Architecture:
-Launcher → Engine → GUI → Packet Processing Pipeline
+Key Product Surfaces:
+- Launcher
+  Secure launch flow, update checks, office snapshot support, and support actions.
+- Main GUI
+  Packet intake, analysis results, packet details, math view, admin overview, office comparison,
+  operations, and audit views.
+- Admin
+  Local business intelligence, office comparison snapshots, operational controls, and audit logs.
 
-Core Processing Flow:
-GUI → packet_processor → parser → extractor → validation
-
-Primary Components:
-
-Launcher System
-PySide6 launcher responsible for update checks, engine download, and starting the TrueCore engine.
-
-Engine
-Main executable containing the TrueCore processing system and GUI.
-
-GUI System (PySide6)
-Modern PySide6 interface used for packet auditing, file selection, results display, and export tools.
-
-Processing Pipeline
-Packet analysis engine that parses documents, extracts fields, validates data, and scores packet completeness.
-
----
-
-Core Files:
-
-truecore_app.py
-Engine entrypoint. Initializes runtime environment and launches the PySide6 GUI.
-
-pyside_app.py
-Starts the PySide6 application and loads the main GUI window.
-
-main_window.py
-Main GUI interface displaying packet audit results, console logs, packet details, and administrative tools.
-
-launcher_app.py
-Entry point for the TrueCore launcher system.
-
-launcher_window.py
-PySide6 interface for the launcher including login area, update status, and engine launch control.
-
-updater.py
-Handles update checks, downloads engine releases, and installs updates.
-
----
-
-Processing Engine Files:
-
-packet_processor.py
-Main audit engine. Handles packet scoring, issue detection, form identification, and suggestion generation.
-
-parser.py
-Extracts raw text from supported document types including PDF, DOCX, and images.
-
-extractor.py
-Pulls structured fields and patient data from parsed document text.
-
-packet_classifier.py
-Classifies packet types and determines document roles within a submission.
-
-packet_triage.py
-Handles packet routing logic and determines audit outcomes.
-
-form_detector.py
-Detects specific medical forms within packet documents.
-
-validator.py
-Validates extracted fields and checks packet completeness.
-
-suggestions.py
-Generates suggested fixes for missing or incomplete packet information.
-
----
-
-Medical Support Modules:
-
-icd_lookup.py
-Loads and validates ICD codes from asset datasets.
-
----
-
-Export System:
-
-workbook_export.py
-Generates Excel reports for approved packets.
-
----
-
-Utilities:
-
-runtime_info.py
-Provides runtime environment utilities, resource loading, and version detection.
-
-logging_system.py
-Centralized logging system used for audit logging and runtime diagnostics.
-
----
-
-Build System:
-
-build_truecore.bat
-Launches the automated build pipeline.
-
-build.py
-Handles the full build process including:
-• version bumping
-• changelog update
-• syntax validation
-• GUI startup test
-• PyInstaller packaging
-• release package creation
-• update server version synchronization
-
-Output Artifacts:
-
-Launcher Build:
-dist/TrueCoreLauncher.exe
-
-Engine Build:
-dist/dist/TrueCoreEngine.exe
-
-Release Package:
-release/TrueCore_vX.X.zip
-
----
-
-Versioning:
-
-VERSION.txt
-Stores the current engine version number.
-
-build_info.txt
-Stores build ID and build timestamp metadata.
-
-CHANGELOG.txt
-Contains version history and development notes.
-
----
-
-Update System:
-
-version.json
-Hosted on the update server repository and used by the launcher to determine the latest engine version.
-
-Launcher Update Flow:
-Launcher → version.json → GitHub release → download engine → install → launch
-
----
-
-UI Color System:
-
-Blue
-Packet header / system titles
-
-Green
-Detected fields or successful form recognition
-
-Red
-Missing fields or validation failures
-
-Yellow
-Suggested fixes or warnings
-
-White footer
-TrueCore Engine version banner
-
----
+Data and Runtime Notes:
+- Local writable runtime data belongs in the machine-level TrueCore data directory.
+- Packet history, office snapshots, and support outputs are local-first unless explicitly exported.
+- De-identified snapshot export/import is the supported office-comparison workflow.
 
 Project Documentation Files:
+- PROJECT_CONTEXT.txt
+  High-level architecture and product map.
+- PROJECT_STATE.txt
+  Current system status and capability notes.
+- DEV_NOTES.txt
+  Development guidance and implementation notes.
 
-AI_CONTENT.txt
-Contains development context used for AI-assisted modifications.
-
-AI_GUARD.txt
-Defines guardrails for automated code changes.
-
-PROJECT_CONTEXT.txt
-Overview of project architecture and components.
-
-PROJECT_STATE.txt
-Tracks system status and current capabilities.
-
-DEV_NOTES.txt
-Development guidelines and architectural notes.
-
----
-
-Rules for Code Updates:
-
-• Always return full file replacements when modifying source code.
-• Never return partial snippets unless explicitly requested.
-• Do not change architecture without confirmation.
-• Assume current code works unless told otherwise.
-• Preserve launcher → engine → GUI architecture.
-• Avoid duplicating logic across modules.
-• Maintain separation between GUI, processing, and validation systems.
+Engineering Rules:
+- Make the smallest safe change possible when editing source.
+- Preserve working import structure and pipeline order.
+- Keep operator-facing wording in plain English.
+- Verify behavior after edits instead of assuming the change is harmless.

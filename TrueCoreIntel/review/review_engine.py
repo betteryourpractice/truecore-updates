@@ -98,13 +98,15 @@ class ReviewEngine(ReviewComplianceMixin, ReviewPredictiveMixin):
 
     def assign_priority(self, packet):
         high_missing = any(field in self.HIGH_PRIORITY_FIELDS for field in packet.missing_fields)
-        has_high_conflict = any(conflict.get("severity") == "high" for conflict in packet.conflicts)
+        rubric = dict(getattr(packet, "packet_rubric", {}) or {})
+        blockers = list(rubric.get("blockers", []) or [])
+        blocking_conflict_fields = set(rubric.get("blocking_conflict_fields", []) or [])
         actionable_flags = set(self.get_actionable_review_flags(packet))
 
-        if packet.packet_strength == "weak":
+        if blockers:
             return "high"
 
-        if has_high_conflict:
+        if blocking_conflict_fields:
             return "high"
 
         if "packet_integrity_risk" in actionable_flags:
@@ -112,6 +114,9 @@ class ReviewEngine(ReviewComplianceMixin, ReviewPredictiveMixin):
 
         if high_missing or len(packet.missing_fields) >= 3 or len(packet.missing_documents) >= 3:
             return "high"
+
+        if packet.packet_strength == "weak":
+            return "normal"
 
         if packet.missing_fields or packet.missing_documents or packet.conflicts:
             return "normal"
@@ -476,10 +481,16 @@ class ReviewEngine(ReviewComplianceMixin, ReviewPredictiveMixin):
         return self.SUMMARY_BUILDER.get_field_priority(field)
 
     def build_submission_decision(self, packet):
+        rubric = dict(getattr(packet, "packet_rubric", {}) or {})
+        rubric_blockers = list(rubric.get("blockers", []) or [])
+        rubric_review_needs = list(rubric.get("review_needs", []) or [])
         actionable_flags = set(self.get_actionable_review_flags(packet))
         hold_reasons = []
         review_reasons = []
         assembly_score = getattr(packet, "packet_assembly_score", None)
+
+        hold_reasons.extend(rubric_blockers)
+        review_reasons.extend(rubric_review_needs)
 
         if packet.missing_fields:
             hold_reasons.append(
@@ -491,18 +502,11 @@ class ReviewEngine(ReviewComplianceMixin, ReviewPredictiveMixin):
                 f"Required documents are missing: {', '.join(sorted(packet.missing_documents))}."
             )
 
-        high_conflict_fields = sorted({
-            conflict.get("field", "unknown_field")
-            for conflict in packet.conflicts
-            if conflict.get("severity") == "high"
-        })
+        high_conflict_fields = sorted(set(rubric.get("blocking_conflict_fields", []) or []))
         if high_conflict_fields:
             hold_reasons.append(
                 f"High-severity conflicts must be resolved first: {', '.join(high_conflict_fields)}."
             )
-
-        if packet.packet_strength == "weak":
-            hold_reasons.append("Overall packet strength is weak and should be corrected before submission.")
 
         if assembly_score is not None and assembly_score < 55:
             hold_reasons.append("Packet assembly quality is too weak for submission and should be corrected first.")
@@ -526,6 +530,9 @@ class ReviewEngine(ReviewComplianceMixin, ReviewPredictiveMixin):
             description = self.describe_decision_flag(flag, hold=False)
             if description:
                 review_reasons.append(description)
+
+        if packet.packet_strength == "weak" and not hold_reasons:
+            review_reasons.append("Packet quality is still weak enough to need reviewer confirmation before submission.")
 
         if assembly_score is not None and 55 <= assembly_score < 72 and not hold_reasons:
             review_reasons.append("Packet assembly is incomplete enough to require reviewer confirmation.")

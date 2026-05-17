@@ -1,12 +1,27 @@
 import sys
+import warnings
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QFont
 
 from TrueCore.utils.runtime_info import resource_path
-from TrueCore.ui.pyside_gui.main_window import MainWindow
+
+
+def configure_runtime_warnings():
+
+    try:
+        from requests.exceptions import RequestsDependencyWarning
+    except Exception:
+        RequestsDependencyWarning = None
+
+    if RequestsDependencyWarning is not None:
+        warnings.filterwarnings("ignore", category=RequestsDependencyWarning)
 
 
 def launch_gui():
+
+    configure_runtime_warnings()
+
+    from TrueCore.ui.pyside_gui.main_window import MainWindow
 
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))

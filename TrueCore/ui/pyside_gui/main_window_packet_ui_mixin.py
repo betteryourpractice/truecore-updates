@@ -1,4 +1,5 @@
 import html
+import os
 import re
 from datetime import datetime
 
@@ -12,6 +13,211 @@ from TrueCore.core.case_memory import (
 
 class MainWindowPacketUiMixin:
 
+    def build_packet_math_html(self, file_path, result):
+
+        result = dict(result or {})
+        intel = dict(result.get("intel", {}) or {})
+        intel_display = dict(intel.get("display", {}) or {})
+        packet_output = dict(intel.get("packet_output", {}) or {})
+        rubric = dict(packet_output.get("packet_rubric", {}) or {})
+
+        if not intel or not packet_output or not rubric:
+            return (
+                "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+                "font-family:'Segoe UI'; font-size:13px; line-height:1.45; margin:0; text-align:left;\">"
+                "<div style=\"margin:8px 0 0 0; padding:20px 22px; background:#151C26; "
+                "border:1px solid #243244; border-radius:14px; text-align:left;\">"
+                "<div style=\"font-size:20px; font-weight:700; color:#FFFFFF; margin-bottom:8px;\">Math view is not available for this packet</div>"
+                "<div style=\"color:#A9B6C7;\">This row does not currently carry a full scoring worksheet payload.</div>"
+                "</div></body></html>"
+            )
+
+        score = result.get("score", 0)
+        rubric_score = rubric.get("score")
+        legacy_score = packet_output.get("packet_legacy_score", intel_display.get("legacy_score"))
+        approval_outlook = intel_display.get("approval_outlook", intel_display.get("approval_probability"))
+        assembly_score = packet_output.get("packet_assembly_score", intel_display.get("packet_assembly_score"))
+        evidence_score = packet_output.get("packet_evidence_score", intel_display.get("evidence_strength_score"))
+        confidence = packet_output.get("packet_confidence", intel_display.get("packet_confidence"))
+
+        try:
+            score_value = float(score or 0.0)
+        except Exception:
+            score_value = 0.0
+
+        try:
+            rubric_score_value = float(rubric_score or 0.0)
+        except Exception:
+            rubric_score_value = 0.0
+
+        confidence_factor = None
+        if rubric_score_value > 0:
+            confidence_factor = round(score_value / rubric_score_value, 4)
+
+        summary_rows = [
+            ("Packet", os.path.basename(file_path)),
+            ("Displayed Score", f"{score_value:.2f}" if score_value else self.format_detail_value(score)),
+            ("Base Rubric Score", f"{rubric_score_value:.2f}" if rubric_score_value else self.format_detail_value(rubric_score)),
+            ("Legacy Score", f"{float(legacy_score):.2f}" if legacy_score not in (None, "", [], {}) else "Missing"),
+            ("Approval Outlook", self.format_operator_display_value("Approval Outlook", approval_outlook)),
+            ("Readiness", self.format_operator_display_value("Submission Readiness", intel_display.get("submission_readiness"))),
+        ]
+
+        sections = [
+            self.build_detail_card(
+                "Math Summary",
+                self.build_detail_table(summary_rows, value_color="#DCE6F2", show_missing=False),
+                accent_color="#57B6FF",
+                margin_top=0,
+            )
+        ]
+
+        document_points = float(rubric.get("document_points") or 0.0)
+        document_max = float(rubric.get("document_max") or 0.0)
+        consistency_points = float(rubric.get("consistency_points") or 0.0)
+        consistency_max = float(rubric.get("consistency_max") or 0.0)
+
+        formula_lines = [
+            "Rubric backbone:",
+            f"(({document_points:.2f} + {consistency_points:.2f}) / ({document_max:.2f} + {consistency_max:.2f})) × 100 = {rubric_score_value:.2f}",
+        ]
+        if confidence_factor is not None:
+            formula_lines.extend(
+                [
+                    "",
+                    "Displayed score adjustment:",
+                    f"{rubric_score_value:.2f} × {confidence_factor:.4f} = {score_value:.2f}",
+                ]
+            )
+        if evidence_score not in (None, "", [], {}) and assembly_score not in (None, "", [], {}) and legacy_score not in (None, "", [], {}):
+            try:
+                evidence_numeric = float(evidence_score)
+                assembly_numeric = float(assembly_score)
+                legacy_numeric = float(legacy_score)
+                formula_lines.extend(
+                    [
+                        "",
+                        "Legacy score comparison:",
+                        f"({evidence_numeric:.2f} × 0.35) + ({assembly_numeric:.2f} × 0.65) = {legacy_numeric:.2f}",
+                    ]
+                )
+            except Exception:
+                pass
+
+        blocker_count = len(list(rubric.get("blockers", []) or []))
+        review_count = len(list(rubric.get("review_needs", []) or []))
+        if approval_outlook not in (None, "", [], {}) and assembly_score not in (None, "", [], {}):
+            try:
+                approval_numeric = float(approval_outlook)
+                assembly_numeric = float(assembly_score) / 100.0
+                score_numeric = score_value / 100.0
+                base_outlook = (score_numeric * 0.72) + (assembly_numeric * 0.28)
+                formula_lines.extend(
+                    [
+                        "",
+                        "Approval outlook starting blend:",
+                        f"(({score_numeric:.4f} × 0.72) + ({assembly_numeric:.4f} × 0.28)) = {base_outlook:.4f}",
+                        f"Then reduced for blockers ({blocker_count}) and review needs ({review_count}) to {approval_numeric:.4f}.",
+                    ]
+                )
+            except Exception:
+                pass
+
+        formula_html = "".join(
+            f"<div style=\"margin-bottom:6px; color:#DCE6F2; white-space:pre-wrap; text-align:left;\">{html.escape(line)}</div>"
+            for line in formula_lines
+        )
+        sections.append(
+            self.build_detail_card(
+                "Equations Used",
+                formula_html,
+                accent_color="#F2C94C",
+            )
+        )
+
+        component_rows = []
+        for component in list(rubric.get("components", []) or []):
+            component_rows.append(
+                (
+                    str(component.get("label") or "Component"),
+                    f"{float(component.get('earned_points') or 0.0):.2f} / {float(component.get('max_points') or 0.0):.2f} | "
+                    f"{self.format_detail_value(component.get('status'))} | "
+                    f"{self.format_detail_value(component.get('summary'))}"
+                )
+            )
+
+        if component_rows:
+            sections.append(
+                self.build_detail_card(
+                    "Document Component Math",
+                    self.build_detail_table(component_rows, value_color="#DCE6F2", show_missing=False),
+                    accent_color="#2DCE89",
+                )
+            )
+
+        consistency = dict(rubric.get("consistency", {}) or {})
+        family_rows = []
+        for family_name, points in dict(consistency.get("families") or {}).items():
+            try:
+                family_rows.append((self.format_field(family_name), f"{float(points):.2f}"))
+            except Exception:
+                family_rows.append((self.format_field(family_name), self.format_detail_value(points)))
+
+        if consistency:
+            consistency_rows = [
+                ("Overall Consistency", f"{float(consistency.get('earned_points') or 0.0):.2f} / {float(consistency.get('max_points') or 0.0):.2f}"),
+                ("Consistency Band", self.format_detail_value(consistency.get("status"))),
+                ("Consistency Summary", self.format_detail_value(consistency.get("summary"))),
+            ]
+            sections.append(
+                self.build_detail_card(
+                    "Consistency Math",
+                    self.build_detail_table(consistency_rows + family_rows, value_color="#DCE6F2", show_missing=False),
+                    accent_color="#9B8CFF",
+                )
+            )
+
+        blocker_items = list(rubric.get("blockers", []) or [])
+        review_items = list(rubric.get("review_needs", []) or [])
+        if blocker_items:
+            sections.append(
+                self.build_bullet_section(
+                    "Blocking Math Notes",
+                    blocker_items,
+                    color="#EB5757",
+                    accent_color="#EB5757",
+                )
+            )
+        if review_items:
+            sections.append(
+                self.build_bullet_section(
+                    "Review-Level Math Notes",
+                    review_items,
+                    color="#F2C94C",
+                    accent_color="#F2C94C",
+                )
+            )
+
+        sections.append(
+            self.build_detail_card(
+                "What This Means",
+                (
+                    "<div style=\"color:#DCE6F2; line-height:1.5; text-align:left;\">"
+                    "The packet score measures document quality and cross-document consistency. "
+                    "Readiness is a separate decision layer, so a packet can score moderately and still be held if a real blocker remains."
+                    "</div>"
+                ),
+                accent_color="#57B6FF",
+            )
+        )
+
+        rendered_sections = "".join(section for section in sections if section)
+        return (
+            "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+            "font-family:'Segoe UI'; font-size:13px; line-height:1.45; margin:0; text-align:left;\">"
+            f"{rendered_sections}</body></html>"
+        )
+
     def format_operator_display_value(self, label, value):
 
         formatter = getattr(self, "format_packet_display_value", None)
@@ -22,11 +228,108 @@ class MainWindowPacketUiMixin:
                 pass
         return self.format_detail_value(value)
 
+    def sentence_case_phrase(self, value):
+
+        text = " ".join(str(value or "").strip().split())
+        if not text:
+            return ""
+
+        acronym_map = {
+            "va": "VA",
+            "icd": "ICD",
+            "mri": "MRI",
+            "ocr": "OCR",
+            "npi": "NPI",
+            "icn": "ICN",
+            "dob": "DOB",
+            "seoc": "SEOC",
+            "lomn": "LOMN",
+        }
+
+        for raw, rendered in acronym_map.items():
+            text = re.sub(rf"\b{raw}\b", rendered, text, flags=re.IGNORECASE)
+
+        if text and text[0].islower():
+            text = text[0].upper() + text[1:]
+
+        return text
+
+    def title_case_field_candidate(self, value):
+
+        raw = " ".join(str(value or "").strip().split())
+        if not raw:
+            return ""
+
+        raw = re.sub(r"\bPain Man\b", "Pain Management", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\bVa\b", "VA", raw)
+
+        uppercase_tokens = {"VA", "MRI", "ICD", "NPI", "ICN", "DOB", "SEOC", "GA", "SC", "NC"}
+        parts = re.split(r"(\s+)", raw)
+        rendered = []
+
+        for part in parts:
+            if not part:
+                continue
+            if part.isspace():
+                rendered.append(part)
+                continue
+
+            if re.search(r"[A-Za-z]", part):
+                stripped = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", part)
+                if stripped.upper() in uppercase_tokens:
+                    rendered.append(part.replace(stripped, stripped.upper()))
+                else:
+                    rendered.append(part.title())
+            else:
+                rendered.append(part)
+
+        return "".join(rendered).strip()
+
     def extract_operator_issue_title(self, issue):
 
         if isinstance(issue, dict):
             return self.format_detail_value(issue.get("title"))
         return self.format_detail_value(issue)
+
+    def significant_text_tokens(self, value):
+
+        stop_words = {
+            "a", "an", "and", "the", "for", "of", "to", "is", "are", "but", "or",
+            "with", "across", "packet", "documents", "values", "value", "conflicting",
+            "resolve", "reviewer", "review", "required", "missing", "present", "appears",
+            "detected", "confirmed", "document", "level",
+        }
+        return {
+            token
+            for token in re.findall(r"[a-z]+", str(value or "").lower())
+            if token and token not in stop_words
+        }
+
+    def choose_primary_fix(self, main_blocker, fix_items):
+
+        rendered_fixes = [
+            self.format_detail_value(item)
+            for item in list(fix_items or [])
+            if item not in (None, "", [], {})
+        ]
+        if not rendered_fixes:
+            return None
+
+        blocker_tokens = self.significant_text_tokens(main_blocker)
+        if not blocker_tokens:
+            return rendered_fixes[0]
+
+        best_fix = rendered_fixes[0]
+        best_score = -1
+
+        for fix_text in rendered_fixes:
+            overlap = blocker_tokens.intersection(self.significant_text_tokens(fix_text))
+            score = len(overlap)
+            if score > best_score:
+                best_score = score
+                best_fix = fix_text
+
+        return best_fix
 
     def build_operator_quick_read_card(self, intel_display, issue_groups, fix_items, review_rationale, margin_top=0):
 
@@ -43,13 +346,13 @@ class MainWindowPacketUiMixin:
         review_priority = self.format_operator_display_value("Review Priority", intel_display.get("review_priority"))
 
         missing_items = list(intel_display.get("missing_items") or [])
-        main_blocker = None
-        if missing_items:
+        main_blocker = self.format_detail_value(intel_display.get("main_blocker")) if intel_display.get("main_blocker") not in (None, "", [], {}) else None
+        if not main_blocker and missing_items:
             main_blocker = self.format_detail_value(missing_items[0])
-        elif issue_groups:
+        elif not main_blocker and issue_groups:
             main_blocker = self.extract_operator_issue_title(issue_groups[0])
 
-        first_fix = self.format_detail_value(fix_items[0]) if fix_items else None
+        first_fix = self.choose_primary_fix(main_blocker, fix_items)
         first_rationale = self.format_detail_value(review_rationale[0]) if review_rationale else None
 
         overall_parts = []
@@ -57,17 +360,24 @@ class MainWindowPacketUiMixin:
             overall_parts.append(f"This packet is {readiness.lower()}.")
         elif packet_strength not in (None, "", "Missing"):
             overall_parts.append(f"This is currently a {packet_strength.lower()} packet.")
-        if next_action not in (None, "", "Missing"):
-            overall_parts.append(f"The next move is {next_action.lower()}.")
+        primary_move = first_fix or next_action
+        if primary_move not in (None, "", "Missing"):
+            action_text = str(primary_move).strip()
+            if action_text and action_text[-1] not in ".!?":
+                action_text += "."
+            overall_parts.append(f"Next move: {action_text}")
         overall_summary = " ".join(overall_parts).strip() or "Review the packet summary and issues below."
 
         review_posture_parts = []
         if confidence not in (None, "", "Missing"):
-            review_posture_parts.append(f"Confidence {confidence}")
+            review_posture_parts.append(f"{confidence} confidence")
         if workflow_queue not in (None, "", "Missing"):
-            review_posture_parts.append(f"Queue {workflow_queue}")
+            review_posture_parts.append(str(workflow_queue).strip())
         if review_priority not in (None, "", "Missing"):
-            review_posture_parts.append(f"Priority {review_priority}")
+            priority_text = str(review_priority).strip()
+            if priority_text and not priority_text.lower().endswith("priority"):
+                priority_text = f"{priority_text} priority"
+            review_posture_parts.append(priority_text)
         review_posture = " | ".join(review_posture_parts)
 
         quick_rows = [("Overall", overall_summary)]
@@ -87,6 +397,147 @@ class MainWindowPacketUiMixin:
             margin_top=margin_top,
         )
 
+    def build_score_breakdown_card(self, intel_display, margin_top=12):
+
+        intel_display = dict(intel_display or {})
+        rows = []
+        for item in list(intel_display.get("score_breakdown") or []):
+            label = str(item.get("label") or "").strip()
+            value = str(item.get("value") or "").strip()
+            if not label or not value:
+                continue
+            rows.append((label, value))
+
+        if not rows:
+            return ""
+
+        return self.build_detail_card(
+            "Score Breakdown",
+            self.build_detail_table(rows, value_color="#DCE6F2", show_missing=False),
+            accent_color="#F2C94C",
+            margin_top=margin_top,
+        )
+
+    def packet_conflict_field_aliases(self, field_name):
+
+        normalized = str(field_name or "").strip().lower()
+        alias_map = {
+            "patient_name": {"patient_name", "name"},
+            "ordering_doctor": {"ordering_doctor", "ordering_provider"},
+            "referring_doctor": {"referring_doctor", "referring_provider"},
+        }
+        return alias_map.get(normalized, {normalized})
+
+    def find_packet_field_conflict(self, field_name, result):
+
+        packet_output = dict(((result or {}).get("intel", {}) or {}).get("packet_output", {}) or {})
+        aliases = self.packet_conflict_field_aliases(field_name)
+
+        for conflict in list(packet_output.get("conflicts", []) or []):
+            conflict_field = str(conflict.get("field") or "").strip().lower()
+            if conflict_field in aliases:
+                return dict(conflict)
+
+        return {}
+
+    def score_field_candidate(self, field_name, value):
+
+        text = " ".join(str(value or "").strip().split())
+        if not text:
+            return -999
+
+        field_key = str(field_name or "").strip().lower()
+        lowered = text.lower()
+        score = float(len(text))
+
+        if re.search(r"[A-Za-z]\d|\d[A-Za-z]", text):
+            score -= 20
+        if lowered.startswith("hpi "):
+            score -= 8
+
+        if field_key in {"patient_name", "name"}:
+            alpha_tokens = re.findall(r"[A-Za-z][A-Za-z'\\-]*", text)
+            if len(alpha_tokens) >= 2:
+                score += 15
+            if any(len(token) == 1 for token in alpha_tokens):
+                score -= 4
+        elif field_key in {"facility", "clinic_name", "location"}:
+            if any(term in lowered for term in ["medical center", "neurosciences", "pain", "center"]):
+                score += 8
+            if lowered.endswith(" pain man"):
+                score -= 4
+            if len(text) < 12:
+                score -= 6
+
+        return score
+
+    def preferred_conflict_candidate(self, field_name, current_value, result):
+
+        conflict = self.find_packet_field_conflict(field_name, result)
+        candidates = [current_value]
+        candidates.extend(list(conflict.get("values", []) or []))
+
+        unique_candidates = []
+        seen = set()
+        for candidate in candidates:
+            normalized = " ".join(str(candidate or "").strip().lower().split())
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_candidates.append(str(candidate).strip())
+
+        if not unique_candidates:
+            return None
+
+        ranked = sorted(
+            unique_candidates,
+            key=lambda item: self.score_field_candidate(field_name, item),
+            reverse=True,
+        )
+        return self.title_case_field_candidate(ranked[0])
+
+    def is_suspicious_field_value(self, field_name, value):
+
+        text = " ".join(str(value or "").strip().split())
+        if not text:
+            return False
+
+        field_key = str(field_name or "").strip().lower()
+        lowered = text.lower()
+
+        if re.search(r"[A-Za-z]\d|\d[A-Za-z]", text):
+            return True
+        if lowered.startswith("hpi "):
+            return True
+        if field_key in {"clinic_name", "facility", "location"} and lowered.endswith(" pain man"):
+            return True
+        if field_key in {"patient_name", "name"} and len(re.findall(r"[A-Za-z][A-Za-z'\\-]*", text)) < 2:
+            return True
+
+        return False
+
+    def format_packet_field_value_for_details(self, field_name, value, result):
+
+        display_value = self.format_packet_display_value(field_name, value)
+        conflict = self.find_packet_field_conflict(field_name, result)
+        if not conflict:
+            return display_value
+
+        preferred = self.preferred_conflict_candidate(field_name, display_value, result)
+        if not preferred:
+            return display_value
+
+        current_normalized = " ".join(str(display_value or "").strip().lower().split())
+        preferred_normalized = " ".join(str(preferred or "").strip().lower().split())
+
+        if preferred_normalized != current_normalized and (
+            self.is_suspicious_field_value(field_name, display_value)
+            or str(field_name or "").strip().lower() == "patient_name"
+        ):
+            return f"Likely: {preferred}"
+
+        return display_value
+
     def normalize_comparison_value(self, value):
 
         normalized = self.format_detail_value(value)
@@ -103,6 +554,7 @@ class MainWindowPacketUiMixin:
         normalized = re.sub(r"\s*\([^)]*\)", "", normalized)
         normalized = re.sub(r"\s*;\s*seen on pages?.*$", "", normalized)
         normalized = re.sub(r"\s*seen on pages?.*$", "", normalized)
+        normalized = normalized.replace("appears present but unfilled", "is present but unfilled")
         normalized = " ".join(normalized.strip().split())
         return normalized
 
@@ -120,6 +572,13 @@ class MainWindowPacketUiMixin:
                 normalized_items.append(normalized)
 
         return sorted(set(normalized_items))
+
+    def build_active_review_flags(self, missing_items, issue_items):
+
+        return sorted(
+            set(self.normalize_comparison_items(missing_items))
+            | set(self.normalize_comparison_items(issue_items))
+        )
 
     def build_current_review_signature(self, file_path, result):
 
@@ -147,12 +606,23 @@ class MainWindowPacketUiMixin:
             str((row or {}).get("case_key") or ""),
         )
 
+    def extract_redacted_file_extension(self, file_reference):
+
+        match = re.match(r"^(\.[a-z0-9]+):", str(file_reference or "").strip().lower())
+        if match:
+            return match.group(1)
+        return None
+
     def find_previous_packet_run(self, file_path, result, limit=250):
 
         current_snapshot = build_run_snapshot(file_path, result)
         case_key = str(current_snapshot.get("case_key") or "")
         file_reference = str(current_snapshot.get("file_name") or "")
         current_signature = self.build_current_review_signature(file_path, result)
+        current_extension = self.extract_redacted_file_extension(file_reference)
+
+        exact_matches = []
+        extension_matches = []
 
         for row in get_recent_packet_runs(limit=limit):
             row_case_key = str((row or {}).get("case_key") or "")
@@ -170,9 +640,29 @@ class MainWindowPacketUiMixin:
             if self.build_previous_review_signature(row) == current_signature:
                 continue
 
-            return row
+            if file_reference and row_file_reference == file_reference:
+                exact_matches.append(row)
+                continue
+
+            row_extension = self.extract_redacted_file_extension(row_file_reference)
+
+            if current_extension and row_extension == current_extension:
+                extension_matches.append(row)
+                continue
+
+            if not current_extension:
+                extension_matches.append(row)
+
+        if exact_matches:
+            return exact_matches[0]
+        if extension_matches:
+            return extension_matches[0]
 
         return None
+
+    def format_repeat_review_item(self, value):
+
+        return self.sentence_case_phrase(value)
 
     def format_repeat_review_timestamp(self, value):
 
@@ -233,6 +723,8 @@ class MainWindowPacketUiMixin:
         )
         previous_missing = self.normalize_comparison_items(previous_summary.get("missing_items", []))
         current_missing = self.normalize_comparison_items(current_intel_display.get("missing_items", []))
+        previous_flags = self.build_active_review_flags(previous_missing, previous_issues)
+        current_flags = self.build_active_review_flags(current_missing, current_issues)
 
         previous_score = int((previous_run or {}).get("score", 0) or 0)
         current_score = int((result or {}).get("score", 0) or 0)
@@ -262,15 +754,17 @@ class MainWindowPacketUiMixin:
         resolved_items = []
         new_items = []
 
-        resolved_missing = sorted(set(previous_missing) - set(current_missing))
-        new_missing = sorted(set(current_missing) - set(previous_missing))
-        resolved_issues = sorted(set(previous_issues) - set(current_issues))
-        new_issues = sorted(set(current_issues) - set(previous_issues))
+        resolved_flags = sorted(set(previous_flags) - set(current_flags))
+        new_flags = sorted(set(current_flags) - set(previous_flags))
 
-        resolved_items.extend(f"Missing item resolved: {self.format_field(item)}" for item in resolved_missing)
-        resolved_items.extend(f"Issue resolved: {self.format_field(item)}" for item in resolved_issues)
-        new_items.extend(f"New missing item: {self.format_field(item)}" for item in new_missing)
-        new_items.extend(f"New issue: {self.format_field(item)}" for item in new_issues)
+        resolved_items.extend(
+            f"Issue resolved: {self.format_repeat_review_item(item)}"
+            for item in resolved_flags
+        )
+        new_items.extend(
+            f"New issue: {self.format_repeat_review_item(item)}"
+            for item in new_flags
+        )
 
         if not resolved_items and not new_items and score_delta == 0:
             new_items.append("This packet matches the previous reviewed state closely.")
@@ -552,16 +1046,16 @@ class MainWindowPacketUiMixin:
                 continue
 
             subtitle_html = (
-                f"<div style=\"color:#9CA3AF; font-size:11px; margin-top:4px;\">{html.escape(subtitle)}</div>"
+                f"<div style=\"color:#9CA3AF; font-size:11px; margin-top:4px; text-align:left;\">{html.escape(subtitle)}</div>"
                 if subtitle else ""
             )
 
             rendered_tiles.append(
                 "<div style=\"display:inline-block; width:31%; min-width:180px; vertical-align:top; "
                 "margin:0 1.5% 12px 0; padding:12px 14px; background-color:#10161E; "
-                f"border:1px solid #253243; border-top:3px solid {accent}; border-radius:8px; box-sizing:border-box;\">"
-                f"<div style=\"color:#FFFFFF; font-size:12px; font-weight:600;\">{html.escape(title)}</div>"
-                f"<div style=\"color:{accent}; font-size:24px; font-weight:700; margin-top:6px;\">{html.escape(value)}</div>"
+                f"border:1px solid #253243; border-top:3px solid {accent}; border-radius:8px; box-sizing:border-box; text-align:left;\">"
+                f"<div style=\"color:#FFFFFF; font-size:12px; font-weight:600; text-align:left;\">{html.escape(title)}</div>"
+                f"<div style=\"color:{accent}; font-size:24px; font-weight:700; margin-top:6px; text-align:left;\">{html.escape(value)}</div>"
                 f"{subtitle_html}</div>"
             )
 
@@ -576,8 +1070,8 @@ class MainWindowPacketUiMixin:
             f"<div style=\"margin-top:{margin_top}px; padding:12px 14px; "
             f"background-color:#10161E; border:1px solid #253243; "
             f"border-left:3px solid {accent_color}; border-radius:8px; "
-            f"box-sizing:border-box; overflow-wrap:anywhere; word-break:break-word;\">"
-            f"<div style=\"color:#FFFFFF; font-weight:700; margin-bottom:8px;\">"
+            f"box-sizing:border-box; overflow-wrap:anywhere; word-break:break-word; text-align:left;\">"
+            f"<div style=\"color:#FFFFFF; font-weight:700; margin-bottom:8px; text-align:left;\">"
             f"{html.escape(title)}</div>{body_html}</div>"
         )
 
@@ -595,10 +1089,10 @@ class MainWindowPacketUiMixin:
             rendered_rows.append(
                 "<tr>"
                 f"<td valign=\"top\" style=\"color:#FFFFFF; font-weight:600; padding:3px 12px 3px 0; width:38%; "
-                f"white-space:normal; overflow-wrap:anywhere; word-break:break-word;\">"
+                f"white-space:normal; overflow-wrap:anywhere; word-break:break-word; text-align:left;\">"
                 f"{html.escape(str(label))}</td>"
                 f"<td valign=\"top\" style=\"color:{row_color}; padding:3px 0; "
-                f"white-space:normal; overflow-wrap:anywhere; word-break:break-word;\">"
+                f"white-space:normal; overflow-wrap:anywhere; word-break:break-word; text-align:left;\">"
                 f"{html.escape(display_value)}</td>"
                 "</tr>"
             )
@@ -608,7 +1102,7 @@ class MainWindowPacketUiMixin:
 
         return (
             "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" "
-            "style=\"border-collapse:collapse; table-layout:fixed; width:100%;\">"
+            "style=\"border-collapse:collapse; table-layout:fixed; width:100%; text-align:left;\">"
             + "".join(rendered_rows) +
             "</table>"
         )
@@ -624,7 +1118,7 @@ class MainWindowPacketUiMixin:
         for item in items:
             lines.append(
                 f"<div style=\"color:{color}; margin:0 0 6px 0; white-space:normal; "
-                f"overflow-wrap:anywhere; word-break:break-word; line-height:1.45;\">"
+                f"overflow-wrap:anywhere; word-break:break-word; line-height:1.45; text-align:left;\">"
                 f"{html.escape(bullet)} {html.escape(self.format_detail_value(item))}</div>"
             )
 
@@ -651,14 +1145,14 @@ class MainWindowPacketUiMixin:
             for detail in details:
                 detail_lines.append(
                     f"<div style=\"color:{detail_color}; margin:4px 0 0 22px; white-space:normal; "
-                    f"overflow-wrap:anywhere; word-break:break-word; line-height:1.4;\">"
+                    f"overflow-wrap:anywhere; word-break:break-word; line-height:1.4; text-align:left;\">"
                     f"• {html.escape(self.format_detail_value(detail))}</div>"
                 )
 
             groups_html.append(
                 f"<div style=\"margin:0 0 8px 0;\">"
                 f"<div style=\"color:{color}; white-space:normal; overflow-wrap:anywhere; "
-                f"word-break:break-word; line-height:1.45;\">{html.escape(bullet)} {html.escape(group_title)}</div>"
+                f"word-break:break-word; line-height:1.45; text-align:left;\">{html.escape(bullet)} {html.escape(group_title)}</div>"
                 f"{''.join(detail_lines)}</div>"
             )
 
@@ -670,7 +1164,7 @@ class MainWindowPacketUiMixin:
             return "<div style=\"color:#9CA3AF;\">No data</div>"
 
         header_html = "".join(
-            f"<td style=\"color:#FFFFFF; font-weight:700; padding:6px 8px;\">{html.escape(str(header))}</td>"
+            f"<td style=\"color:#FFFFFF; font-weight:700; padding:6px 8px; text-align:left;\">{html.escape(str(header))}</td>"
             for header in headers
         )
 
@@ -682,13 +1176,13 @@ class MainWindowPacketUiMixin:
             for index, value in enumerate(row):
                 color = column_colors[index] if index < len(column_colors) else "#DCE6F2"
                 cells.append(
-                    f"<td style=\"color:{color}; padding:6px 8px; vertical-align:top;\">"
+                    f"<td style=\"color:{color}; padding:6px 8px; vertical-align:top; text-align:left;\">"
                     f"{html.escape(self.format_detail_value(value))}</td>"
                 )
             rendered_rows.append("<tr>" + "".join(cells) + "</tr>")
 
         return (
-            "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;\">"
+            "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse; text-align:left;\">"
             f"<tr>{header_html}</tr>"
             + "".join(rendered_rows) +
             "</table>"

@@ -301,12 +301,27 @@ def build_prediction_watchpoints(predictive_modeling, calibration, provider_outc
 
 
 def build_predictive_learning_snapshot(all_runs, all_events):
-    from TrueCore.core.statistical_scoring import build_outcome_model, summarize_outcome_model
+    from TrueCore.core.statistical_scoring import (
+        build_model_validation_summary,
+        build_threshold_guidance,
+        build_outcome_model,
+        summarize_outcome_model,
+    )
 
     model = build_outcome_model(all_runs=all_runs, all_events=all_events)
     model_summary = summarize_outcome_model(model)
     return {
         "model": model,
         "model_summary": model_summary,
+        "validation_summary": build_model_validation_summary(
+            model,
+            all_runs=all_runs,
+            all_events=all_events,
+        ),
+        "threshold_guidance": build_threshold_guidance(
+            model,
+            all_runs=all_runs,
+            all_events=all_events,
+        ),
         "outcome_learning_health": build_outcome_learning_health(all_events, model_summary),
     }

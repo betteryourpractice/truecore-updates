@@ -46,6 +46,8 @@ class TrueCorePipeline:
 
         packet.output["packet_label"] = self.build_packet_label(packet)
         packet.output["packet_score"] = packet.packet_score
+        packet.output["packet_legacy_score"] = getattr(packet, "packet_legacy_score", None)
+        packet.output["packet_rubric"] = dict(getattr(packet, "packet_rubric", {}) or {})
         packet.output["packet_evidence_score"] = getattr(packet, "packet_evidence_score", None)
         packet.output["packet_evidence_band"] = getattr(packet, "packet_evidence_band", None)
         packet.output["packet_assembly_score"] = getattr(packet, "packet_assembly_score", None)
@@ -70,6 +72,7 @@ class TrueCorePipeline:
         packet.output["packet_confidence"] = packet.packet_confidence
         packet.output["packet_strength"] = packet.packet_strength
         packet.output["approval_probability"] = packet.approval_probability
+        packet.output["packet_main_blocker"] = getattr(packet, "packet_main_blocker", None)
         packet.output["source_type"] = packet.source_type
         packet.output["detected_documents"] = sorted(packet.detected_documents)
         packet.output["fields"] = packet.fields

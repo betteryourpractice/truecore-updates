@@ -493,3 +493,12 @@ CHANGES
 
 * Use full local history for Admin and local rollups 
 
+
+
+VERSION: 5
+DATE: 2026-05-17
+
+CHANGES
+
+* Rubric scoring, math tab, office comparison simplification, and packet detail polish
+

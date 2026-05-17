@@ -68,6 +68,8 @@ class Packet:
         self.policy_intelligence = {}
         self.deployment_intelligence = {}
         self.packet_score = None
+        self.packet_legacy_score = None
+        self.packet_rubric = {}
         self.packet_evidence_score = None
         self.packet_evidence_band = None
         self.packet_assembly_score = None
@@ -92,6 +94,7 @@ class Packet:
         self.packet_strength = None
         self.approval_probability = None
         self.packet_confidence = None
+        self.packet_main_blocker = None
 
         # Review
         self.needs_review = False

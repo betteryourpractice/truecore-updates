@@ -444,11 +444,50 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         details_layout.addWidget(details_title)
 
+        self.details_tabs = QTabWidget()
+        self.details_tabs.setObjectName("packetDetailsTabs")
+        self.details_tabs.setStyleSheet(
+            """
+            QTabWidget#packetDetailsTabs::pane {
+                border-top: 1px solid #41536D;
+                margin-top: 8px;
+            }
+            QTabWidget#packetDetailsTabs QTabBar::tab {
+                background-color: #172331;
+                color: #93C9FF;
+                border: 1px solid #34465C;
+                border-bottom: none;
+                padding: 8px 18px;
+                min-width: 124px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 4px;
+                font-weight: 600;
+            }
+            QTabWidget#packetDetailsTabs QTabBar::tab:selected {
+                background-color: #DDE7F3;
+                color: #122033;
+                border-color: #8FB6E3;
+                font-weight: 700;
+            }
+            QTabWidget#packetDetailsTabs QTabBar::tab:hover {
+                background-color: #BFD2E8;
+                color: #112030;
+            }
+            """
+        )
+
         self.details = QTextEdit()
         self.details.setReadOnly(True)
         self.details.setFont(QFont("Segoe UI", 10))
+        self.details_tabs.addTab(self.details, "Packet Details")
 
-        details_layout.addWidget(self.details)
+        self.details_math = QTextEdit()
+        self.details_math.setReadOnly(True)
+        self.details_math.setFont(QFont("Segoe UI", 10))
+        self.details_tabs.addTab(self.details_math, "Math")
+
+        details_layout.addWidget(self.details_tabs)
 
         details_panel.setLayout(details_layout)
         right.addWidget(details_panel)
@@ -741,10 +780,53 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             "</div></body></html>"
         )
 
+    def build_packet_math_empty_state_html(self, state="startup"):
+
+        state_titles = {
+            "startup": "Score Math will appear here",
+            "files_loaded": "Analyze the loaded packets first",
+            "analyzing": "TrueCore is still scoring the packet",
+            "no_selection": "Select a packet to open its score math",
+            "no_result": "No packet math is available for this row",
+            "cleared": "Packet math was cleared with the last results",
+            "post_analysis": "Select a packet row to inspect the scoring math",
+        }
+
+        title = state_titles.get(state, state_titles["startup"])
+        steps = [
+            "Open a packet result from the table on the left.",
+            "Use the Math tab to see the rubric points, consistency points, and approval-outlook math.",
+            "This tab explains how the visible score was built for the selected packet.",
+        ]
+        steps_html = "".join(
+            f"<li style=\"margin-bottom:8px;\">{html.escape(str(step))}</li>"
+            for step in steps
+        )
+
+        return (
+            "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+            "font-family:'Segoe UI'; font-size:13px; line-height:1.5; margin:0; text-align:left;\">"
+            "<div style=\"margin:8px 0 0 0; padding:20px 22px; background:#151C26; "
+            "border:1px solid #243244; border-radius:14px; text-align:left;\">"
+            f"<div style=\"font-size:20px; font-weight:700; color:#FFFFFF; margin-bottom:8px; text-align:left;\">{html.escape(title)}</div>"
+            "<div style=\"color:#A9B6C7; margin-bottom:14px; text-align:left;\">"
+            "The Math tab is the packet-by-packet scoring worksheet for the current result."
+            "</div>"
+            "<div style=\"display:inline-block; padding:6px 10px; border-radius:999px; "
+            "background:#0F1824; border:1px solid #F2C94C; color:#F7D774; font-size:11px; "
+            "font-weight:600; margin-bottom:14px;\">Score Explanation</div>"
+            "<ol style=\"margin:0 0 0 18px; padding:0; color:#DCE6F2; text-align:left;\">"
+            f"{steps_html}"
+            "</ol>"
+            "</div></body></html>"
+        )
+
     def show_reviewer_empty_state(self, state="startup"):
 
         if hasattr(self, "details") and self.details:
             self.details.setHtml(self.build_reviewer_empty_state_html(state))
+        if hasattr(self, "details_math") and self.details_math:
+            self.details_math.setHtml(self.build_packet_math_empty_state_html(state))
 
     def get_selected_table_file(self):
 
@@ -779,8 +861,111 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         return 0
 
     def format_field(self,name):
+        text = str(name or "").strip()
+        if not text:
+            return ""
 
-        return name.replace("_"," ").title()
+        token_map = {
+            "api": "API",
+            "csv": "CSV",
+            "db": "DB",
+            "dob": "DOB",
+            "gui": "GUI",
+            "hipaa": "HIPAA",
+            "icd": "ICD",
+            "icn": "ICN",
+            "id": "ID",
+            "it": "IT",
+            "json": "JSON",
+            "lomn": "LOMN",
+            "mri": "MRI",
+            "npi": "NPI",
+            "ocr": "OCR",
+            "pdf": "PDF",
+            "phi": "PHI",
+            "ppv": "PPV",
+            "npv": "NPV",
+            "rfs": "RFS",
+            "seoc": "SEOC",
+            "ui": "UI",
+            "va": "VA",
+        }
+
+        cleaned = text.replace("_", " ").replace("-", " - ").replace("/", " / ")
+        parts = re.split(r"(\s+|/|-)", cleaned)
+        rendered = []
+
+        for part in parts:
+            if not part:
+                continue
+            if part.isspace() or part in {"/", "-"}:
+                rendered.append(part)
+                continue
+
+            normalized = part.lower()
+            if normalized in token_map:
+                rendered.append(token_map[normalized])
+            elif re.fullmatch(r"p\d+", normalized):
+                rendered.append(normalized.upper())
+            else:
+                rendered.append(part.title())
+
+        return re.sub(r"\s+", " ", "".join(rendered)).replace(" / ", "/").replace(" - ", "-").strip()
+
+    def format_machine_text(self, value):
+
+        text = str(value or "").strip()
+        if not text:
+            return ""
+
+        normalized = re.sub(r"\s+", " ", text).strip()
+        lowered = normalized.lower()
+        exact_map = {
+            "n/a": "N/A",
+            "ready": "Ready",
+            "hold": "Hold",
+            "requires_review": "Review Required",
+            "not_ready": "Not Ready",
+            "needs_review": "Needs Review",
+            "submission_queue": "Submission Queue",
+            "review_queue": "Review Queue",
+            "correction_queue": "Correction Queue",
+            "senior_review_queue": "Senior Review Queue",
+            "submit_packet": "Submit Packet",
+            "route_to_review": "Route to Review",
+            "attach_missing_document": "Attach Missing Document",
+            "attach_missing_documents": "Attach Missing Documents",
+            "verify_missing_field": "Verify Missing Field",
+            "resolve_conflict": "Resolve Conflict",
+            "strengthen_medical_support": "Strengthen Medical Support",
+            "align_clinical_support": "Align Clinical Support",
+            "escalate_packet_integrity_review": "Escalate Packet Integrity Review",
+            "correct_service_dates": "Correct Service Dates",
+            "remove_duplicate_pages": "Remove Duplicate Pages",
+            "collect_missing_evidence": "Collect Missing Evidence",
+            "strengthen_procedure_support": "Strengthen Procedure Support",
+            "hold_for_correction": "Hold for Correction",
+            "manual_review_required": "Manual Review Required",
+            "packet_integrity_risk": "Packet Integrity Risk",
+            "duplicate_pages_present": "Duplicate Pages Present",
+            "chronology_review_needed": "Chronology Review Needed",
+            "partial_diagnosis_icd_alignment": "Partial Diagnosis / ICD Alignment",
+            "diagnosis_icd_mismatch": "Diagnosis / ICD Mismatch",
+            "moderate_mri_justification": "Moderate MRI Justification",
+            "weak_mri_justification": "Weak MRI Justification",
+            "procedure_without_medical_support": "Procedure Without Medical Support",
+        }
+
+        if lowered in exact_map:
+            return exact_map[lowered]
+
+        if "_" in normalized:
+            return self.format_field(normalized)
+
+        if normalized == lowered and len(normalized.split()) <= 4 and normalized.replace(" ", "").isalnum():
+            return self.format_field(normalized)
+
+        return normalized
 
     def format_detail_value(self, value):
 
@@ -788,10 +973,13 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             return "Missing"
 
         if isinstance(value, bool):
-            return "True" if value else "False"
+            return "Yes" if value else "No"
 
         if isinstance(value, (list, tuple, set)):
-            return ", ".join(str(item) for item in value)
+            return ", ".join(self.format_detail_value(item) for item in value)
+
+        if isinstance(value, str):
+            return self.format_machine_text(value)
 
         return str(value)
 
@@ -821,7 +1009,12 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             return "Yes" if value else "No"
 
         if isinstance(value, (int, float)) and 0 <= float(value) <= 1:
-            if "probability" in label_text or "confidence" in label_text or "trust score" in label_text:
+            if (
+                "probability" in label_text
+                or "outlook" in label_text
+                or "confidence" in label_text
+                or "trust score" in label_text
+            ):
                 return f"{round(float(value) * 100):.0f}%"
 
         if isinstance(value, str):
@@ -845,8 +1038,9 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 "reliability",
                 "policy confidence",
                 "verification band",
+                "main blocker",
             }:
-                return self.format_field(value)
+                return self.format_machine_text(value)
 
         return value
 
@@ -854,7 +1048,15 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         normalized = str(flag or "").strip().lower()
         mapping = {
-            "diagnosis_icd_mismatch": "Diagnosis / ICD mismatch",
+            "diagnosis_icd_mismatch": "Diagnosis / ICD Mismatch",
+            "partial_diagnosis_icd_alignment": "Partial Diagnosis / ICD Alignment",
+            "manual_review_required": "Manual Review Required",
+            "packet_integrity_risk": "Packet Integrity Risk",
+            "duplicate_pages_present": "Duplicate Pages Present",
+            "chronology_review_needed": "Chronology Review Needed",
+            "moderate_mri_justification": "Moderate MRI Justification",
+            "weak_mri_justification": "Weak MRI Justification",
+            "procedure_without_medical_support": "Procedure Without Medical Support",
         }
 
         return mapping.get(normalized, self.format_field(normalized))
@@ -950,7 +1152,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         if not file_path or not result:
             self.scan_diagnostics_view.setHtml(
                 "<html><body style=\"background-color:#11161E; color:#E5E7EB; font-family:'Segoe UI'; "
-                "font-size:13px; line-height:1.45;\"><div style=\"color:#9CA3AF;\">Select a packet result to view scan diagnostics.</div></body></html>"
+                "font-size:13px; line-height:1.45; margin:0; text-align:left;\"><div style=\"color:#9CA3AF; text-align:left;\">Select a packet result to view scan diagnostics.</div></body></html>"
             )
             return
 
@@ -995,8 +1197,8 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         intel_display = dict(((result.get("intel", {}) or {}).get("display", {}) or {}))
         score = self.get_result_score(result)
-        queue = intel_display.get("workflow_queue") or "n/a"
-        denial_risk = intel_display.get("denial_risk") or "n/a"
+        queue = self.format_packet_display_value("Workflow Queue", intel_display.get("workflow_queue") or "n/a")
+        denial_risk = self.format_packet_display_value("Denial Risk", intel_display.get("denial_risk") or "n/a")
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Record Real Outcome")
@@ -1198,15 +1400,15 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 [
                     ("Packet Strength", self.format_packet_display_value("Packet Strength", intel_display.get("packet_strength"))),
                     ("Submission Readiness", self.format_packet_display_value("Submission Readiness", intel_display.get("submission_readiness"))),
-                    ("Approval Probability", self.format_packet_display_value("Approval Probability", intel_display.get("approval_probability"))),
+                    ("Approval Outlook", self.format_packet_display_value("Approval Outlook", intel_display.get("approval_outlook", intel_display.get("approval_probability")))),
                     ("Next Action", self.format_packet_display_value("Next Action", intel_display.get("next_action"))),
+                    ("Main Blocker", self.format_packet_display_value("Main Blocker", intel_display.get("main_blocker"))),
                 ]
             )
             decision_rows = [
                 ("Evidence Strength", self.format_packet_display_value("Evidence Strength", intel_display.get("evidence_strength"))),
                 ("Packet Assembly", self.format_packet_display_value("Packet Assembly", intel_display.get("packet_assembly"))),
                 ("Invariant Coverage", self.format_packet_display_value("Invariant Coverage", intel_display.get("invariant_coverage"))),
-                ("Packet Confidence", self.format_packet_display_value("Packet Confidence", intel_display.get("packet_confidence"))),
                 ("Packet Profile", self.format_packet_display_value("Packet Profile", intel_display.get("packet_profile"))),
                 ("Packet Archetype", self.format_packet_display_value("Packet Archetype", intel_display.get("packet_archetype"))),
                 ("Format Variability", self.format_packet_display_value("Format Variability", intel_display.get("format_variability"))),
@@ -1232,7 +1434,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 key_rows.append(
                     (
                         self.format_packet_field_label(field_name),
-                        self.format_packet_display_value(field_name, remaining_fields.pop(field_name)),
+                        self.format_packet_field_value_for_details(field_name, remaining_fields.pop(field_name), result),
                     )
                 )
 
@@ -1241,7 +1443,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 clinical_rows.append(
                     (
                         self.format_packet_field_label(field_name),
-                        self.format_packet_display_value(field_name, remaining_fields.pop(field_name)),
+                        self.format_packet_field_value_for_details(field_name, remaining_fields.pop(field_name), result),
                     )
                 )
 
@@ -1249,7 +1451,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             key_rows.append(
                 (
                     self.format_packet_field_label(field_name),
-                    self.format_packet_display_value(field_name, value),
+                    self.format_packet_field_value_for_details(field_name, value, result),
                 )
             )
 
@@ -1355,7 +1557,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         return (
             "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-            "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+            "font-family:'Segoe UI'; font-size:13px; line-height:1.45; margin:0; text-align:left;\">"
             f"{rendered_sections}</body></html>"
         )
 
@@ -1417,14 +1619,14 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         if intel_display:
             intel_summary_rows = [
-                ("Packet Confidence", intel_display.get("packet_confidence")),
-                ("Approval Probability", intel_display.get("approval_probability")),
-                ("Packet Strength", intel_display.get("packet_strength")),
-                ("Submission Readiness", intel_display.get("submission_readiness")),
-                ("Workflow Queue", intel_display.get("workflow_queue")),
-                ("Next Action", intel_display.get("next_action")),
-                ("Denial Risk", intel_display.get("denial_risk")),
-                ("Review Priority", intel_display.get("review_priority")),
+                ("Packet Confidence", self.format_packet_display_value("Packet Confidence", intel_display.get("packet_confidence"))),
+                ("Approval Outlook", self.format_packet_display_value("Approval Outlook", intel_display.get("approval_outlook", intel_display.get("approval_probability")))),
+                ("Packet Strength", self.format_packet_display_value("Packet Strength", intel_display.get("packet_strength"))),
+                ("Submission Readiness", self.format_packet_display_value("Submission Readiness", intel_display.get("submission_readiness"))),
+                ("Workflow Queue", self.format_packet_display_value("Workflow Queue", intel_display.get("workflow_queue"))),
+                ("Next Action", self.format_packet_display_value("Next Action", intel_display.get("next_action"))),
+                ("Denial Risk", self.format_packet_display_value("Denial Risk", intel_display.get("denial_risk"))),
+                ("Review Priority", self.format_packet_display_value("Review Priority", intel_display.get("review_priority"))),
             ]
 
             sections.append(
@@ -1455,22 +1657,32 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         return (
             "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-            "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+            "font-family:'Segoe UI'; font-size:13px; line-height:1.45; margin:0; text-align:left;\">"
             f"{rendered_sections}</body></html>"
         )
 
-    def stringify_export_value(self, value):
+    def stringify_export_value(self, value, label=None):
 
         if value in (None, "", [], {}):
             return ""
 
         if isinstance(value, bool):
-            return "True" if value else "False"
+            return "Yes" if value else "No"
 
         if isinstance(value, (list, tuple, set)):
-            return " | ".join(str(item) for item in value)
+            return " | ".join(
+                self.stringify_export_value(item, label=label)
+                for item in value
+                if item not in (None, "", [], {})
+            )
 
-        return str(value)
+        if label:
+            label_text = str(label or "").strip()
+            if label_text.lower() == "review flags":
+                return self.format_review_flag(value)
+            return self.format_detail_value(self.format_packet_display_value(label_text, value))
+
+        return self.format_detail_value(value)
 
     # -------------------------------------------------
     # SELECT FILES
@@ -1554,15 +1766,26 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         try:
             self.details.setHtml(self.build_packet_details_html(file, result))
+            if hasattr(self, "details_math") and self.details_math:
+                self.details_math.setHtml(self.build_packet_math_html(file, result))
         except Exception as exc:
             self.details.setHtml(
                 "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-                "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+                "font-family:'Segoe UI'; font-size:13px; line-height:1.45; margin:0; text-align:left;\">"
                 "<div style=\"color:#EB5757; font-weight:700; margin-bottom:8px;\">"
                 "Packet Details failed to render</div>"
                 f"<div style=\"color:#F7C2C2;\">{html.escape(str(exc))}</div>"
                 "</body></html>"
             )
+            if hasattr(self, "details_math") and self.details_math:
+                self.details_math.setHtml(
+                    "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
+                    "font-family:'Segoe UI'; font-size:13px; line-height:1.45; margin:0; text-align:left;\">"
+                    "<div style=\"color:#EB5757; font-weight:700; margin-bottom:8px;\">"
+                    "Math view failed to render</div>"
+                    f"<div style=\"color:#F7C2C2;\">{html.escape(str(exc))}</div>"
+                    "</body></html>"
+                )
             self.log(f"Packet Details render failed for {os.path.basename(file)}: {exc}")
         self.update_scan_diagnostics_button()
 
@@ -1620,7 +1843,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 "Issue Details",
                 "Suggested Fixes",
                 "Packet Confidence",
-                "Approval Probability",
+                "Approval Outlook",
                 "Packet Strength",
                 "Submission Readiness",
                 "Workflow Queue",
@@ -1687,33 +1910,33 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                     self.stringify_export_value(result.get("forms",[])),
                     self.stringify_export_value(result.get("issues",[])),
                     self.stringify_export_value(result.get("fixes",[])),
-                    self.stringify_export_value(intel_display.get("packet_confidence")),
-                    self.stringify_export_value(intel_display.get("approval_probability")),
-                    self.stringify_export_value(intel_display.get("packet_strength")),
-                    self.stringify_export_value(intel_display.get("submission_readiness")),
-                    self.stringify_export_value(intel_display.get("workflow_queue")),
-                    self.stringify_export_value(intel_display.get("next_action")),
-                    self.stringify_export_value(intel_display.get("denial_risk")),
-                    self.stringify_export_value(intel_display.get("review_priority")),
-                    self.stringify_export_value(intel_display.get("review_flags",[])),
+                    self.stringify_export_value(intel_display.get("packet_confidence"), "Packet Confidence"),
+                    self.stringify_export_value(intel_display.get("approval_outlook", intel_display.get("approval_probability")), "Approval Outlook"),
+                    self.stringify_export_value(intel_display.get("packet_strength"), "Packet Strength"),
+                    self.stringify_export_value(intel_display.get("submission_readiness"), "Submission Readiness"),
+                    self.stringify_export_value(intel_display.get("workflow_queue"), "Workflow Queue"),
+                    self.stringify_export_value(intel_display.get("next_action"), "Next Action"),
+                    self.stringify_export_value(intel_display.get("denial_risk"), "Denial Risk"),
+                    self.stringify_export_value(intel_display.get("review_priority"), "Review Priority"),
+                    self.stringify_export_value(intel_display.get("review_flags",[]), "Review Flags"),
                     self.stringify_export_value(intel_display.get("missing_items",[])),
                     self.stringify_export_value(intel_display.get("why_weak",[])),
                     self.stringify_export_value(intel_display.get("conflict_items",[])),
                     self.stringify_export_value(intel_display.get("priority_fixes",[])),
                     self.stringify_export_value(intel_display.get("approval_rationale",[])),
-                    self.stringify_export_value(intel_export.get("evidence_sufficiency")),
-                    self.stringify_export_value(intel_export.get("evidence_freshness")),
-                    self.stringify_export_value(intel_export.get("evidence_escalation")),
-                    self.stringify_export_value(intel_export.get("clinical_coherence")),
-                    self.stringify_export_value(intel_export.get("clinical_severity")),
-                    self.stringify_export_value(intel_export.get("conservative_care")),
+                    self.stringify_export_value(intel_export.get("evidence_sufficiency"), "Support Level"),
+                    self.stringify_export_value(intel_export.get("evidence_freshness"), "Freshness"),
+                    self.stringify_export_value(intel_export.get("evidence_escalation"), "Escalation"),
+                    self.stringify_export_value(intel_export.get("clinical_coherence"), "Coherence"),
+                    self.stringify_export_value(intel_export.get("clinical_severity"), "Severity"),
+                    self.stringify_export_value(intel_export.get("conservative_care"), "Conservative Care"),
                     self.stringify_export_value(intel_export.get("denial_category")),
                     self.stringify_export_value(intel_export.get("denial_recovery_score")),
                     self.stringify_export_value(intel_export.get("trust_score")),
                     self.stringify_export_value(intel_export.get("checkpoint_required")),
                     self.stringify_export_value(intel_export.get("coordination_score")),
                     self.stringify_export_value(intel_export.get("reliability_score")),
-                    self.stringify_export_value(intel_export.get("policy_confidence")),
+                    self.stringify_export_value(intel_export.get("policy_confidence"), "Policy Confidence"),
                     self.stringify_export_value(intel_export.get("deployment_confidence")),
                     self.stringify_export_value(intel_export.get("prior_case_count")),
                     self.stringify_export_value(intel_export.get("memory_confidence")),
@@ -1799,6 +2022,14 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 border-radius: 6px;
                 padding: 10px 12px;
                 selection-background-color: #2F80ED;
+                selection-color: #FFFFFF;
+            }
+            QLineEdit:focus {
+                background-color: #111A25;
+                border: 1px solid #57B6FF;
+            }
+            QLineEdit::placeholder {
+                color: #7F8FA5;
             }
             QPushButton {
                 background-color: #1A2430;
@@ -1889,6 +2120,8 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         recent_events = all_events[:12]
         predictive_snapshot = build_predictive_learning_snapshot(all_runs, all_events)
         predictive_model_summary = dict(predictive_snapshot.get("model_summary") or {})
+        predictive_validation_summary = dict(predictive_snapshot.get("validation_summary") or {})
+        predictive_threshold_guidance = dict(predictive_snapshot.get("threshold_guidance") or {})
         outcome_learning_health = dict(predictive_snapshot.get("outcome_learning_health") or {})
         deployment_manifest = build_deployment_manifest()
         deployment_platform = dict(deployment_manifest.get("platform") or {})
@@ -2080,7 +2313,6 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                     snapshot.get("generated_at") or "Unknown",
                     summary.get("packet_count") or 0,
                     format_score_value(summary.get("average_packet_score")),
-                    os.path.basename(snapshot_path),
                 ]
             )
             imported_office_count += 1
@@ -2089,13 +2321,22 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         network_office_rankings = list((network_rollup or {}).get("office_rankings") or [])
         network_office_count = int((network_rollup or {}).get("office_count") or 0) if isinstance(network_rollup, dict) else 0
         network_live = imported_office_count > 0 or network_office_count > 1
-        network_status = "Ready" if network_live else ("Local Preview" if network_rollup else "Pending")
+        network_status = "Ready" if network_live else ("Local Preview" if network_rollup else "Waiting For Imports")
         network_total_packets = (network_rollup or {}).get("total_packet_count")
         network_average_score = (network_rollup or {}).get("average_packet_score")
         network_average_runtime = (network_rollup or {}).get("average_runtime_seconds")
         network_generated_at = (network_rollup or {}).get("generated_at")
         network_office_count = (network_rollup or {}).get("office_count")
         network_org_count = (network_rollup or {}).get("organization_count")
+
+        last_snapshot_exported = "Not exported yet"
+        if snapshot_file_exists:
+            try:
+                last_snapshot_exported = datetime.fromtimestamp(
+                    os.path.getmtime(SNAPSHOT_OUTPUT_PATH)
+                ).strftime("%b %d, %Y %I:%M %p")
+            except OSError:
+                last_snapshot_exported = "Exported"
         try:
             cross_office_intelligence = build_local_cross_office_intelligence(include_current_office=True)
         except Exception:
@@ -2170,9 +2411,9 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             )
 
         imported_library_html = self.build_html_grid_table(
-            ["Office", "Organization", "Generated", "Packets", "Avg Score", "Stored File"],
+            ["Office", "Organization", "Imported", "Packets", "Avg Score"],
             imported_snapshot_rows,
-            column_colors=["#FFFFFF", "#57B6FF", "#9CA3AF", "#DCE6F2", "#F2C94C", "#DCE6F2"],
+            column_colors=["#FFFFFF", "#57B6FF", "#9CA3AF", "#DCE6F2", "#F2C94C"],
         ) if imported_snapshot_rows else "<div style=\"color:#9CA3AF;\">No imported office snapshots yet.</div>"
 
         office_ranking_rows = []
@@ -2355,15 +2596,36 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         predictive_learning_rows = [
             ("Model Availability", "Active" if predictive_model_summary.get("available") else "Learning"),
-            ("Model Type", self.format_field(predictive_model_summary.get("model_type") or predictive_model_summary.get("reason") or "insufficient_history")),
+            ("Learning Approach", self.format_field(predictive_model_summary.get("model_type") or predictive_model_summary.get("reason") or "insufficient_history")),
             ("Labeled Outcomes", predictive_model_summary.get("sample_size") or 0),
             ("Approval Base Rate", format_probability_percent(predictive_model_summary.get("positive_rate"))),
             ("Reliability", self.format_field(predictive_model_summary.get("reliability_band") or outcome_learning_health.get("reliability_band") or "early")),
             ("Reliability Score", predictive_model_summary.get("reliability_score") if predictive_model_summary.get("reliability_score") not in (None, "") else outcome_learning_health.get("reliability_score")),
-            ("Brier Score", predictive_model_summary.get("brier_score")),
-            ("Calibration Error", predictive_model_summary.get("ece")),
-            ("ROC AUC", predictive_model_summary.get("roc_auc")),
+            ("Probability Accuracy", predictive_model_summary.get("brier_score")),
+            ("Confidence Honesty Gap", predictive_model_summary.get("ece")),
+            ("Sorting Strength", predictive_model_summary.get("roc_auc")),
             ("Learning Maturity", self.format_field(outcome_learning_health.get("maturity_band") or "early")),
+        ]
+
+        validation_quality_rows = [
+            ("Ready Calls That Were Right", format_probability_percent(predictive_validation_summary.get("ready_call_accuracy"))),
+            ("Review Calls That Were Right", format_probability_percent(predictive_validation_summary.get("review_call_accuracy"))),
+            ("Ready Packets The Model Caught", format_probability_percent(predictive_validation_summary.get("ready_capture_rate"))),
+            ("Problem Packets The Model Caught", format_probability_percent(predictive_validation_summary.get("problem_catch_rate"))),
+            ("False-Ready Risk", format_probability_percent(predictive_validation_summary.get("false_ready_rate"))),
+            ("Validation Sample", predictive_validation_summary.get("sample_size") or 0),
+            ("Decision Threshold", format_probability_percent(predictive_validation_summary.get("decision_threshold"))),
+            ("Validation Strength", self.format_field(predictive_validation_summary.get("status") or "early")),
+        ]
+
+        threshold_guidance_rows = [
+            ("Current Trust Threshold", format_probability_percent(predictive_threshold_guidance.get("current_threshold"))),
+            ("Suggested Trust Threshold", format_probability_percent(predictive_threshold_guidance.get("suggested_threshold"))),
+            ("Suggested Posture", self.format_field(predictive_threshold_guidance.get("posture") or "too_early")),
+            ("Current False-Ready Risk", format_probability_percent(predictive_threshold_guidance.get("current_false_ready_rate"))),
+            ("Suggested False-Ready Risk", format_probability_percent(predictive_threshold_guidance.get("suggested_false_ready_rate"))),
+            ("Current Ready Capture", format_probability_percent(predictive_threshold_guidance.get("current_ready_capture_rate"))),
+            ("Suggested Ready Capture", format_probability_percent(predictive_threshold_guidance.get("suggested_ready_capture_rate"))),
         ]
 
         outcome_activity_rows = [
@@ -2380,6 +2642,12 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             predictive_guidance.append("Add more real approved and denied outcomes to activate learned probability modeling.")
         if str(predictive_model_summary.get("reliability_band") or outcome_learning_health.get("reliability_band") or "").lower() == "low":
             predictive_guidance.append("Prediction reliability is still low, so approval signals should be treated as directional support.")
+        if predictive_threshold_guidance.get("guidance"):
+            predictive_guidance.append(str(predictive_threshold_guidance.get("guidance")))
+        if predictive_validation_summary.get("false_ready_rate") is not None and float(predictive_validation_summary.get("false_ready_rate") or 0.0) > 0.2:
+            predictive_guidance.append("False-ready risk is still high, so auto-ready style trust should stay conservative.")
+        if predictive_validation_summary.get("sample_size", 0) < 12:
+            predictive_guidance.append("Validation history is still small, so quality metrics should be treated as early signals rather than settled truth.")
         if outcome_learning_health.get("correction_count", 0) + outcome_learning_health.get("resubmission_count", 0) >= 3:
             predictive_guidance.append("Correction and resubmission volume is high enough to justify stronger pre-submit safeguards.")
         if outcome_learning_health.get("override_count", 0) >= 2:
@@ -2393,6 +2661,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             "Rollout Readiness: shows whether this install is in good shape for broader deployment and support.",
             "Office Rollout Status: shows how far this office has moved through onboarding and real-world usage milestones.",
             "Learning Model Status: shows how much real outcome history exists and how trustworthy the learned prediction layer is.",
+            "Prediction Quality Checks: show, in plain English, how often the model's ready and review calls have been right so far.",
             "Recent Packet Runs and Slowest Recent Packets: help you understand live workload and bottlenecks.",
         ]
 
@@ -2616,6 +2885,84 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 ]
             )
 
+        snapshot_help_items = [
+            "Export Office Snapshot creates a de-identified summary of this office's packet history.",
+            "Import Office Snapshots pulls in de-identified summaries from other offices.",
+            "TrueCore refreshes the office comparison automatically after every import.",
+        ]
+
+        current_office_rows = [
+            ("Office", office_profile.get("office_name") or "Default Office"),
+            ("Organization", office_profile.get("organization_id") or "Unknown"),
+            ("Office ID", office_profile.get("office_id") or "Unknown"),
+            ("Packets In Snapshot", current_snapshot_summary.get("packet_count") or 0),
+            ("Average Score", format_score_value(current_snapshot_summary.get("average_packet_score"))),
+            ("Average Runtime", self.format_runtime_value(current_snapshot_summary.get("average_runtime_seconds"))),
+            ("Last Snapshot Export", last_snapshot_exported),
+        ]
+
+        comparison_summary_rows = [
+            ("Comparison Status", network_status),
+            ("Imported Offices", imported_office_count),
+            ("Offices In View", network_office_count if network_live else 1),
+            ("Packets In View", network_total_packets if network_live else current_snapshot_summary.get("packet_count", 0)),
+            ("Average Score", format_score_value(network_average_score if network_live else current_snapshot_summary.get("average_packet_score"))),
+            ("Average Runtime", self.format_runtime_value(network_average_runtime if network_live else current_snapshot_summary.get("average_runtime_seconds"))),
+            ("Last Comparison Refresh", network_generated_at or ("Updates automatically after import" if imported_office_count else "Waiting for imported snapshots")),
+        ]
+
+        comparison_table_html = self.build_html_grid_table(
+            ["Rank", "Office", "Standing", "Packets", "Avg Score", "Avg Runtime"],
+            [[row[0], row[1], row[2], row[3], row[4], row[6]] for row in office_ranking_rows],
+            column_colors=["#9CA3AF", "#FFFFFF", "#57B6FF", "#DCE6F2", "#F2C94C", "#9B8CFF"],
+        ) if network_live else (
+            "<div style=\"color:#9CA3AF; line-height:1.5;\">"
+            "Import another office snapshot to unlock the office comparison table here."
+            "</div>"
+        )
+
+        comparison_issue_title = "Recurring Issues Across Offices" if network_live else "Current Office Top Issues"
+        comparison_issue_items = format_count_pairs(
+            (network_rollup or {}).get("top_issues") if network_live else current_snapshot_summary.get("top_issues")
+        )
+
+        cross_office_sections = [
+            self.build_bullet_section(
+                "How Snapshot Sharing Works",
+                snapshot_help_items,
+                color="#57B6FF",
+                accent_color="#57B6FF",
+                bullet="•",
+            ),
+            self.build_detail_card(
+                "Current Office Snapshot",
+                self.build_detail_table(current_office_rows, value_color="#57B6FF"),
+                accent_color="#2DCE89",
+            ),
+            self.build_detail_card(
+                "Imported Offices",
+                imported_library_html,
+                accent_color="#2DCE89",
+            ),
+            self.build_detail_card(
+                "Comparison Summary",
+                self.build_detail_table(comparison_summary_rows, value_color="#57B6FF"),
+                accent_color="#F2C94C",
+            ),
+            self.build_detail_card(
+                "Office Comparison",
+                comparison_table_html,
+                accent_color="#F2C94C",
+            ),
+            self.build_bullet_section(
+                comparison_issue_title,
+                comparison_issue_items,
+                color="#F2C94C",
+                accent_color="#F2994A",
+                bullet="•",
+            ),
+        ]
+
         overview_tiles = [
             {
                 "title": "Packets Remembered",
@@ -2772,6 +3119,24 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 accent_color="#F2994A",
             ),
             self.build_detail_card(
+                "Prediction Quality Checks",
+                self.build_detail_table(
+                    validation_quality_rows,
+                    value_color="#F2C94C",
+                    show_missing=False,
+                ),
+                accent_color="#F2C94C",
+            ),
+            self.build_detail_card(
+                "Ready-Call Guardrails",
+                self.build_detail_table(
+                    threshold_guidance_rows,
+                    value_color="#57B6FF",
+                    show_missing=False,
+                ),
+                accent_color="#57B6FF",
+            ),
+            self.build_detail_card(
                 "Recorded Real Outcomes",
                 self.build_detail_table(
                     outcome_activity_rows,
@@ -2857,7 +3222,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         def wrap_sections(section_list):
             return (
                 "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-                "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+                "font-family:'Segoe UI'; font-size:13px; line-height:1.45; margin:0; text-align:left;\">"
                 + "".join(section for section in section_list if section)
                 + "</body></html>"
             )
@@ -2901,7 +3266,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 exc = dashboard_error
             error_html = (
                 "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-                "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+                "font-family:'Segoe UI'; font-size:13px; line-height:1.45; margin:0; text-align:left;\">"
                 f"{self.build_detail_card('Admin Panel Error', '<div style=\"color:#EB5757;\">' + html.escape(str(exc)) + '</div>', accent_color='#EB5757', margin_top=0)}"
                 "</body></html>"
             )
@@ -2930,7 +3295,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         start_dir = os.path.dirname(SNAPSHOT_OUTPUT_PATH)
         paths = self.get_admin_open_file_names(
-            "Import Cross-Office Snapshots",
+            "Import Office Snapshots",
             start_dir,
             "JSON Files (*.json)",
         )
@@ -2940,11 +3305,17 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         try:
             imported_paths = import_cross_office_snapshot_files(paths)
-            log_event("cross_office_snapshots_imported", f"{len(imported_paths)} snapshots")
+            output_path = build_local_network_rollup(include_current_office=True)
+            rollup = load_network_rollup(output_path) or {}
+            log_event(
+                "cross_office_snapshots_imported",
+                f"{len(imported_paths)} snapshots | comparison refreshed for {rollup.get('office_count', 0)} offices",
+            )
             self.refresh_admin_panel()
             self.show_admin_message(
                 "Snapshots Imported",
-                f"Imported {len(imported_paths)} de-identified office snapshot(s).",
+                f"Imported {len(imported_paths)} de-identified office snapshot(s).\n\n"
+                f"TrueCore refreshed the comparison view automatically for {rollup.get('office_count', 0)} office(s).",
             )
         except Exception as exc:
             self.show_admin_message("Snapshot Import Failed", str(exc), icon=QMessageBox.Warning)
@@ -3144,11 +3515,14 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             return text_view
 
         overview_tab = QWidget()
+        overview_tab.setStyleSheet("background-color:#11161E;")
         overview_layout = QVBoxLayout(overview_tab)
         overview_layout.setContentsMargins(10, 10, 10, 10)
         overview_layout.setSpacing(10)
 
         dashboard_host = QWidget()
+        dashboard_host.setObjectName("adminDashboardHost")
+        dashboard_host.setStyleSheet("QWidget#adminDashboardHost { background-color:#11161E; }")
         dashboard_layout = QVBoxLayout(dashboard_host)
         dashboard_layout.setContentsMargins(0, 0, 0, 0)
         dashboard_layout.setSpacing(10)
@@ -3156,7 +3530,10 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         dashboard_scroll = QScrollArea()
         dashboard_scroll.setWidgetResizable(True)
         dashboard_scroll.setFrameShape(QFrame.NoFrame)
-        dashboard_scroll.setStyleSheet("QScrollArea { background: transparent; border: 0; }")
+        dashboard_scroll.setStyleSheet(
+            "QScrollArea { background-color:#11161E; border:0; } "
+            "QScrollArea > QWidget > QWidget { background-color:#11161E; }"
+        )
         dashboard_scroll.setWidget(dashboard_host)
         overview_layout.addWidget(dashboard_scroll, 1)
 
@@ -3165,20 +3542,12 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         cross_office_layout.setContentsMargins(10, 10, 10, 10)
         cross_office_layout.setSpacing(10)
 
-        primary_actions = [
-            ("Export Office Snapshot", self.export_office_snapshot_action),
-            ("Import Office Snapshots", self.import_cross_office_snapshots_action),
-            ("Build Network Rollup", self.build_network_rollup_action),
+        snapshot_actions = [
+            ("Export Office Snapshot", self.export_office_snapshot_action, "Create a de-identified snapshot of this office's packet history."),
+            ("Import Office Snapshots", self.import_cross_office_snapshots_action, "Bring in de-identified snapshot files from other offices and refresh comparison automatically."),
+            ("Refresh Comparison", self.refresh_admin_panel, "Refresh the snapshot and comparison view."),
         ]
-        secondary_actions = [
-            ("Export Office Sync Package", self.export_office_sync_package_action),
-            ("Import Network Package", self.import_network_intelligence_package_action),
-            ("Export Network Package", self.export_network_intelligence_package_action),
-            ("Open Data Folder", self.open_cross_office_data_folder_action),
-            ("Refresh", self.refresh_admin_panel),
-        ]
-        cross_office_layout.addWidget(self.build_admin_action_grid(primary_actions, columns=3))
-        cross_office_layout.addWidget(self.build_admin_action_grid(secondary_actions, columns=3))
+        cross_office_layout.addWidget(self.build_admin_action_grid(snapshot_actions, columns=3))
 
         cross_office_text = create_admin_text_view()
         cross_office_layout.addWidget(cross_office_text, 1)
@@ -3210,7 +3579,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         audit_layout.addWidget(audit_text, 1)
 
         tab_widget.addTab(overview_tab, "Overview")
-        tab_widget.addTab(cross_office_tab, "Cross-Office")
+        tab_widget.addTab(cross_office_tab, "Office Comparison")
         tab_widget.addTab(operations_tab, "Operations")
         tab_widget.addTab(audit_tab, "Audit & Logs")
 

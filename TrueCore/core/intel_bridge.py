@@ -64,6 +64,9 @@ FIELD_LABEL_MAP = {
     "treating_provider": "treating provider",
     "followup_provider": "follow-up provider",
     "reason_for_request": "reason for request",
+    "facility": "facility",
+    "clinic_name": "clinic name",
+    "location": "treating location",
     "service_date_range": "service date range",
     "signature_present": "signature",
     "va_icn": "VA ICN",
@@ -169,6 +172,11 @@ TEXT_REPLACEMENTS = {
     "authorization_number": "authorization number",
     "ordering_provider": "ordering doctor",
     "referring_provider": "referring doctor",
+    "treating_provider": "treating provider",
+    "followup_provider": "follow-up provider",
+    "patient_name": "patient name",
+    "clinic_name": "clinic name",
+    "location": "treating location",
     "service_date_range": "service date range",
     "signature_present": "signature",
     "icd_codes": "ICD codes",
@@ -266,14 +274,46 @@ def _rewrite_terms(text):
     return rewritten
 
 
+def _sentence_case_text(text):
+    cleaned = " ".join(str(text or "").strip().split())
+    if not cleaned:
+        return ""
+
+    acronym_map = {
+        "va": "VA",
+        "icd": "ICD",
+        "mri": "MRI",
+        "ocr": "OCR",
+        "npi": "NPI",
+        "icn": "ICN",
+        "dob": "DOB",
+        "seoc": "SEOC",
+        "lomn": "LOMN",
+    }
+
+    for raw, rendered in acronym_map.items():
+        cleaned = re.sub(rf"\b{raw}\b", rendered, cleaned, flags=re.IGNORECASE)
+
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+
+    return cleaned
+
+
 def _clean_issue(text):
-    cleaned = _rewrite_terms(text).strip()
-    return cleaned.rstrip(".")
+    cleaned = _rewrite_terms(text).strip().rstrip(".")
+    return _sentence_case_text(cleaned)
 
 
 def _clean_fix(text):
-    cleaned = _rewrite_terms(text).strip()
-    return cleaned.rstrip(".")
+    cleaned = _rewrite_terms(text).strip().rstrip(".")
+    cleaned = re.sub(
+        r"^\s*resolve conflicting values for name\b",
+        "Resolve conflicting values for patient name",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return _sentence_case_text(cleaned)
 
 
 def _issue_key(text):
@@ -851,6 +891,7 @@ def _build_host_fields(packet, packet_output, approved_icd_codes=None, legacy_re
 
 def _build_issues(packet, packet_output):
     issues = []
+    rubric = dict(packet_output.get("packet_rubric", {}) or {})
 
     for field_name in getattr(packet, "missing_fields", []) or []:
         label = FIELD_LABEL_MAP.get(field_name, field_name.replace("_", " "))
@@ -876,6 +917,12 @@ def _build_issues(packet, packet_output):
         label = FIELD_LABEL_MAP.get(field_name, field_name.replace("_", " "))
         issues.append(f"Conflict in {label}")
 
+    for item in rubric.get("blockers", []):
+        issues.append(_clean_issue(item))
+
+    for item in rubric.get("review_needs", []):
+        issues.append(_clean_issue(item))
+
     if not issues:
         review_summary = packet_output.get("review_summary", {})
 
@@ -888,6 +935,7 @@ def _build_issues(packet, packet_output):
 def _build_fixes(packet, packet_output, legacy_result=None):
     fixes = []
     review_summary = packet_output.get("review_summary", {})
+    rubric = dict(packet_output.get("packet_rubric", {}) or {})
     true_conflict_fields = _true_conflict_fields(packet)
 
     for fix in review_summary.get("priority_fixes", []):
@@ -910,6 +958,9 @@ def _build_fixes(packet, packet_output, legacy_result=None):
         fixes.append(_clean_fix(_rewrite_unfilled_document_language(recommendation, packet)))
 
     for _issue_text, fix_text in _unfilled_document_entries(packet):
+        fixes.append(_clean_fix(fix_text))
+
+    for fix_text in rubric.get("fixes", []):
         fixes.append(_clean_fix(fix_text))
 
     fixes = _merge_unique_strings(fixes, _fix_key)
@@ -1231,6 +1282,7 @@ def _build_issue_details(packet, packet_output):
 
 def _build_intel_display(packet, packet_output):
     review_summary = packet_output.get("review_summary", {})
+    rubric = dict(packet_output.get("packet_rubric", {}) or {})
     workflow_route = packet_output.get("workflow_route", {})
     next_action = packet_output.get("recommended_next_action", {})
     denial_risk = packet_output.get("denial_risk", {})
@@ -1390,10 +1442,48 @@ def _build_intel_display(packet, packet_output):
         assembly_gap_summary = "Substantive support is stronger than packet assembly; paperwork completion is the main blocker."
         review_rationale = _merge_unique_strings([assembly_gap_summary] + review_rationale, _issue_key)
 
+    score_breakdown = []
+    for component in list(rubric.get("components", []) or []):
+        label = str(component.get("label") or "").strip()
+        if not label:
+            continue
+        try:
+            earned_points = float(component.get("earned_points") or 0.0)
+            max_points = float(component.get("max_points") or 0.0)
+            points_text = f"{earned_points:.2f} / {max_points:.2f}"
+        except Exception:
+            points_text = str(component.get("earned_points") or "")
+        summary_text = str(component.get("summary") or "").strip()
+        status_text = _format_human_label(component.get("status")) if component.get("status") else None
+        parts = [part for part in [points_text, status_text, summary_text] if part]
+        score_breakdown.append({
+            "label": label,
+            "value": " | ".join(parts),
+        })
+
+    consistency = dict(rubric.get("consistency", {}) or {})
+    if consistency:
+        score_breakdown.append({
+            "label": str(consistency.get("label") or "Cross-document consistency"),
+            "value": f"{float(consistency.get('earned_points') or 0.0):.2f} / {float(consistency.get('max_points') or 0.0):.2f} | {_format_human_label(consistency.get('status')) if consistency.get('status') else ''} | {str(consistency.get('summary') or '').strip()}".strip(" |"),
+        })
+
+    main_blocker = (
+        rubric.get("main_blocker")
+        or packet_output.get("packet_main_blocker")
+        or (packet_output.get("submission_decision", {}) or {}).get("hold_reasons", [None])[0]
+    )
+
     return {
         "packet_confidence": packet_output.get("packet_confidence", getattr(packet, "packet_confidence", None)),
         "approval_probability": packet_output.get("approval_probability", getattr(packet, "approval_probability", None)),
+        "approval_outlook": packet_output.get("approval_probability", getattr(packet, "approval_probability", None)),
         "packet_strength": packet_output.get("packet_strength", getattr(packet, "packet_strength", None)),
+        "score_basis": rubric.get("score_basis"),
+        "score_story": rubric.get("summary"),
+        "main_blocker": main_blocker,
+        "score_breakdown": score_breakdown,
+        "legacy_score": packet_output.get("packet_legacy_score", getattr(packet, "packet_legacy_score", None)),
         "evidence_strength": _format_scored_band(evidence_strength_score, evidence_strength_band),
         "evidence_strength_score": evidence_strength_score,
         "evidence_strength_band": evidence_strength_band,

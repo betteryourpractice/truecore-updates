@@ -147,6 +147,14 @@ class MainWindowAdminMixin:
                 border: 1px solid #2B3A4D;
                 border-radius: 6px;
                 selection-background-color: #2F80ED;
+                selection-color: #FFFFFF;
+            }
+            QLineEdit:focus, QTextEdit:focus {
+                background-color: #111B27;
+                border: 1px solid #57B6FF;
+            }
+            QLineEdit::placeholder {
+                color: #7F8FA5;
             }
             QHeaderView::section {
                 background-color: #17212D;
@@ -241,6 +249,7 @@ class MainWindowAdminMixin:
         title = QLabel("Office identity and rollout setup")
         title.setStyleSheet("font-size:18px; font-weight:700; color:#FFFFFF;")
         title.setWordWrap(True)
+        title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(title)
 
         intro = QLabel(
@@ -249,6 +258,7 @@ class MainWindowAdminMixin:
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#B8C4D6;")
+        intro.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         layout.addWidget(intro)
 
         form_grid = QGridLayout()
@@ -303,6 +313,7 @@ class MainWindowAdminMixin:
             f"Created: {profile.get('created_at') or 'Unknown'}"
         )
         identity_summary.setWordWrap(True)
+        identity_summary.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         identity_summary.setStyleSheet(
             "background-color:#0F1722; border:1px solid #253243; border-radius:8px; "
             "padding:10px; color:#C9D5E6;"
@@ -334,6 +345,7 @@ class MainWindowAdminMixin:
         )
         footer_hint.setWordWrap(True)
         footer_hint.setStyleSheet("color:#9CA3AF;")
+        footer_hint.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         layout.addWidget(footer_hint)
 
         button_row = QHBoxLayout()
@@ -437,10 +449,12 @@ class MainWindowAdminMixin:
 
             action_label = QLabel("Click to collapse" if expanded else "Click to expand")
             action_label.setStyleSheet("color:#9CA3AF; font-size:11px; font-weight:600;")
+            action_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             header_layout.addWidget(action_label, 0, Qt.AlignRight)
         else:
             title_label = QLabel(title)
             title_label.setStyleSheet("color:#FFFFFF; font-size:14px; font-weight:700;")
+            title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             header_layout.addWidget(title_label, 1)
 
         layout.addLayout(header_layout)
@@ -477,13 +491,16 @@ class MainWindowAdminMixin:
 
         title_label = QLabel(str(title or ""))
         title_label.setStyleSheet("color:#FFFFFF; font-size:12px; font-weight:600;")
+        title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         value_label = QLabel(value_text)
         value_label.setStyleSheet(f"color:{accent}; font-size:24px; font-weight:700;")
+        value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         subtitle_label = QLabel(str(subtitle or ""))
         subtitle_label.setWordWrap(True)
         subtitle_label.setStyleSheet("color:#9CA3AF; font-size:11px;")
+        subtitle_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
 
         layout.addWidget(title_label)
         layout.addWidget(value_label)
@@ -525,6 +542,7 @@ class MainWindowAdminMixin:
         if not items:
             empty = QLabel("No data available yet.")
             empty.setStyleSheet("color:#9CA3AF;")
+            empty.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             layout.addWidget(empty)
             return frame
 
@@ -585,6 +603,7 @@ class MainWindowAdminMixin:
         if not items:
             empty = QLabel("No data available yet.")
             empty.setStyleSheet("color:#9CA3AF;")
+            empty.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             layout.addWidget(empty)
             return frame
 
@@ -619,6 +638,7 @@ class MainWindowAdminMixin:
         if not normalized_points:
             empty = QLabel("No trend data available yet.")
             empty.setStyleSheet("color:#9CA3AF;")
+            empty.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             layout.addWidget(empty)
             return frame
 
@@ -686,6 +706,7 @@ class MainWindowAdminMixin:
         if not rows:
             empty = QLabel("No table data available yet.")
             empty.setStyleSheet("color:#9CA3AF;")
+            empty.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             layout.addWidget(empty)
             return frame
 
@@ -699,6 +720,7 @@ class MainWindowAdminMixin:
         table.verticalHeader().setVisible(False)
         table.horizontalHeader().setStretchLastSection(True)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         table.setAlternatingRowColors(True)
         table.setShowGrid(False)
         table.setMinimumHeight(230)
@@ -712,6 +734,7 @@ class MainWindowAdminMixin:
             for col_index, value in enumerate(list(row)):
                 item = QTableWidgetItem(self.format_detail_value(value))
                 item.setForeground(QColor("#E5E7EB"))
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 table.setItem(row_index, col_index, item)
 
         layout.addWidget(table)
@@ -831,6 +854,7 @@ class MainWindowAdminMixin:
             + ("  |  Network view active" if network_live else "  |  Local office view active")
         )
         summary_label.setStyleSheet("color:#FFFFFF; font-size:16px; font-weight:700; padding:2px 2px 6px 2px;")
+        summary_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         host_layout.addWidget(summary_label)
 
         card_grid = QGridLayout()
@@ -893,6 +917,7 @@ class MainWindowAdminMixin:
         if dashboard_focus and dashboard_focus in chart_builders:
             focus_hint = QLabel("Focused chart view. Click the banner again to return to the four-chart dashboard.")
             focus_hint.setStyleSheet("color:#9CA3AF; font-size:11px; padding:0 2px 2px 2px;")
+            focus_hint.setAlignment(Qt.AlignLeft | Qt.AlignTop)
             host_layout.addWidget(focus_hint)
             chart_grid.addWidget(chart_builders[dashboard_focus](True), 0, 0, 1, 2)
         else:

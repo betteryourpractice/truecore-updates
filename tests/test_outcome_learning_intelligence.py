@@ -117,6 +117,42 @@ class OutcomeLearningIntelligenceTests(unittest.TestCase):
         self.assertEqual(provider_learning["status"], "underperforming")
         self.assertEqual(provider_learning["recent_signal"], "recent_denial_cluster")
 
+    @patch("TrueCore.core.statistical_scoring.build_threshold_guidance")
+    @patch("TrueCore.core.statistical_scoring.build_model_validation_summary")
+    @patch("TrueCore.core.statistical_scoring.summarize_outcome_model")
+    @patch("TrueCore.core.statistical_scoring.build_outcome_model")
+    def test_predictive_learning_snapshot_exposes_validation_summary(
+        self,
+        mock_build_outcome_model,
+        mock_summarize_outcome_model,
+        mock_build_model_validation_summary,
+        mock_build_threshold_guidance,
+    ):
+        mock_build_outcome_model.return_value = {"available": True}
+        mock_summarize_outcome_model.return_value = {"available": True, "sample_size": 12}
+        mock_build_model_validation_summary.return_value = {
+            "available": True,
+            "sample_size": 12,
+            "ready_call_accuracy": 0.8,
+            "false_ready_rate": 0.1,
+        }
+        mock_build_threshold_guidance.return_value = {
+            "available": True,
+            "suggested_threshold": 0.6,
+            "posture": "balanced",
+        }
+
+        snapshot = outcome_learning_intelligence.build_predictive_learning_snapshot(
+            all_runs=[],
+            all_events=[],
+        )
+
+        self.assertIn("validation_summary", snapshot)
+        self.assertIn("threshold_guidance", snapshot)
+        self.assertEqual(snapshot["validation_summary"]["ready_call_accuracy"], 0.8)
+        self.assertEqual(snapshot["validation_summary"]["false_ready_rate"], 0.1)
+        self.assertEqual(snapshot["threshold_guidance"]["suggested_threshold"], 0.6)
+
     @patch("TrueCore.core.learning_intelligence.get_recent_packet_events")
     @patch("TrueCore.core.learning_intelligence.get_recent_packet_runs")
     @patch("TrueCore.core.learning_intelligence.get_provider_history")

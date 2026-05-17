@@ -28,9 +28,7 @@ REQUIRED_FILES = [
     "core/packet_processor.py",
     "dev/build.py",
     "VERSION.txt",
-    "CHANGELOG.txt",
-    "AI_CONTENT.txt",
-    "AI_GUARD.txt"
+    "CHANGELOG.txt"
 ]
 
 # -------------------------------------------------

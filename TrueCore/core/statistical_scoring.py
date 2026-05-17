@@ -749,6 +749,180 @@ def summarize_outcome_model(model):
     }
 
 
+def _rate(num, den, digits=3):
+    if not den:
+        return None
+    return round(float(num) / float(den), digits)
+
+
+def build_model_validation_summary(model, all_runs=None, all_events=None, threshold=0.5):
+    model = dict(model or {})
+    all_runs = list(all_runs if all_runs is not None else get_recent_packet_runs(limit=280))
+    all_events = list(all_events if all_events is not None else get_recent_packet_events(limit=280))
+    examples = _build_training_examples(all_runs, all_events)
+
+    summary = {
+        "available": False,
+        "sample_size": len(examples),
+        "decision_threshold": round(clamp(threshold), 2),
+        "status": "insufficient_labeled_history",
+        "ready_call_accuracy": None,
+        "review_call_accuracy": None,
+        "ready_capture_rate": None,
+        "problem_catch_rate": None,
+        "false_ready_rate": None,
+        "counts": {"true_ready": 0, "false_ready": 0, "true_review": 0, "false_review": 0},
+    }
+
+    if not model.get("available") or len(examples) < 6:
+        return summary
+
+    threshold = clamp(threshold)
+    true_ready = 0
+    false_ready = 0
+    true_review = 0
+    false_review = 0
+
+    for example in examples:
+        prediction = predict_outcome_probability(model, example.get("features") or {})
+        probability = prediction.get("calibrated_probability")
+        if probability is None:
+            continue
+
+        predicted_ready = float(probability) >= threshold
+        actually_ready = int(example.get("label") or 0) == 1
+
+        if predicted_ready and actually_ready:
+            true_ready += 1
+        elif predicted_ready and not actually_ready:
+            false_ready += 1
+        elif not predicted_ready and not actually_ready:
+            true_review += 1
+        else:
+            false_review += 1
+
+    evaluated = true_ready + false_ready + true_review + false_review
+    if evaluated <= 0:
+        return summary
+
+    ready_call_accuracy = _rate(true_ready, true_ready + false_ready)
+    review_call_accuracy = _rate(true_review, true_review + false_review)
+    ready_capture_rate = _rate(true_ready, true_ready + false_review)
+    problem_catch_rate = _rate(true_review, true_review + false_ready)
+    false_ready_rate = _rate(false_ready, true_review + false_ready)
+
+    status = "early"
+    if false_ready_rate is not None and false_ready_rate <= 0.1 and (ready_call_accuracy or 0.0) >= 0.7:
+        status = "strong"
+    elif false_ready_rate is not None and false_ready_rate <= 0.2:
+        status = "developing"
+
+    return {
+        "available": True,
+        "sample_size": evaluated,
+        "decision_threshold": round(threshold, 2),
+        "status": status,
+        "ready_call_accuracy": ready_call_accuracy,
+        "review_call_accuracy": review_call_accuracy,
+        "ready_capture_rate": ready_capture_rate,
+        "problem_catch_rate": problem_catch_rate,
+        "false_ready_rate": false_ready_rate,
+        "counts": {
+            "true_ready": true_ready,
+            "false_ready": false_ready,
+            "true_review": true_review,
+            "false_review": false_review,
+        },
+    }
+
+
+def build_threshold_guidance(model, all_runs=None, all_events=None, thresholds=None):
+    thresholds = list(thresholds or [0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75])
+    threshold_summaries = []
+    for threshold in thresholds:
+        summary = build_model_validation_summary(
+            model,
+            all_runs=all_runs,
+            all_events=all_events,
+            threshold=threshold,
+        )
+        if summary.get("sample_size", 0) > 0:
+            threshold_summaries.append(summary)
+
+    if not threshold_summaries:
+        return {
+            "available": False,
+            "current_threshold": 0.5,
+            "suggested_threshold": None,
+            "posture": "too_early",
+            "guidance": "Not enough labeled history exists yet to suggest a trust threshold.",
+            "threshold_summaries": [],
+        }
+
+    current_summary = next(
+        (item for item in threshold_summaries if abs(float(item.get("decision_threshold", 0.0)) - 0.5) < 1e-9),
+        threshold_summaries[0],
+    )
+
+    safe_candidates = [
+        item
+        for item in threshold_summaries
+        if item.get("false_ready_rate") is not None and float(item.get("false_ready_rate") or 0.0) <= 0.1
+    ]
+
+    if safe_candidates:
+        suggested = max(
+            safe_candidates,
+            key=lambda item: (
+                float(item.get("ready_capture_rate") or 0.0),
+                float(item.get("ready_call_accuracy") or 0.0),
+                -float(item.get("decision_threshold") or 0.0),
+            ),
+        )
+    else:
+        suggested = min(
+            threshold_summaries,
+            key=lambda item: (
+                float(item.get("false_ready_rate") or 1.0),
+                -float(item.get("ready_capture_rate") or 0.0),
+            ),
+        )
+
+    suggested_threshold = float(suggested.get("decision_threshold") or 0.5)
+    false_ready_rate = suggested.get("false_ready_rate")
+
+    if false_ready_rate is None:
+        posture = "too_early"
+        guidance = "There still is not enough stable history to recommend a ready-call trust threshold."
+    elif false_ready_rate <= 0.1:
+        posture = "balanced" if suggested_threshold <= 0.6 else "conservative"
+        guidance = (
+            f"A threshold around {int(round(suggested_threshold * 100))}% keeps false-ready risk relatively controlled "
+            "without being overly restrictive."
+        )
+    elif false_ready_rate <= 0.2:
+        posture = "cautious"
+        guidance = (
+            f"Even around {int(round(suggested_threshold * 100))}%, false-ready risk is still noticeable, so ready-style trust should stay cautious."
+        )
+    else:
+        posture = "too_early"
+        guidance = "False-ready risk is still too high across tested thresholds, so human review should continue to carry most of the trust burden."
+
+    return {
+        "available": True,
+        "current_threshold": current_summary.get("decision_threshold"),
+        "current_false_ready_rate": current_summary.get("false_ready_rate"),
+        "current_ready_capture_rate": current_summary.get("ready_capture_rate"),
+        "suggested_threshold": suggested_threshold,
+        "suggested_false_ready_rate": suggested.get("false_ready_rate"),
+        "suggested_ready_capture_rate": suggested.get("ready_capture_rate"),
+        "posture": posture,
+        "guidance": guidance,
+        "threshold_summaries": threshold_summaries,
+    }
+
+
 def build_turnaround_observations(all_runs, all_events):
     outcomes_by_case = defaultdict(list)
     for event in all_events:

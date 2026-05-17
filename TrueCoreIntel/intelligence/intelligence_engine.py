@@ -5,6 +5,7 @@ from TrueCoreIntel.core import packet_failure_modes
 from TrueCoreIntel.core import packet_robustness
 from TrueCoreIntel.intelligence.clinical_intelligence import ClinicalIntelligenceAnalyzer
 from TrueCoreIntel.intelligence.evidence_intelligence import EvidenceIntelligenceAnalyzer
+from TrueCoreIntel.intelligence.packet_rubric import build_packet_rubric
 
 
 class IntelligenceEngine:
@@ -62,6 +63,9 @@ class IntelligenceEngine:
         packet.packet_evidence_band = self.classify_support_band(packet.packet_evidence_score)
         packet.packet_assembly_score = self.calculate_packet_assembly_score(packet)
         packet.packet_assembly_band = self.classify_assembly_band(packet.packet_assembly_score)
+        packet.packet_legacy_score = self.calculate_legacy_score(packet)
+        packet.packet_rubric = build_packet_rubric(packet)
+        packet.packet_main_blocker = packet.packet_rubric.get("main_blocker")
         packet.packet_score = self.calculate_score(packet)
         packet.packet_confidence = self.calculate_packet_confidence(packet)
         packet.packet_strength = self.classify_strength(packet)
@@ -413,7 +417,7 @@ class IntelligenceEngine:
 
         return round(max(0.0, min(assembly_score, 100.0)), 2)
 
-    def calculate_score(self, packet):
+    def calculate_legacy_score(self, packet):
         evidence_score = float(getattr(packet, "packet_evidence_score", 0.0) or 0.0)
         assembly_score = float(getattr(packet, "packet_assembly_score", 0.0) or 0.0)
 
@@ -424,6 +428,16 @@ class IntelligenceEngine:
             score *= 0.9 + (0.1 * avg_conf)
 
         score = self.apply_score_caps(packet, score)
+        return max(min(round(score, 2), 100), 0)
+
+    def calculate_score(self, packet):
+        rubric = dict(getattr(packet, "packet_rubric", {}) or {})
+        score = float(rubric.get("score") or 0.0)
+
+        if packet.field_confidence:
+            avg_conf = sum(packet.field_confidence.values()) / len(packet.field_confidence)
+            score *= 0.95 + (0.05 * avg_conf)
+
         return max(min(round(score, 2), 100), 0)
 
     def calculate_packet_confidence(self, packet):
@@ -530,26 +544,20 @@ class IntelligenceEngine:
         return "weak"
 
     def classify_strength(self, packet):
-        score = packet.packet_score
-        has_high_conflict = any(conflict.get("severity") == "high" for conflict in packet.conflicts)
-        assembly_score = float(getattr(packet, "packet_assembly_score", 0.0) or 0.0)
-
-        if has_high_conflict and score < 80:
-            return "weak"
-
-        if assembly_score < 60:
-            return "weak"
-
-        if score >= 80 and assembly_score >= 75:
+        score = float(packet.packet_score or 0.0)
+        if score >= 85:
             return "strong"
-        if score >= 58:
+        if score >= 70:
             return "moderate"
         return "weak"
 
     def estimate_approval(self, packet):
         overall_score = float(packet.packet_score or 0.0) / 100.0
         assembly_score = float(getattr(packet, "packet_assembly_score", 0.0) or 0.0) / 100.0
-        probability = (overall_score * 0.55) + (assembly_score * 0.45)
+        rubric = dict(getattr(packet, "packet_rubric", {}) or {})
+        blockers = list(rubric.get("blockers", []) or [])
+        review_needs = list(rubric.get("review_needs", []) or [])
+        probability = (overall_score * 0.72) + (assembly_score * 0.28)
 
         if packet.missing_fields:
             if any(field in self.HIGH_IMPACT_FIELDS for field in packet.missing_fields):
@@ -569,10 +577,12 @@ class IntelligenceEngine:
             else:
                 probability = min(probability, 0.28)
 
-        if any(conflict.get("severity") == "high" for conflict in packet.conflicts):
-            probability -= 0.15
-        elif any(conflict.get("severity") == "medium" for conflict in packet.conflicts):
-            probability -= 0.08
+        if blockers:
+            probability -= min(0.34, 0.10 + (0.08 * len(blockers)))
+            probability = min(probability, 0.44)
+        elif review_needs:
+            probability -= min(0.18, 0.05 + (0.03 * len(review_needs)))
+            probability = min(probability, 0.68)
 
         if "diagnosis_icd_mismatch" in packet.review_flags:
             probability -= 0.10
@@ -583,8 +593,8 @@ class IntelligenceEngine:
             probability -= 0.03
 
         if assembly_score < 0.60:
-            probability = min(probability, 0.44)
-        elif assembly_score < 0.75:
-            probability = min(probability, 0.62)
+            probability = min(probability, 0.50)
+        elif assembly_score < 0.75 and not blockers:
+            probability = min(probability, 0.68)
 
         return round(max(min(probability, 1.0), 0.0), 2)

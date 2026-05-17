@@ -759,8 +759,8 @@ def render_build_scan_diagnostics_html(self, file_path, result):
     if not diagnostics:
         return (
             "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-            "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
-            "<div style=\"color:#9CA3AF;\">No scan diagnostics available for this packet.</div>"
+            "font-family:'Segoe UI'; font-size:13px; line-height:1.45; margin:0; text-align:left;\">"
+            "<div style=\"color:#9CA3AF; text-align:left;\">No scan diagnostics available for this packet.</div>"
             "</body></html>"
         )
 
@@ -874,7 +874,7 @@ def render_build_scan_diagnostics_html(self, file_path, result):
 
     return (
         "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-        "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+        "font-family:'Segoe UI'; font-size:13px; line-height:1.45; margin:0; text-align:left;\">"
         f"{rendered_sections}</body></html>"
     )
 
@@ -909,17 +909,17 @@ def render_build_packet_details_html_condensed(self, file, result):
     if intel_display:
         summary_rows.extend(
             [
-                ("Packet Strength", intel_display.get("packet_strength")),
-                ("Submission Readiness", intel_display.get("submission_readiness")),
-                ("Approval Probability", intel_display.get("approval_probability")),
-                ("Next Action", intel_display.get("next_action")),
+                ("Packet Strength", self.format_packet_display_value("Packet Strength", intel_display.get("packet_strength"))),
+                ("Submission Readiness", self.format_packet_display_value("Submission Readiness", intel_display.get("submission_readiness"))),
+                ("Approval Outlook", self.format_packet_display_value("Approval Outlook", intel_display.get("approval_outlook", intel_display.get("approval_probability")))),
+                ("Next Action", self.format_packet_display_value("Next Action", intel_display.get("next_action"))),
+                ("Main Blocker", self.format_packet_display_value("Main Blocker", intel_display.get("main_blocker"))),
             ]
         )
         decision_rows = [
-            ("Packet Confidence", intel_display.get("packet_confidence")),
-            ("Denial Risk", intel_display.get("denial_risk")),
-            ("Workflow Queue", intel_display.get("workflow_queue")),
-            ("Review Priority", intel_display.get("review_priority")),
+            ("Denial Risk", self.format_packet_display_value("Denial Risk", intel_display.get("denial_risk"))),
+            ("Workflow Queue", self.format_packet_display_value("Workflow Queue", intel_display.get("workflow_queue"))),
+            ("Review Priority", self.format_packet_display_value("Review Priority", intel_display.get("review_priority"))),
         ]
 
     sections = [
@@ -974,7 +974,9 @@ def render_build_packet_details_html_condensed(self, file, result):
                             self.format_packet_field_label(key)
                             if hasattr(self, "format_packet_field_label")
                             else self.format_field(key),
-                            value,
+                            self.format_packet_field_value_for_details(key, value, result)
+                            if hasattr(self, "format_packet_field_value_for_details")
+                            else value,
                         )
                         for key, value in fields.items()
                     ],
@@ -1023,7 +1025,7 @@ def render_build_packet_details_html_condensed(self, file, result):
 
     return (
         "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-        "font-family:'Segoe UI'; font-size:13px; line-height:1.45;\">"
+        "font-family:'Segoe UI'; font-size:13px; line-height:1.45; margin:0; text-align:left;\">"
         f"{rendered_sections}</body></html>"
     )
 
