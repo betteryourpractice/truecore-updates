@@ -2,7 +2,7 @@
     "version": "5",
     "build_id": "TC5-20260517-1619",
     "published_at": "2026-05-17 16:19:12",
-    "download": "https://github.com/betteryourpractice/truecore-updates/releases/download/v5/TrueCore_v5.zip",
+    "download": "https://github.com/betteryourpractice/truecore-updates/releases/download/v5.0/TrueCore_v5.zip",
     "sha256": "5cc80e770c040c21481fc6ca2366008eae616ff0fbbf99335dd5cf9dc824437a",
     "size": 339401389,
     "release_zip": "TrueCore_v5.zip",
@@ -14,5 +14,5 @@
     "suite_release_size": 399458457,
     "signature_algorithm": "ed25519",
     "signature_key_id": "d45f23a852c8fc86",
-    "signature": "LCabUDj8vcf5BXZdPSoN6jmihDdDiRzWEa2bEP3ShZLl5rSvDRuFPSAezGqNWNvvbOgKWfnlgUx8N3+cIpYpAA=="
+    "signature": "e72VDGamVRAoPiQ/pCoddzSOucMzNINFSjDaWDrNQV/JG23rOVCYZMrqAi9vz/tegbIRCL4VDvvZFr0Lch2cBA=="
 }

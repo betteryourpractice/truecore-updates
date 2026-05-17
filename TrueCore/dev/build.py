@@ -293,7 +293,7 @@ else:
 if choice == "1":
     # BIG update
     major += 1
-    new_version = f"{major}"
+    new_version = f"{major}.0"
 
 else:
     # SMALL update
