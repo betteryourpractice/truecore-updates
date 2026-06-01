@@ -790,3 +790,12 @@ CHANGES
 
 * Dev Tools packet studio stabilization and wording assist expansion
 
+
+
+VERSION: v5.1
+DATE: 2026-06-01
+
+CHANGES
+
+* Office scoring hardening, semantic adjudication surfacing, and variant-tolerant review improvements
+

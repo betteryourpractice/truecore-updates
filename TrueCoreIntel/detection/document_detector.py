@@ -259,13 +259,28 @@ class DocumentDetector:
             r"street address[^\n\r:]{0,40}:\s*\d{1,6}\s+[A-Za-z0-9.\- ]{3,}",
             r"(?:home phone|mobile phone|work phone|phone)[^\n\r:]{0,40}:\s*(?:\(?\d{3}\)?[- ]?\d{3}[- ]?\d{4}|\d{7,})",
             r"email(?: address)?[^\n\r:]{0,40}:\s*[\w.\-]+@[\w.\-]+\.\w+",
+            r"\bpcp/pcm\b[^\n\r:]{0,40}:\s*(?!phone\b|fax\b)([A-Za-z][A-Za-z.'\-]+(?:\s+[A-Za-z][A-Za-z.'\-]+){0,3})",
+            r"\bi,\s+[A-Za-z][A-Za-z'\-]+(?:\s+[A-Za-z][A-Za-z'\-]+){1,3}\s+hereby\b",
+            r"\bdate:\s*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
             r"\b(?:signature|signed)\b",
         ]
-
-        return sum(
+        signal_count = sum(
             1 for pattern in filled_patterns
             if re.search(pattern, text, re.IGNORECASE)
         )
+
+        multiline_patterns = [
+            r"full name[^\n\r]*date of birth[^\n\r]*phone[^\n\r]*\s+[A-Za-z][A-Za-z'\-]+(?:\s+[A-Za-z][A-Za-z'\-]+){1,3}\s+\d{1,2}[/-]\d{1,2}[/-]\d{2,4}",
+            r"street address[^\n\r]*city[^\n\r]*state[^\n\r]*zip[^\n\r]*\s+\d{1,6}\s+[A-Za-z0-9.\- ]{3,}",
+            r"email address[^\n\r]*ssn[^\n\r]*\s+[\w.\-]+@[\w.\-]+\.\w+",
+            r"pcp/pcm[^\n\r]*phone[^\n\r]*fax[^\n\r]*\s+[A-Za-z][A-Za-z.'\-]+",
+        ]
+        signal_count += sum(
+            1 for pattern in multiline_patterns
+            if re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        )
+
+        return signal_count
 
     def detect(self, packet):
         packet.document_types = {}
@@ -1379,7 +1394,7 @@ class DocumentDetector:
         if not any(marker in lower_text for marker in consent_markers):
             return False
 
-        return self.count_filled_consent_signals(text) < 2
+        return self.count_filled_consent_signals(text) < 3
 
     def looks_like_unfilled_consult_request(self, page_text):
         text = " ".join(str(page_text or "").replace("\r", "\n").split())

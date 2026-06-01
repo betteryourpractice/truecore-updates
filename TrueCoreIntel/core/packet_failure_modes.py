@@ -185,7 +185,7 @@ def annotate_packet_failure_modes(packet):
         for page, hints in hint_map.items()
     }
 
-    if failure_modes and "classification_uncertainty" not in set(getattr(packet, "review_flags", []) or []):
+    if classification_uncertainty and "classification_uncertainty" not in set(getattr(packet, "review_flags", []) or []):
         packet.review_flags.append("classification_uncertainty")
 
     return packet

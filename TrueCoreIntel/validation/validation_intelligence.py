@@ -222,7 +222,7 @@ class ValidationIntelligenceAnalyzer:
 
         for doc_type in sorted(packet.detected_documents):
             template = FORM_TEMPLATES.get(doc_type, {})
-            expected_fields = list(template.get("expected_fields", []))
+            expected_fields = list(template.get("completeness_fields", template.get("expected_fields", [])))
 
             if not expected_fields:
                 continue
@@ -283,7 +283,7 @@ class ValidationIntelligenceAnalyzer:
         signature_expected_documents = [
             doc_type
             for doc_type in detected_documents
-            if "signature_present" in FORM_TEMPLATES.get(doc_type, {}).get("expected_fields", [])
+            if FORM_TEMPLATES.get(doc_type, {}).get("signature_expected")
         ]
 
         missing_signature_documents = []

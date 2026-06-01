@@ -22,6 +22,12 @@ class ReviewSummaryBuilder:
         missing_items = []
         conflict_items = []
         fix_recommendations = []
+        semantic = dict(getattr(packet, "semantic_adjudication", {}) or {})
+        tolerated_conflict_fields = {
+            str(item.get("field") or "").strip().lower()
+            for item in list(semantic.get("tolerated_conflicts", []) or [])
+            if item.get("field")
+        }
 
         prioritized_fixes = self.build_prioritized_fixes(packet)
 
@@ -64,9 +70,15 @@ class ReviewSummaryBuilder:
                 fix_recommendations.append(f"Attach required document: {doc}.")
 
         if packet.conflicts:
-            high_conflicts = [c.get("field", "unknown_field") for c in packet.conflicts if c.get("severity") == "high"]
-            medium_conflicts = [c.get("field", "unknown_field") for c in packet.conflicts if c.get("severity") == "medium"]
-            low_conflicts = [c.get("field", "unknown_field") for c in packet.conflicts if c.get("severity") == "low"]
+            effective_conflicts = [
+                conflict
+                for conflict in packet.conflicts
+                if str(conflict.get("field", "")).strip().lower() not in tolerated_conflict_fields
+                or str(conflict.get("severity") or "").strip().lower() == "high"
+            ]
+            high_conflicts = [c.get("field", "unknown_field") for c in effective_conflicts if c.get("severity") == "high"]
+            medium_conflicts = [c.get("field", "unknown_field") for c in effective_conflicts if c.get("severity") == "medium"]
+            low_conflicts = [c.get("field", "unknown_field") for c in effective_conflicts if c.get("severity") == "low"]
 
             if high_conflicts:
                 why_weak.append(
@@ -83,7 +95,7 @@ class ReviewSummaryBuilder:
                     f"Low-severity conflicts were found: {', '.join(sorted(set(low_conflicts)))}."
                 )
 
-            for conflict in packet.conflicts:
+            for conflict in effective_conflicts:
                 message = conflict.get("message", f"Conflict detected for {conflict.get('field', 'unknown_field')}.")
                 conflict_items.append(message)
                 fix_recommendations.append(
@@ -134,6 +146,10 @@ class ReviewSummaryBuilder:
 
         if packet.packet_strength == "weak":
             why_weak.append("Overall packet strength is weak based on missing support, conflicts, and justification gaps.")
+
+        for note in list(semantic.get("review_notes", []) or []):
+            if "hard defects" in str(note).lower():
+                why_weak.append(str(note).strip())
 
         return ReviewSummaryArtifacts(
             why_weak=self.compress_why_weak(why_weak),
@@ -187,6 +203,12 @@ class ReviewSummaryBuilder:
 
     def build_prioritized_fixes(self, packet):
         fixes = []
+        semantic = dict(getattr(packet, "semantic_adjudication", {}) or {})
+        tolerated_conflict_fields = {
+            str(item.get("field") or "").strip().lower()
+            for item in list(semantic.get("tolerated_conflicts", []) or [])
+            if item.get("field")
+        }
 
         for field in packet.missing_fields:
             fixes.append({
@@ -215,6 +237,10 @@ class ReviewSummaryBuilder:
                 })
 
         for conflict in packet.conflicts:
+            field_name = str(conflict.get("field", "unknown_field")).strip().lower()
+            severity = str(conflict.get("severity") or "").strip().lower()
+            if field_name in tolerated_conflict_fields and severity in {"low", "medium"}:
+                continue
             fixes.append({
                 "priority": conflict.get("severity", "low"),
                 "type": "conflict",

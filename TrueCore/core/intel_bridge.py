@@ -1329,6 +1329,11 @@ def _build_intel_display(packet, packet_output):
     evidence_strength_band = packet_output.get("packet_evidence_band", getattr(packet, "packet_evidence_band", None))
     assembly_score = packet_output.get("packet_assembly_score", getattr(packet, "packet_assembly_score", None))
     assembly_band = packet_output.get("packet_assembly_band", getattr(packet, "packet_assembly_band", None))
+    semantic_score = packet_output.get("packet_semantic_coherence_score", getattr(packet, "packet_semantic_coherence_score", None))
+    semantic_band = packet_output.get("packet_semantic_coherence_band", getattr(packet, "packet_semantic_coherence_band", None))
+    semantic_adjudication = dict(packet_output.get("semantic_adjudication_1", {}) or getattr(packet, "semantic_adjudication", {}) or {})
+    semantic_notes = [_clean_issue(item) for item in list(semantic_adjudication.get("review_notes", []) or [])]
+    deduction_ledger = list(semantic_adjudication.get("deduction_ledger", []) or [])
 
     priority_fixes = []
 
@@ -1415,6 +1420,9 @@ def _build_intel_display(packet, packet_output):
     if concept_review_notes:
         review_rationale = _merge_unique_strings(concept_review_notes + review_rationale, _issue_key)
 
+    if semantic_notes:
+        review_rationale = _merge_unique_strings(semantic_notes + review_rationale, _issue_key)
+
     if template_markers:
         pages = sorted({int(entry.get("page_number")) for entry in template_markers if entry.get("page_number")})
         if pages:
@@ -1490,6 +1498,9 @@ def _build_intel_display(packet, packet_output):
         "packet_assembly": _format_scored_band(assembly_score, assembly_band),
         "packet_assembly_score": assembly_score,
         "packet_assembly_band": assembly_band,
+        "semantic_coherence": _format_scored_band(semantic_score, semantic_band),
+        "semantic_coherence_score": semantic_score,
+        "semantic_coherence_band": semantic_band,
         "invariant_coverage": _format_scored_band(invariant_score, invariant_band),
         "invariant_coverage_score": invariant_score,
         "invariant_coverage_band": invariant_band,
@@ -1512,6 +1523,8 @@ def _build_intel_display(packet, packet_output):
         "issue_details": issue_details,
         "issue_breakdowns": issue_breakdowns,
         "concept_review_notes": concept_review_notes,
+        "semantic_review_notes": semantic_notes,
+        "deduction_ledger": deduction_ledger,
         "why_weak": _merge_unique_strings(
             why_weak,
             _issue_key,

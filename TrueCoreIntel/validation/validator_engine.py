@@ -43,7 +43,7 @@ class ValidatorEngine:
     }
 
     DOCUMENT_FIELD_EXPECTATIONS = {
-        "lomn": ["reason_for_request", "signature_present"],
+        "lomn": ["reason_for_request"],
         "rfs": ["authorization_number"],
         "approved_referral": ["authorization_number", "va_icn", "referring_provider"],
         "clinical_notes": ["icd_codes"],
@@ -668,6 +668,10 @@ class ValidatorEngine:
                     if part:
                         chunks.append(part)
 
+                concept_tokens = self.extract_reason_conflict_tokens(cleaned)
+                if concept_tokens:
+                    return tuple(sorted(concept_tokens))
+
                 normalized_chunks = sorted(set(chunks))
                 return tuple(normalized_chunks) if normalized_chunks else None
 
@@ -675,6 +679,9 @@ class ValidatorEngine:
             if isinstance(value, str):
                 cleaned = value.strip().lower()
                 cleaned = re.sub(r"\s+", " ", cleaned)
+
+                if re.search(r"\bm51(?:\.|$)", cleaned) or re.search(r"\bm54\.(?:16|17|50)\b", cleaned):
+                    return "lumbar_spine_condition"
 
                 cervical_markers = [
                     "cervical",
@@ -719,6 +726,24 @@ class ValidatorEngine:
             return cleaned if cleaned else None
 
         return value
+
+    def extract_reason_conflict_tokens(self, cleaned):
+        tokens = set()
+        value = str(cleaned or "").lower()
+        if not value:
+            return tokens
+
+        if any(marker in value for marker in ["single episode of care", " seoc", "(seoc)", "episode of care"]):
+            tokens.add("seoc")
+        if any(marker in value for marker in ["consultation", "consult", "specialty evaluation", "treatment planning"]):
+            tokens.add("specialty_consultation")
+        if any(marker in value for marker in ["interventional spine", "pain management", "annulargram", "fibrin injection"]):
+            tokens.add("interventional_spine")
+        if any(marker in value for marker in ["degenerative disc", "discogenic", "annular", "l4-l5", "l5-s1", "m51.", "m54.16", "m54.50"]):
+            tokens.add("lumbar_disc_condition")
+        if any(marker in value for marker in ["functional limitation", "functional limitations", "impaired function", "activity tolerance", "daily activities"]):
+            tokens.add("functional_impairment")
+        return tokens
 
     def normalize_name(self, value):
         raw = str(value).strip().lower()
@@ -831,6 +856,22 @@ class ValidatorEngine:
 
         if len(normalized_sets) < 2:
             return False
+
+        known_family_tokens = {
+            "seoc",
+            "specialty_consultation",
+            "interventional_spine",
+            "lumbar_disc_condition",
+            "functional_impairment",
+        }
+        if all(parts and parts.issubset(known_family_tokens) for parts in normalized_sets):
+            shared_clinical_tokens = set.intersection(*normalized_sets)
+            if shared_clinical_tokens.intersection({"lumbar_disc_condition", "interventional_spine", "functional_impairment"}):
+                return True
+
+            union_tokens = set().union(*normalized_sets)
+            if "seoc" in union_tokens and "specialty_consultation" in union_tokens:
+                return True
 
         for i, left in enumerate(normalized_sets):
             for j, right in enumerate(normalized_sets):
@@ -1005,7 +1046,7 @@ class ValidatorEngine:
             cleaned = value.lower()
             if any(marker in cleaned for marker in ["cervical", "cervicalgia", "neck pain", "c-spine", "c spine"]):
                 regions.add("cervical")
-            if any(marker in cleaned for marker in ["lumbar", "lumbago", "low back", "back pain", "sciatica"]):
+            if any(marker in cleaned for marker in ["lumbar", "lumbago", "low back", "back pain", "sciatica", "degenerative disc", "discogenic", "m51.", "m54.16", "m54.50"]):
                 regions.add("lumbar")
             if "migraine" in cleaned or "headache" in cleaned:
                 regions.add("head")

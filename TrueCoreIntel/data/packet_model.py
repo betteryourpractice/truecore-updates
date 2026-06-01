@@ -60,6 +60,7 @@ class Packet:
         # Intelligence
         self.evidence_intelligence = {}
         self.clinical_intelligence = {}
+        self.semantic_adjudication = {}
         self.denial_intelligence = {}
         self.human_loop_intelligence = {}
         self.orchestration_intelligence = {}
@@ -74,6 +75,8 @@ class Packet:
         self.packet_evidence_band = None
         self.packet_assembly_score = None
         self.packet_assembly_band = None
+        self.packet_semantic_coherence_score = None
+        self.packet_semantic_coherence_band = None
         self.packet_profile = None
         self.packet_profile_label = None
         self.packet_archetype = None

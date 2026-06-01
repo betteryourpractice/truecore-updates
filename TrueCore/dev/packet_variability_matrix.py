@@ -235,6 +235,26 @@ STRICT_PERTURBATION_CASES: list[VariationCase] = [
         pages=transform_flip_provider_name_order(CASE_INDEX["authorization_referral_history"].pages),
         notes="This perturbation checks that role/order name variation does not collapse the packet context.",
     ),
+    VariationCase(
+        case_id="full_submission_lomn_split_tail",
+        mode="strict",
+        description="Formal submission with a LOMN split across a title page and a continuation tail page without repeated title text.",
+        pages=[
+            "Submission Cover Sheet\nPatient Name: Jane Doe\nDOB: 01/02/1970\nAuthorization Number: VA123\nVA Facility: Test VAMC\nDocuments Included: Consult Request, SEOC, LOMN, Consent, Clinical Notes",
+            "Virtual Consent Form\nPatient Name: Jane Doe\nDOB: 01/02/1970\nPatient Signature: Jane Doe\nDate: 03/01/2026",
+            "Letter of Medical Necessity\nRE: Letter of Medical Necessity\nVeteran Name: Jane Doe\nClinical Summary: persistent lumbar radiculopathy despite conservative care.\nMedical Necessity: specialty evaluation and indicated treatment remain medically reasonable and necessary.",
+            "Requested Treatment Objectives:\nReduce pain severity\nImprove functional capacity\nRisk if Treatment Is Delayed or Denied:\nPersistent symptoms and worsening functional limitation remain likely without timely treatment.\nReasonable and Necessary Determination:\nThe requested care is consistent with documented diagnosis and failed conservative care.\nProvider Contact Statement:\nAdditional supporting documentation can be provided upon request.\nSincerely,\nDr. William Durrett, MD",
+            "Consultation and Treatment Request\nOrdering Provider: William Durrett\nReason for Request: low back pain\nProcedure: MRI\nDiagnosis: lumbar radiculopathy\nICD-10: M54.16, M54.50",
+            "SEOC Request\nEpisode Diagnosis: lumbar radiculopathy\nClinical Objective: restore function\nContinuity of care requested",
+            "Clinical Notes\nPatient Name: Jane Doe\nDOB: 01/02/1970\nProvider: William Durrett\nAssessment: lumbar radiculopathy\nICD-10: M54.16, M54.50",
+        ],
+        expected_profile="full_submission",
+        expected_archetype="formal_full_submission",
+        min_invariant_coverage=85.0,
+        allowed_variability={"moderate", "high"},
+        required_documents={"cover_sheet", "consent", "consult_request", "lomn", "seoc", "clinical_notes"},
+        notes="Protects against continuation-page demotion of LOMN tails into unknown pages.",
+    ),
 ]
 
 TRACKING_PERTURBATION_CASES: list[VariationCase] = [

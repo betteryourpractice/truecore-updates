@@ -6,6 +6,7 @@ from TrueCoreIntel.core import packet_robustness
 from TrueCoreIntel.intelligence.clinical_intelligence import ClinicalIntelligenceAnalyzer
 from TrueCoreIntel.intelligence.evidence_intelligence import EvidenceIntelligenceAnalyzer
 from TrueCoreIntel.intelligence.packet_rubric import build_packet_rubric
+from TrueCoreIntel.intelligence.semantic_adjudication import SemanticAdjudicationAnalyzer
 
 
 class IntelligenceEngine:
@@ -46,6 +47,7 @@ class IntelligenceEngine:
     def __init__(self):
         self.clinical_intelligence_analyzer = ClinicalIntelligenceAnalyzer()
         self.evidence_intelligence_analyzer = EvidenceIntelligenceAnalyzer()
+        self.semantic_adjudication_analyzer = SemanticAdjudicationAnalyzer()
 
     def evaluate(self, packet):
         packet.evidence_intelligence = {}
@@ -65,6 +67,7 @@ class IntelligenceEngine:
         packet.packet_assembly_band = self.classify_assembly_band(packet.packet_assembly_score)
         packet.packet_legacy_score = self.calculate_legacy_score(packet)
         packet.packet_rubric = build_packet_rubric(packet)
+        packet = self.semantic_adjudication_analyzer.analyze(packet)
         packet.packet_main_blocker = packet.packet_rubric.get("main_blocker")
         packet.packet_score = self.calculate_score(packet)
         packet.packet_confidence = self.calculate_packet_confidence(packet)
@@ -470,11 +473,19 @@ class IntelligenceEngine:
             confidence -= 0.05
 
         invariant_score = float(getattr(packet, "packet_invariant_coverage_score", 0.0) or 0.0) / 100.0
+        semantic_score = float(getattr(packet, "packet_semantic_coherence_score", 0.0) or 0.0) / 100.0
         variability_level = str(getattr(packet, "packet_format_variability", "")).strip().lower()
         if invariant_score >= 0.85:
             confidence += 0.03
         elif invariant_score < 0.55:
             confidence -= 0.07
+
+        if semantic_score >= 0.88:
+            confidence += 0.04
+        elif semantic_score >= 0.74 and variability_level == "high":
+            confidence += 0.03
+        elif semantic_score < 0.45:
+            confidence -= 0.06
 
         if variability_level == "high" and invariant_score < 0.75:
             confidence -= 0.04
@@ -583,6 +594,16 @@ class IntelligenceEngine:
         elif review_needs:
             probability -= min(0.18, 0.05 + (0.03 * len(review_needs)))
             probability = min(probability, 0.68)
+
+        semantic_score = float(getattr(packet, "packet_semantic_coherence_score", 0.0) or 0.0) / 100.0
+        semantic_summary = dict(getattr(packet, "semantic_adjudication", {}) or {})
+        variant_tolerance = dict(semantic_summary.get("variant_tolerance", {}) or {})
+        if semantic_score >= 0.88:
+            probability += 0.04
+        elif semantic_score >= 0.74 and variant_tolerance.get("coherent_despite_variation"):
+            probability += 0.03
+        elif semantic_score < 0.45:
+            probability -= 0.08
 
         if "diagnosis_icd_mismatch" in packet.review_flags:
             probability -= 0.10

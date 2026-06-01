@@ -683,6 +683,7 @@ def render_build_condensed_advanced_intel_sections(self, result):
 def render_build_export_summary(self, result):
 
     intel = self.intel_payload(result)
+    intel_display = dict(intel.get("display", {}) or {})
     evidence = intel.get("evidence_intelligence", {}) or {}
     clinical = intel.get("clinical_intelligence", {}) or {}
     denial = intel.get("denial_intelligence", {}) or {}
@@ -697,6 +698,7 @@ def render_build_export_summary(self, result):
     recovery = intel.get("recovery_intelligence", {}) or {}
     policy = intel.get("policy_intelligence", {}) or {}
     deployment = intel.get("deployment_intelligence", {}) or {}
+    deduction_groups = self.group_deduction_ledger(intel_display) if hasattr(self, "group_deduction_ledger") else {}
 
     return {
         "evidence_sufficiency": self.get_nested_value(evidence, "evidence_sufficiency_modeling", "status"),
@@ -746,6 +748,13 @@ def render_build_export_summary(self, result):
         "reliability_score": self.get_nested_value(recovery, "reliability_scoring", "score"),
         "policy_confidence": self.get_nested_value(policy, "policy_compliance_confidence", "band"),
         "deployment_confidence": self.get_nested_value(deployment, "deployment_confidence_scoring", "band"),
+        "semantic_coherence": intel_display.get("semantic_coherence"),
+        "semantic_review_notes": intel_display.get("semantic_review_notes", []),
+        "deduction_ledger_summary": self.summarize_deduction_ledger(intel_display) if hasattr(self, "summarize_deduction_ledger") else None,
+        "deduction_real_gaps": deduction_groups.get("real_gap", []),
+        "deduction_review_cautions": deduction_groups.get("review_caution", []),
+        "deduction_variant_tolerated": deduction_groups.get("variant_tolerated", []),
+        "deduction_ledger": intel_display.get("deduction_ledger", []),
     }
 
 def render_build_scan_diagnostics_html(self, file_path, result):
@@ -1003,17 +1012,18 @@ def render_build_packet_details_html_condensed(self, file, result):
                 color="#F2C94C",
                 accent_color="#F2C94C",
             ),
-            self.build_bullet_section(
-                "Review Flags",
-                [self.format_review_flag(flag) for flag in intel_display.get("review_flags", [])],
-                color="#F2994A",
-                accent_color="#F2994A",
-            ),
-            self.build_bullet_section(
-                "Review Rationale",
-                review_rationale,
-                color="#57B6FF",
-                accent_color="#57B6FF",
+                self.build_bullet_section(
+                    "Review Flags",
+                    [self.format_review_flag(flag) for flag in intel_display.get("review_flags", [])],
+                    color="#F2994A",
+                    accent_color="#F2994A",
+                ),
+                *self.build_semantic_reasoning_sections(intel_display),
+                self.build_bullet_section(
+                    "Review Rationale",
+                    review_rationale,
+                    color="#57B6FF",
+                    accent_color="#57B6FF",
             ),
         ]
     )

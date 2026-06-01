@@ -177,6 +177,8 @@ class MainWindowPacketUiMixin:
                 )
             )
 
+        sections.extend(self.build_semantic_reasoning_sections(intel_display))
+
         blocker_items = list(rubric.get("blockers", []) or [])
         review_items = list(rubric.get("review_needs", []) or [])
         if blocker_items:
@@ -344,6 +346,9 @@ class MainWindowPacketUiMixin:
         confidence = self.format_operator_display_value("Packet Confidence", intel_display.get("packet_confidence"))
         workflow_queue = self.format_operator_display_value("Workflow Queue", intel_display.get("workflow_queue"))
         review_priority = self.format_operator_display_value("Review Priority", intel_display.get("review_priority"))
+        semantic_coherence = self.format_operator_display_value("Semantic Coherence", intel_display.get("semantic_coherence"))
+        ledger_summary = self.summarize_deduction_ledger(intel_display)
+        deduction_groups = self.group_deduction_ledger(intel_display)
 
         missing_items = list(intel_display.get("missing_items") or [])
         main_blocker = self.format_detail_value(intel_display.get("main_blocker")) if intel_display.get("main_blocker") not in (None, "", [], {}) else None
@@ -385,8 +390,14 @@ class MainWindowPacketUiMixin:
             quick_rows.append(("Main blocker", main_blocker))
         if first_fix not in (None, "", "Missing"):
             quick_rows.append(("Do first", first_fix))
+        if ledger_summary not in (None, "", "Missing"):
+            quick_rows.append(("Decision basis", ledger_summary))
+        if semantic_coherence not in (None, "", "Missing"):
+            quick_rows.append(("Semantic read", semantic_coherence))
         if review_posture:
             quick_rows.append(("Review posture", review_posture))
+        if deduction_groups["variant_tolerated"]:
+            quick_rows.append(("Variant handling", "Formatting differences were tolerated where packet meaning still reconciled cleanly."))
         if first_rationale not in (None, "", "Missing"):
             quick_rows.append(("Why this was flagged", first_rationale))
 
@@ -417,6 +428,179 @@ class MainWindowPacketUiMixin:
             accent_color="#F2C94C",
             margin_top=margin_top,
         )
+
+    def format_deduction_trust_label(self, trust_level):
+
+        mapping = {
+            "real_gap": "Real gap",
+            "review_caution": "Review caution",
+            "variant_tolerated": "Variant tolerated",
+        }
+
+        normalized = str(trust_level or "").strip().lower()
+        if not normalized:
+            return ""
+
+        return mapping.get(normalized, self.sentence_case_phrase(normalized.replace("_", " ")))
+
+    def format_deduction_reason(self, item):
+
+        entry = dict(item or {})
+        reason = " ".join(str(entry.get("reason") or "").strip().split())
+        if not reason:
+            return ""
+
+        lowered = reason.lower()
+        normalized_key = lowered.replace("_", " ")
+        friendly_reason_map = {
+            "partial diagnosis icd alignment": "Diagnosis and ICD support are present but only partially aligned.",
+            "classification uncertainty": "Document classification still needs reviewer confirmation.",
+            "manual review required": "Manual reviewer confirmation is still required.",
+        }
+
+        if normalized_key in friendly_reason_map:
+            return friendly_reason_map[normalized_key]
+
+        prefix = "Supporting document could not be confirmed:"
+        if lowered.startswith(prefix.lower()):
+            document_name = reason.split(":", 1)[1].strip() if ":" in reason else ""
+            if document_name:
+                return f"Supporting document could not be confirmed: {self.format_field(document_name)}"
+
+        if hasattr(self, "format_review_flag") and "_" in lowered and ":" not in reason:
+            formatted = self.format_review_flag(lowered)
+            if formatted:
+                return formatted
+
+        if (
+            hasattr(self, "format_review_flag")
+            and lowered == reason
+            and all(ch.islower() or ch.isspace() for ch in lowered)
+        ):
+            formatted = self.format_review_flag(lowered.replace(" ", "_"))
+            if formatted:
+                return formatted
+
+        cleaned = self.sentence_case_phrase(reason)
+        if cleaned and cleaned[-1] not in ".!?":
+            cleaned += "."
+        return cleaned
+
+    def group_deduction_ledger(self, intel_display):
+
+        display = dict(intel_display or {})
+        grouped = {
+            "real_gap": [],
+            "review_caution": [],
+            "variant_tolerated": [],
+        }
+
+        for item in list(display.get("deduction_ledger") or []):
+            entry = dict(item or {})
+            trust_level = str(entry.get("trust_level") or "review_caution").strip().lower()
+            if trust_level not in grouped:
+                trust_level = "review_caution"
+
+            formatted = self.format_deduction_reason(entry)
+            if formatted and formatted not in grouped[trust_level]:
+                grouped[trust_level].append(formatted)
+
+        return grouped
+
+    def summarize_deduction_ledger(self, intel_display):
+
+        grouped = self.group_deduction_ledger(intel_display)
+        counts = [
+            ("real_gap", len(grouped["real_gap"])),
+            ("review_caution", len(grouped["review_caution"])),
+            ("variant_tolerated", len(grouped["variant_tolerated"])),
+        ]
+
+        parts = []
+        for trust_level, count in counts:
+            if count <= 0:
+                continue
+            label = self.format_deduction_trust_label(trust_level).lower()
+            suffix = "" if count == 1 else "s"
+            parts.append(f"{count} {label}{suffix}")
+
+        if not parts:
+            return ""
+
+        return " | ".join(parts)
+
+    def build_semantic_reasoning_sections(self, intel_display, margin_top=12):
+
+        display = dict(intel_display or {})
+        grouped = self.group_deduction_ledger(display)
+        summary_rows = []
+        semantic_coherence = self.format_packet_display_value("Semantic Coherence", display.get("semantic_coherence"))
+        ledger_summary = self.summarize_deduction_ledger(display)
+        semantic_notes = [
+            self.sentence_case_phrase(item)
+            for item in list(display.get("semantic_review_notes") or [])
+            if item not in (None, "", [], {})
+        ]
+
+        if semantic_coherence not in (None, "", "Missing"):
+            summary_rows.append(("Semantic Coherence", semantic_coherence))
+        if ledger_summary:
+            summary_rows.append(("Deduction Ledger", ledger_summary))
+        if grouped["variant_tolerated"]:
+            summary_rows.append(("Variant Handling", "Formatting differences were tolerated where packet meaning still reconciled coherently."))
+
+        sections = []
+        if summary_rows:
+            sections.append(
+                self.build_detail_card(
+                    "Semantic Adjudication",
+                    self.build_detail_table(summary_rows, value_color="#DCE6F2", show_missing=False),
+                    accent_color="#2DCE89",
+                    margin_top=margin_top,
+                )
+            )
+
+        if grouped["real_gap"]:
+            sections.append(
+                self.build_bullet_section(
+                    "Real Gaps",
+                    grouped["real_gap"],
+                    color="#EB5757",
+                    accent_color="#EB5757",
+                )
+            )
+
+        if grouped["review_caution"]:
+            sections.append(
+                self.build_bullet_section(
+                    "Review Cautions",
+                    grouped["review_caution"],
+                    color="#F2C94C",
+                    accent_color="#F2994A",
+                )
+            )
+
+        if grouped["variant_tolerated"]:
+            sections.append(
+                self.build_bullet_section(
+                    "Variant-Tolerated Differences",
+                    grouped["variant_tolerated"],
+                    color="#6FCF97",
+                    accent_color="#27AE60",
+                )
+            )
+
+        if semantic_notes:
+            sections.append(
+                self.build_bullet_section(
+                    "Semantic Review Notes",
+                    semantic_notes,
+                    color="#57B6FF",
+                    accent_color="#57B6FF",
+                )
+            )
+
+        return sections
 
     def packet_conflict_field_aliases(self, field_name):
 

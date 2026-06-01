@@ -44,6 +44,13 @@ FORM_TEMPLATES = {
             "diagnosis",
             "signature_present",
         ],
+        "completeness_fields": [
+            "name",
+            "dob",
+            "ordering_provider",
+            "facility",
+            "diagnosis",
+        ],
     },
     "consent": {
         "title_patterns": [
@@ -92,6 +99,12 @@ FORM_TEMPLATES = {
             "dob",
             "signature_present",
         ],
+        "completeness_fields": [
+            "name",
+            "dob",
+            "signature_present",
+        ],
+        "signature_expected": True,
     },
     "consult_request": {
         "title_patterns": [
@@ -144,6 +157,15 @@ FORM_TEMPLATES = {
             "clinic_name",
             "location",
         ],
+        "completeness_fields": [
+            "name",
+            "dob",
+            "ordering_provider",
+            "referring_provider",
+            "authorization_number",
+            "reason_for_request",
+            "diagnosis",
+        ],
     },
     "seoc": {
         "title_patterns": [
@@ -191,6 +213,13 @@ FORM_TEMPLATES = {
             "service_date_range",
             "diagnosis",
         ],
+        "completeness_fields": [
+            "name",
+            "dob",
+            "authorization_number",
+            "diagnosis",
+            "reason_for_request",
+        ],
     },
     "lomn": {
         "title_patterns": [
@@ -212,6 +241,11 @@ FORM_TEMPLATES = {
             r"\bmedically\s+reasonable\s+and\s+necessary\b",
             r"\bwithout\s+appropriate\s+interventional\s+treatment\b",
             r"\bfailure\s+of\s+conservative\b",
+            r"\brequested\s+treatment\s+objectives\b",
+            r"\brisk\s+if\s+treatment\s+is\s+delayed\s+or\s+denied\b",
+            r"\breasonable\s+and\s+necessary\s+determination\b",
+            r"\bprovider\s+contact\s+statement\b",
+            r"\bsincerely\b",
         ],
         "negative_patterns": [
             r"\bsingle\s+episode\s+of\s+care\b",
@@ -226,6 +260,8 @@ FORM_TEMPLATES = {
             ["clinical summary", "medical necessity"],
             ["medically reasonable and necessary", "without appropriate interventional treatment"],
             ["structured physical therapy", "activity modification", "home exercise program", "epidural steroid"],
+            ["requested treatment objectives", "risk if treatment is delayed or denied"],
+            ["reasonable and necessary determination", "provider contact statement", "sincerely"],
         ],
         "anchor_group_threshold": 2,
         "expected_fields": [
@@ -236,6 +272,13 @@ FORM_TEMPLATES = {
             "reason_for_request",
             "facility",
             "signature_present",
+        ],
+        "completeness_fields": [
+            "name",
+            "dob",
+            "ordering_provider",
+            "diagnosis",
+            "reason_for_request",
         ],
     },
     "rfs": {
@@ -294,6 +337,15 @@ FORM_TEMPLATES = {
             "facility",
             "clinic_name",
             "location",
+        ],
+        "completeness_fields": [
+            "name",
+            "dob",
+            "ordering_provider",
+            "authorization_number",
+            "diagnosis",
+            "icd_codes",
+            "reason_for_request",
         ],
     },
     "approved_referral": {
@@ -410,6 +462,14 @@ FORM_TEMPLATES = {
             "clinic_name",
             "location",
             "signature_present",
+        ],
+        "completeness_fields": [
+            "name",
+            "dob",
+            "provider",
+            "diagnosis",
+            "symptom",
+            "icd_codes",
         ],
     },
     "imaging_report": {

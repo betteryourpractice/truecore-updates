@@ -78,7 +78,7 @@ class ReviewEngine(ReviewComplianceMixin, ReviewPredictiveMixin):
     }
     COMPLIANCE_POLICY_VERSION = "va_cc_compliance_v1"
     COMPLIANCE_POLICY_EFFECTIVE_DATE = "2026-03-24"
-    COMPLIANCE_SIGNATURE_REQUIRED_DOCS = {"lomn", "consent"}
+    COMPLIANCE_SIGNATURE_REQUIRED_DOCS = {"consent"}
     COMPLIANCE_SECURE_FIELDS = {"name", "dob", "authorization_number", "va_icn", "claim_number"}
 
     def review(self, packet):
@@ -482,6 +482,9 @@ class ReviewEngine(ReviewComplianceMixin, ReviewPredictiveMixin):
 
     def build_submission_decision(self, packet):
         rubric = dict(getattr(packet, "packet_rubric", {}) or {})
+        semantic = dict(getattr(packet, "semantic_adjudication", {}) or {})
+        semantic_score = float(semantic.get("overall_score") or 0.0)
+        variant_tolerance = dict(semantic.get("variant_tolerance", {}) or {})
         rubric_blockers = list(rubric.get("blockers", []) or [])
         rubric_review_needs = list(rubric.get("review_needs", []) or [])
         actionable_flags = set(self.get_actionable_review_flags(packet))
@@ -537,8 +540,16 @@ class ReviewEngine(ReviewComplianceMixin, ReviewPredictiveMixin):
         if assembly_score is not None and 55 <= assembly_score < 72 and not hold_reasons:
             review_reasons.append("Packet assembly is incomplete enough to require reviewer confirmation.")
 
-        if packet.packet_confidence is not None and packet.packet_confidence < 0.78 and not hold_reasons:
+        if (
+            packet.packet_confidence is not None
+            and packet.packet_confidence < 0.78
+            and not hold_reasons
+            and not (semantic_score >= 84 and variant_tolerance.get("coherent_despite_variation"))
+        ):
             review_reasons.append("Packet confidence is below the auto-submit threshold.")
+
+        if semantic_score < 45 and not hold_reasons:
+            review_reasons.append("Packet meaning is still semantically unstable across documents.")
 
         if hold_reasons:
             readiness = "hold"
@@ -1611,6 +1622,9 @@ class ReviewEngine(ReviewComplianceMixin, ReviewPredictiveMixin):
 
     def build_denial_risk_prediction(self, packet, submission_decision, procedure_fit, success_pattern, escalation):
         modeling = dict((packet.metrics or {}).get("statistical_outcome_modeling", {}) or {})
+        semantic = dict(getattr(packet, "semantic_adjudication", {}) or {})
+        semantic_score = float(semantic.get("overall_score") or 0.0) / 100.0
+        variant_tolerance = dict(semantic.get("variant_tolerance", {}) or {})
         base_score = 1.0 - (packet.approval_probability if packet.approval_probability is not None else 0.5)
         risk_score = max(0.05, min(base_score, 0.95))
         drivers = []
@@ -1662,6 +1676,16 @@ class ReviewEngine(ReviewComplianceMixin, ReviewPredictiveMixin):
         if packet.packet_confidence is not None and packet.packet_confidence < 0.75:
             risk_score += 0.08
             drivers.append("Packet confidence is below the normal auto-submit comfort range.")
+
+        if semantic_score >= 0.88:
+            risk_score -= 0.06
+            drivers.append("Semantic packet review shows a coherent case story across documents.")
+        elif semantic_score >= 0.74 and variant_tolerance.get("coherent_despite_variation"):
+            risk_score -= 0.04
+            drivers.append("Packet meaning stays coherent despite office-specific formatting variation.")
+        elif semantic_score < 0.45:
+            risk_score += 0.08
+            drivers.append("Packet meaning is still semantically unstable across documents.")
 
         if escalation["escalate"]:
             risk_score += 0.08

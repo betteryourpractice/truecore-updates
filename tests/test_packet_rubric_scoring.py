@@ -3,6 +3,7 @@ import unittest
 from TrueCoreIntel.data.packet_model import Packet
 from TrueCoreIntel.intelligence.intelligence_engine import IntelligenceEngine
 from TrueCoreIntel.intelligence.packet_rubric import build_packet_rubric
+from TrueCoreIntel.intelligence.semantic_adjudication import SemanticAdjudicationAnalyzer
 from TrueCoreIntel.review.review_engine import ReviewEngine
 
 
@@ -69,6 +70,30 @@ def make_full_submission_packet():
 
 
 class PacketRubricScoringTests(unittest.TestCase):
+    def setUp(self):
+        self.semantic = SemanticAdjudicationAnalyzer()
+
+    def test_consult_and_lomn_do_not_require_signature(self):
+        packet = make_full_submission_packet()
+        packet.field_observations["signature_present"] = [
+            {"value": True, "document_type": "rfs"},
+            {"value": True, "document_type": "consent"},
+        ]
+
+        rubric = build_packet_rubric(packet)
+        consult_component = next(component for component in rubric["components"] if component["key"] == "consult_request")
+        lomn_component = next(component for component in rubric["components"] if component["key"] == "lomn")
+
+        self.assertEqual(consult_component["status"], "strong")
+        self.assertEqual(lomn_component["status"], "strong")
+        self.assertFalse(
+            any("signature" in item.lower() for item in consult_component["review_needs"]),
+            consult_component["review_needs"],
+        )
+        self.assertFalse(
+            any("signature" in item.lower() for item in lomn_component["review_needs"]),
+            lomn_component["review_needs"],
+        )
 
     def test_small_name_ocr_conflict_becomes_review_not_blocker(self):
         packet = make_full_submission_packet()
@@ -146,6 +171,22 @@ class PacketRubricScoringTests(unittest.TestCase):
             any("virtual consent form" in reason.lower() for reason in decision["hold_reasons"]),
             decision["hold_reasons"],
         )
+
+    def test_semantically_tolerated_reason_conflict_does_not_count_as_review_conflict(self):
+        packet = make_full_submission_packet()
+        packet.packet_format_variability = "high"
+        packet.conflicts = [
+            {
+                "field": "reason_for_request",
+                "severity": "medium",
+                "message": "Reason for request is inconsistent across packet documents.",
+            }
+        ]
+        packet = self.semantic.analyze(packet)
+
+        rubric = build_packet_rubric(packet)
+
+        self.assertNotIn("reason_for_request", rubric["review_conflict_fields"])
 
 
 if __name__ == "__main__":

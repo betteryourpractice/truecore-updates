@@ -85,6 +85,10 @@ class ExtractorNormalizationMixin:
         if not compact:
             return None
 
+        lowered = compact.lower()
+        if "indian health services" in lowered or "tribal health program" in lowered:
+            return None
+
         patterns = [
             r"\b([A-Z][A-Z&,\-\. ]{8,}(?:LLC|L\.L\.C\.|PC|P\.C\.|INC|CORP|CLINIC|MANAGEMENT))\b",
             r"\b([A-Z][A-Z&,\-\. ]{8,}(?:NEUROSCIENCES|PAIN MANAGEMENT|MEDICAL GROUP|MEDICAL CENTER|CLINIC))\b",
@@ -204,6 +208,7 @@ class ExtractorNormalizationMixin:
             return canonical
         value = re.sub(r"[^A-Za-z0-9,\-&\'\.()/ ]", " ", value)
         value = re.sub(r"\s+", " ", value).strip(" ,.-")
+        value = re.sub(r"^\d+\.\s*", "", value)
 
         if not value or len(value) < 3:
             return None
@@ -218,6 +223,8 @@ class ExtractorNormalizationMixin:
             return None
 
         lowered = value.lower()
+        if any(marker in lowered for marker in ["indian health services", "tribal health program", "(ihs)", " ihs "]):
+            return None
         if any(keyword in lowered for keyword in ["medical center", "hospital", "vamc"]) and "clinic" not in lowered:
             return None
 

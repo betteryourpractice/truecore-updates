@@ -63,21 +63,21 @@ DOCUMENT_RULES = {
         "label": "Consultation & Treatment Request",
         "aliases": ("consult_request",),
         "presence_weight": 0.35,
-        "data_weight": 0.35,
-        "signature_weight": 0.30,
+        "data_weight": 0.65,
+        "signature_weight": 0.0,
         "data_fields": ("ordering_provider", "reason_for_request", "diagnosis", "icd_codes"),
-        "signature_required": True,
+        "signature_required": False,
         "blocking_if_missing": True,
         "blocking_if_unsigned": False,
     },
     "lomn": {
         "label": "Letter of Medical Necessity",
         "aliases": ("lomn",),
-        "presence_weight": 0.35,
-        "data_weight": 0.35,
-        "signature_weight": 0.30,
+        "presence_weight": 0.30,
+        "data_weight": 0.70,
+        "signature_weight": 0.0,
         "data_fields": ("reason_for_request", "diagnosis", "icd_codes"),
-        "signature_required": True,
+        "signature_required": False,
         "blocking_if_missing": True,
         "blocking_if_unsigned": False,
     },
@@ -347,6 +347,12 @@ def _score_consistency(packet, conflict_summary):
 
 def _classify_conflicts(packet):
     conflicts = list(getattr(packet, "conflicts", []) or [])
+    tolerated_conflicts = list((getattr(packet, "semantic_adjudication", {}) or {}).get("tolerated_conflicts", []) or [])
+    tolerated_fields = {
+        str(item.get("field") or "").strip().lower()
+        for item in tolerated_conflicts
+        if item.get("field")
+    }
     summary = {
         "blocking_fields": [],
         "review_fields": [],
@@ -368,6 +374,9 @@ def _classify_conflicts(packet):
         field_name = str(conflict.get("field") or "").strip().lower()
         severity = str(conflict.get("severity") or "low").strip().lower()
         values = list(conflict.get("values") or [])
+
+        if field_name in tolerated_fields and severity in {"low", "medium"}:
+            continue
 
         if field_name == "name" and _is_benign_name_conflict(values, packet):
             summary["benign_identity_conflict"] = True
@@ -434,6 +443,10 @@ def _field_coverage_ratio(packet, aliases, field_names):
     if not field_names:
         return 1.0
 
+    document_ratio = _document_completeness_ratio(packet, aliases)
+    if document_ratio is not None:
+        return document_ratio
+
     score = 0.0
     for field_name in field_names:
         if _has_field_observation(packet, field_name, aliases):
@@ -441,6 +454,23 @@ def _field_coverage_ratio(packet, aliases, field_names):
         elif getattr(packet, "fields", {}).get(field_name) not in (None, "", []):
             score += 0.55
     return round(score / max(len(field_names), 1), 2)
+
+
+def _document_completeness_ratio(packet, aliases):
+    documents = (
+        getattr(packet, "validation_intelligence", {}) or {}
+    ).get("field_to_form_consistency_checks", {}).get("documents", [])
+    alias_set = {str(alias or "").strip().lower() for alias in aliases}
+
+    for document in documents:
+        document_type = str(document.get("document_type") or "").strip().lower()
+        if document_type not in alias_set:
+            continue
+        try:
+            return float(document.get("completeness_ratio"))
+        except Exception:
+            return None
+    return None
 
 
 def _has_field_observation(packet, field_name, aliases):

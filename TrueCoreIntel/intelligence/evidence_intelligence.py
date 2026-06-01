@@ -18,8 +18,8 @@ class EvidenceIntelligenceAnalyzer:
     }
 
     DOCUMENT_SUPPORT_FIELDS = {
-        "lomn": ("diagnosis", "reason_for_request", "service_date_range", "signature_present"),
-        "clinical_notes": ("diagnosis", "symptom", "procedure", "icd_codes", "service_date_range", "signature_present"),
+        "lomn": ("diagnosis", "reason_for_request", "service_date_range"),
+        "clinical_notes": ("diagnosis", "symptom", "procedure", "icd_codes", "service_date_range"),
         "rfs": ("authorization_number", "va_icn", "ordering_provider", "referring_provider", "service_date_range"),
         "approved_referral": ("authorization_number", "va_icn", "referring_provider", "facility", "clinic_name", "reason_for_request"),
         "consult_request": ("ordering_provider", "referring_provider", "authorization_number", "reason_for_request"),
@@ -55,7 +55,7 @@ class EvidenceIntelligenceAnalyzer:
         },
         "signature_attestation": {
             "fields": ("signature_present",),
-            "documents": ("lomn", "consent", "clinical_notes"),
+            "documents": ("consent",),
         },
         "date_recency": {
             "fields": ("service_date_range",),

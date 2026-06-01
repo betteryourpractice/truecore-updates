@@ -149,9 +149,9 @@ class ExtractorEngine(ExtractorNormalizationMixin):
     FIELD_PATTERNS = {
         "authorization_number": [
             r"\bref(?:\.|erral)?\b\s*(?:#|no\.?|number|id)?\s*[:\-]?\s*(VA(?:[\- ]?\d){8,18})\b",
-            r"(?:authorization(?:\s+number|\s+no\.?)?|auth(?:orization)?(?:\s+number|\s+no\.?)?|ref(?:\.|erral)?(?:\s+number|\s+no\.?)?|member\s*id|tracking(?:\s+number|\s+no\.?|\s+id)?|reference(?:\s+number|\s+no\.?|\s+id)?|case(?:\s+number|\s+no\.?|\s+id)?|consult(?:\s+number|\s+no\.?|\s+id)?|episode(?:\s+of\s+care)?(?:\s+number|\s+no\.?|\s+id)?|seoc(?:\s+number|\s+no\.?|\s+id)?)\s*(?:#|no\.?|number|id)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\- ]{5,32})",
-            r"(?:\b(?:auth|authorization|ref(?:\.|erral)?|member\s*id|tracking|reference|case|consult|episode(?:\s+of\s+care)?|seoc)\b\s*[#:;\-]?\s*)([A-Z0-9][A-Z0-9\- ]{5,32})",
-            r"\b(?:auth|authorization|ref(?:\.|erral)?|member\s*id|tracking|reference|case|consult|episode(?:\s+of\s+care)?|seoc)\b[\s\r\n]{0,12}(?:number|no\.?|#|id)?[\s\r\n:;\-]{0,8}([A-Z0-9][A-Z0-9\- ]{5,32})",
+            r"(?:authorization(?:\s+number|\s+no\.?)?|auth(?:orization)?(?:\s+number|\s+no\.?)?|\bref(?:\.|erral)?\b(?:\s+number|\s+no\.?)?|member\s*id|tracking(?:\s+number|\s+no\.?|\s+id)?|reference(?:\s+number|\s+no\.?|\s+id)?|case(?:\s+number|\s+no\.?|\s+id)?|consult(?:\s+number|\s+no\.?|\s+id)?)\s*(?:#|no\.?|number|id)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\- ]{5,32})",
+            r"(?:\b(?:auth|authorization|\bref(?:\.|erral)?\b|member\s*id|tracking|reference|case|consult)\b\s*[#:;\-]?\s*)([A-Z0-9][A-Z0-9\- ]{5,32})",
+            r"\b(?:auth|authorization|\bref(?:\.|erral)?\b|member\s*id|tracking|reference|case|consult)\b[\s\r\n]{0,12}(?:number|no\.?|#|id)?[\s\r\n:;\-]{0,8}([A-Z0-9][A-Z0-9\- ]{5,32})",
         ],
         "facility": [
             r"(?:facility(?: name)?|servicing facility|treating facility|requested facility|referring facility|rendering facility|medical facility)\s*[:\-]\s*([^\n\r]+)",
@@ -174,13 +174,9 @@ class ExtractorEngine(ExtractorNormalizationMixin):
         ],
         "claim_number": [
             r"(?:claim(?: number| no\.?)?|va claim number|claim #)\s*[:#\-]?\s*([A-Z0-9\-]{4,24})\b",
-            r"(?:last four ssn|last four)\s*[:#\-]?\s*(\d{4})\b",
-            r"(?:ssn ending(?: in)?|ending in)\s*[:#\-]?\s*(\d{4})\b",
         ],
         "reason_for_request": [
-            r"(?:reason for request|reason for consultation|reason for consult|reason for referral|chief complaint|requested service|requested procedure|reason)\s*[:\-]\s*([^\n\r]+)",
-            r"\bchief complaint\s*[:\-]?\s*([^\n\r]+)",
-            r"\bhistory of present illness\s*[:\-]?\s*([^\n\r]+)",
+            r"(?:reason for request|reason for consultation|reason for consult|reason for referral|requested service|requested procedure|reason)\s*[:\-]\s*([^\n\r]+)",
         ],
         "service_date_range": [
             r"(?:date(?:s)? of service|service date(?:s| range)?|visit date(?:s| range)?|clinical visit(?: date)?s?|dos)\s*[:\-]\s*([^\n\r]+)",
@@ -449,7 +445,7 @@ class ExtractorEngine(ExtractorNormalizationMixin):
 
         if not auth_number:
             anchor_pattern = re.compile(
-                r"(authorization(?:\s+number|\s+no\.?)?|auth(?:orization)?(?:\s+number|\s+no\.?)?|ref(?:\.|erral)?(?:\s+number|\s+no\.?)?|community care|member\s*id|tracking(?:\s+number|\s+no\.?|\s+id)?|reference(?:\s+number|\s+no\.?|\s+id)?|case(?:\s+number|\s+no\.?|\s+id)?|consult(?:\s+number|\s+no\.?|\s+id)?|episode(?:\s+of\s+care)?(?:\s+number|\s+no\.?|\s+id)?|seoc(?:\s+number|\s+no\.?|\s+id)?)",
+                r"(authorization(?:\s+number|\s+no\.?)?|auth(?:orization)?(?:\s+number|\s+no\.?)?|\bref(?:\.|erral)?\b(?:\s+number|\s+no\.?)?|member\s*id|tracking(?:\s+number|\s+no\.?|\s+id)?|reference(?:\s+number|\s+no\.?|\s+id)?|case(?:\s+number|\s+no\.?|\s+id)?|consult(?:\s+number|\s+no\.?|\s+id)?)",
                 re.IGNORECASE,
             )
             numeric_label_terms = [
@@ -461,8 +457,6 @@ class ExtractorEngine(ExtractorNormalizationMixin):
                 "reference number",
                 "case number",
                 "consult number",
-                "episode of care",
-                "seoc",
             ]
 
             for match in anchor_pattern.finditer(text):
@@ -504,7 +498,7 @@ class ExtractorEngine(ExtractorNormalizationMixin):
 
         if not auth_number:
             numeric_anchor_pattern = re.compile(
-                r"(?:member\s*id|tracking(?:\s+number|\s+no\.?|\s+id)?|reference(?:\s+number|\s+no\.?|\s+id)?|case(?:\s+number|\s+no\.?|\s+id)?|consult(?:\s+number|\s+no\.?|\s+id)?|episode(?:\s+of\s+care)?(?:\s+number|\s+no\.?|\s+id)?|seoc(?:\s+number|\s+no\.?|\s+id)?)\s*(?:#|no\.?|number|id)?\s*[:\-]?\s*(\d[\d \-]{7,22}\d)",
+                r"(?:member\s*id|tracking(?:\s+number|\s+no\.?|\s+id)?|reference(?:\s+number|\s+no\.?|\s+id)?|case(?:\s+number|\s+no\.?|\s+id)?|consult(?:\s+number|\s+no\.?|\s+id)?)\s*(?:#|no\.?|number|id)?\s*[:\-]?\s*(\d[\d \-]{7,22}\d)",
                 re.IGNORECASE,
             )
             for match in numeric_anchor_pattern.finditer(text):
@@ -518,14 +512,6 @@ class ExtractorEngine(ExtractorNormalizationMixin):
             for candidate in va_prefixed_candidates:
                 normalized = normalize_auth_candidate(candidate)
                 if normalized:
-                    auth_number = normalized
-                    break
-
-        if not auth_number:
-            broad_candidates = re.findall(r"\b[A-Z]{1,4}-?[A-Z0-9]{5,24}\b", text, re.IGNORECASE)
-            for candidate in broad_candidates:
-                normalized = normalize_auth_candidate(candidate)
-                if normalized and re.search(r"[A-Z]", normalized) and re.search(r"\d", normalized):
                     auth_number = normalized
                     break
 
@@ -691,6 +677,8 @@ class ExtractorEngine(ExtractorNormalizationMixin):
         lowered = str(text or "").lower()
         markers = []
         for marker in self.TEMPLATE_TEXT_MARKERS:
+            if marker == "template" and "clinical documentation template" in lowered:
+                continue
             if marker in lowered:
                 markers.append(marker)
         for content in self.extract_bracket_contents(text):
@@ -954,7 +942,6 @@ class ExtractorEngine(ExtractorNormalizationMixin):
                 r"\breason for consultation\b",
                 r"\breason for request\b",
                 r"\breason for referral\b",
-                r"\bchief complaint\b",
             ],
             max_follow_lines=3,
         )
@@ -1121,6 +1108,54 @@ class ExtractorEngine(ExtractorNormalizationMixin):
 
         return None
 
+    def extract_rfs_printed_provider(self, text):
+        normalized_text = str(text or "")
+        if not normalized_text:
+            return None
+
+        patterns = [
+            (
+                r"(?:ORDERING PROVIDER NAME \(PRINTED\).{0,240}?\n)?"
+                r"(Dr\.?\s+[A-Z][A-Za-z'\-]+(?:\s+[A-Z](?:\.)?)?(?:\s+[A-Z][A-Za-z'\-]+){0,3})"
+                r"\s*\n\s*(?:[A-Z]{1,4}\d{2,}|\d{10})\s*\n\s*\d{1,2}/\d{1,2}/\d{2,4}\b"
+            ),
+            (
+                r"(?:[\w.\-]+@[\w.\-]+\.\w+\s*\n\s*)"
+                r"(Dr\.?\s+[A-Z][A-Za-z'\-]+(?:\s+[A-Z](?:\.)?)?(?:\s+[A-Z][A-Za-z'\-]+){0,3})"
+                r"\s*\n\s*(?:[A-Z]{1,4}\d{2,}|\d{10})\s*\n\s*\d{1,2}/\d{1,2}/\d{2,4}\b"
+            ),
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, normalized_text, re.IGNORECASE | re.MULTILINE)
+            if not match:
+                continue
+            candidate = self.normalize_provider(match.group(1))
+            if candidate:
+                return candidate
+
+        return None
+
+    def extract_provider_signature_block_name(self, text):
+        normalized_text = str(text or "")
+        if not normalized_text:
+            return None
+
+        patterns = [
+            r"(?:Sincerely|Respectfully|Regards)\s*,?\s*(?:\n|\r\n?)\s*(Dr\.?\s+[A-Z][A-Za-z'\-]+(?:\s+[A-Z](?:\.)?)?(?:\s+[A-Z][A-Za-z'\-]+){0,3}(?:\s*,?\s*(?:Doctor|MD|DO|PA(?:-C)?|NP|FNP|APRN|RN|DC|DDS))*)",
+            r"(?:Provider Contact Statement:.*?)(?:Sincerely|Respectfully)\s*,?\s*(?:\n|\r\n?)\s*(Dr\.?\s+[A-Z][A-Za-z'\-]+(?:\s+[A-Z](?:\.)?)?(?:\s+[A-Z][A-Za-z'\-]+){0,3}(?:\s*,?\s*(?:Doctor|MD|DO|PA(?:-C)?|NP|FNP|APRN|RN|DC|DDS))*)",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, normalized_text, re.IGNORECASE | re.DOTALL)
+            if not match:
+                continue
+            candidate = self.normalize_provider(match.group(1))
+            if candidate:
+                return candidate
+
+        return None
+
     def build_provider_fallback_windows(self, text):
         raw_lines = [
             re.sub(r"\s+", " ", line).strip()
@@ -1244,6 +1279,18 @@ class ExtractorEngine(ExtractorNormalizationMixin):
                 data["clinic_name"] = clinic_name
             if location:
                 data["location"] = location
+
+        if effective_doc_type == "rfs":
+            printed_provider = self.extract_rfs_printed_provider(text) or self.extract_provider_signature_block_name(text)
+            if printed_provider:
+                data["ordering_provider"] = printed_provider
+                data["provider"] = printed_provider
+
+        if effective_doc_type in {"consult_request", "lomn"}:
+            signed_provider = self.extract_provider_signature_block_name(text)
+            if signed_provider:
+                data.setdefault("ordering_provider", signed_provider)
+                data.setdefault("provider", signed_provider)
 
         if "procedure note" in lowered:
             treating_provider = self.choose_most_common_value(
@@ -1676,6 +1723,8 @@ class ExtractorEngine(ExtractorNormalizationMixin):
                 return "demographic narrative misread as provider"
             if "care team" in combined:
                 return "care-team text misread as provider"
+            if any(marker in combined for marker in ["indian health services", "tribal health program", "(ihs)", " ihs "]):
+                return "IHS / THP checkbox or organization text misread as provider"
             if "or other provider" in combined or "assigned by service line" in combined:
                 return "generic provider-language misread as a named provider"
             raw_tokens = re.findall(r"[A-Za-z']+", raw)
@@ -1724,14 +1773,22 @@ class ExtractorEngine(ExtractorNormalizationMixin):
                 return "section scaffolding text misread as diagnosis"
             if lowered_raw.startswith("of ") and "/" in lowered_raw:
                 return "fragmented heading text misread as diagnosis"
+            if "education, training" in lowered_raw or "fitting of dme" in lowered_raw:
+                return "adjacent form instructions misread as diagnosis"
 
         if field_name == "authorization_number":
+            doc_type = str(mapping.get("document_type") or "").lower()
+            matched_text = str(mapping.get("matched_text") or "").strip().lower()
             if any(marker in combined for marker in ["provider npi", "community provider npi", "referring provider npi", " npi "]):
                 return "npi value misread as authorization number"
-            if any(marker in combined for marker in ["preferred phone", "billing phone", "home phone", "mobile phone", "phone:"]):
+            if any(marker in combined for marker in ["preferred phone", "billing phone", "home phone", "mobile phone", "phone:", "fax:", "phone number", "fax number"]):
                 return "phone number misread as authorization number"
             if any(marker in combined for marker in ["veteran icn", "va icn", "integrated control number"]):
                 return "icn value misread as authorization number"
+            if doc_type in {"seoc", "consult_request", "lomn", "clinical_notes"} and matched_text in {"ref", "referral", "consult"}:
+                return "unlabeled shorthand misread as authorization number"
+            if doc_type in {"seoc", "consult_request", "lomn", "clinical_notes"} and "referring va provider" in combined:
+                return "referring-provider text misread as authorization number"
 
         return None
 
@@ -1903,10 +1960,14 @@ class ExtractorEngine(ExtractorNormalizationMixin):
             "patient's care team",
             "patients care team",
             "care team",
+            "indian health services",
+            "tribal health program",
         )
         if any(phrase in lowered for phrase in invalid_phrases):
             return None
         if re.match(r"^(?:another|secure|email|signature)\b", lowered):
+            return None
+        if "(ihs)" in lowered or re.search(r"\bihs\b", lowered):
             return None
         if re.search(r"\byear[- ]old\b|\bmale\b|\bfemale\b", lowered):
             return None
@@ -2132,8 +2193,8 @@ class ExtractorEngine(ExtractorNormalizationMixin):
             "clinic_name": ["clinic", "clinic name", "practice name", "office", "submitting office", "office name", "provider group"],
             "npi": ["npi"],
             "va_icn": ["icn", "va icn", "integrated control number", "icn/ssn"],
-            "claim_number": ["claim number", "claim #", "va claim number", "last four ssn", "ssn ending"],
-            "reason_for_request": ["reason for request", "reason for consultation", "reason for consult", "reason for referral", "request rationale", "chief complaint", "requested service", "requested procedure", "clinical goals"],
+            "claim_number": ["claim number", "claim #", "va claim number"],
+            "reason_for_request": ["reason for request", "reason for consultation", "reason for consult", "reason for referral", "request rationale", "requested service", "requested procedure", "clinical goals"],
             "diagnosis": ["episode diagnosis", "primary diagnosis code", "diagnosis", "diagnoses", "assessment", "impression", "clinical impression"],
             "icd_codes": ["icd", "icd-10", "diagnosis code"],
             "service_date_range": ["date of service", "dates of service", "service date", "visit date", "dos", "through"],
@@ -2317,8 +2378,44 @@ class ExtractorEngine(ExtractorNormalizationMixin):
         }
 
     def consolidate_packet_fields(self, packet):
+        self.consolidate_clinical_minimal_request_intent(packet)
+        self.consolidate_identifier_fields(packet)
         self.consolidate_provider_role_fields(packet)
         self.consolidate_service_date_range(packet)
+
+    def consolidate_clinical_minimal_request_intent(self, packet):
+        if packet.fields.get("reason_for_request"):
+            return
+
+        detected_documents = {str(item or "").strip().lower() for item in (getattr(packet, "detected_documents", set()) or set())}
+        if not detected_documents or not detected_documents.issubset({"clinical_notes", "unknown"}):
+            return
+
+        diagnosis_observation = self.select_best_observation(packet, "diagnosis")
+        symptom_observation = self.select_best_observation(packet, "symptom")
+        source_observation = diagnosis_observation or symptom_observation
+        if not source_observation:
+            return
+
+        self._apply_observation_to_field(packet, "reason_for_request", source_observation, force_history_reset=True)
+
+    def consolidate_identifier_fields(self, packet):
+        if packet.fields.get("authorization_number"):
+            return
+
+        detected_documents = {str(item or "").strip().lower() for item in (getattr(packet, "detected_documents", set()) or set())}
+        if "rfs" not in detected_documents:
+            return
+
+        claim_observation = self.select_best_observation(
+            packet,
+            "claim_number",
+            predicate=lambda entry: bool(re.search(r"[A-Z]", str(entry.get("value") or ""))) and bool(re.search(r"\d", str(entry.get("value") or ""))),
+        )
+        if not claim_observation:
+            return
+
+        self._apply_observation_to_field(packet, "authorization_number", claim_observation, force_history_reset=True)
 
     def select_best_observation(self, packet, field_name, predicate=None):
         observations = list((getattr(packet, "field_observations", {}) or {}).get(field_name, []) or [])
@@ -2327,8 +2424,123 @@ class ExtractorEngine(ExtractorNormalizationMixin):
         if not observations:
             return None
 
+        def document_priority(entry):
+            doc_type = str(entry.get("document_type") or "").strip().lower()
+            priorities = {
+                "ordering_provider": {
+                    "consult_request": 7,
+                    "lomn": 7,
+                    "clinical_notes": 6,
+                    "approved_referral": 5,
+                    "rfs": 4,
+                    "cover_sheet": 3,
+                    "seoc": 3,
+                    "unknown": 1,
+                },
+                "provider": {
+                    "clinical_notes": 7,
+                    "lomn": 7,
+                    "consult_request": 6,
+                    "approved_referral": 5,
+                    "rfs": 4,
+                    "cover_sheet": 3,
+                    "unknown": 1,
+                },
+                "treating_provider": {
+                    "clinical_notes": 8,
+                    "lomn": 6,
+                    "consult_request": 5,
+                    "unknown": 1,
+                },
+                "followup_provider": {
+                    "clinical_notes": 8,
+                    "unknown": 1,
+                },
+                "referring_provider": {
+                    "consult_request": 8,
+                    "approved_referral": 7,
+                    "cover_sheet": 6,
+                    "rfs": 4,
+                    "seoc": 3,
+                    "unknown": 1,
+                },
+                "diagnosis": {
+                    "lomn": 8,
+                    "consult_request": 8,
+                    "seoc": 8,
+                    "clinical_notes": 7,
+                    "rfs": 6,
+                    "cover_sheet": 4,
+                    "unknown": 2,
+                },
+                "reason_for_request": {
+                    "consult_request": 8,
+                    "rfs": 7,
+                    "lomn": 6,
+                    "seoc": 5,
+                    "clinical_notes": 4,
+                    "unknown": 2,
+                },
+                "clinic_name": {
+                    "approved_referral": 8,
+                    "cover_sheet": 6,
+                    "consult_request": 4,
+                    "lomn": 4,
+                    "unknown": 1,
+                },
+                "location": {
+                    "approved_referral": 8,
+                    "consult_request": 4,
+                    "lomn": 4,
+                    "unknown": 1,
+                },
+                "claim_number": {
+                    "rfs": 8,
+                    "consult_request": 6,
+                    "lomn": 5,
+                    "approved_referral": 4,
+                    "unknown": 1,
+                },
+            }
+            return priorities.get(field_name, {}).get(doc_type, 3 if doc_type and doc_type != "unknown" else 1)
+
+        def section_priority(entry):
+            role = str(entry.get("primary_section_role") or "").strip().lower()
+            priorities = {
+                "ordering_provider": {
+                    "identity_admin": 5,
+                    "routing_followup": 4,
+                    "justification": 3,
+                },
+                "provider": {
+                    "identity_admin": 5,
+                    "routing_followup": 4,
+                    "justification": 4,
+                    "clinical_support": 3,
+                },
+                "referring_provider": {
+                    "routing_followup": 5,
+                    "identity_admin": 4,
+                },
+                "diagnosis": {
+                    "diagnostic_basis": 6,
+                    "clinical_support": 5,
+                    "justification": 4,
+                    "request_intent": 2,
+                },
+                "reason_for_request": {
+                    "request_intent": 6,
+                    "request_scope": 5,
+                    "justification": 4,
+                    "clinical_support": 2,
+                },
+            }
+            return priorities.get(field_name, {}).get(role, 0)
+
         observations.sort(
             key=lambda entry: (
+                document_priority(entry),
+                section_priority(entry),
                 float(entry.get("confidence") or 0.0),
                 len(str(entry.get("value") or "")),
                 1 if str(entry.get("document_type") or "").lower() != "unknown" else 0,

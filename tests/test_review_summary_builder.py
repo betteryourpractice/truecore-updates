@@ -1,6 +1,5 @@
 import unittest
 from types import SimpleNamespace
-
 from TrueCoreIntel.review.review_summary_builder import ReviewSummaryBuilder
 
 
@@ -44,6 +43,30 @@ class ReviewSummaryBuilderTests(unittest.TestCase):
 
         self.assertEqual(len(reason_fixes), 1)
         self.assertEqual(reason_fixes[0]["priority"], "medium")
+
+    def test_semantically_tolerated_conflict_is_removed_from_summary_and_fixes(self):
+        packet = SimpleNamespace(
+            missing_fields=[],
+            missing_documents=[],
+            conflicts=[{"field": "reason_for_request", "severity": "medium", "message": "Reason differs across documents."}],
+            review_flags=[],
+            packet_strength="moderate",
+            semantic_adjudication={
+                "tolerated_conflicts": [
+                    {
+                        "field": "reason_for_request",
+                        "severity": "medium",
+                        "message": "Reason differs across documents.",
+                    }
+                ],
+                "review_notes": ["Some medium/low field conflicts are being treated as office-format or wording variants rather than hard defects."],
+            },
+        )
+
+        summary = self.builder.build(packet)
+
+        self.assertNotIn("Reason differs across documents.", summary.conflict_items)
+        self.assertFalse(any(item["target"] == "reason_for_request" and item["type"] == "conflict" for item in summary.prioritized_fixes))
 
 
 if __name__ == "__main__":
