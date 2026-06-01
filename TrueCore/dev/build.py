@@ -264,14 +264,14 @@ def build_release_download_url(build_channel, release_tag, asset_name, *, privat
     return f"https://github.com/betteryourpractice/truecore-updates/releases/download/{release_tag}/{asset_name}"
 
 
-def run_git_command(args):
-    return subprocess.call(args, cwd=ROOT_DIR)
+def run_git_command(args, *, cwd=None):
+    return subprocess.call(args, cwd=cwd or ROOT_DIR)
 
 
-def has_git_changes():
+def has_git_changes(*, cwd=None):
     result = subprocess.run(
         ["git", "status", "--porcelain"],
-        cwd=ROOT_DIR,
+        cwd=cwd or ROOT_DIR,
         capture_output=True,
         text=True,
         check=False,
@@ -279,7 +279,98 @@ def has_git_changes():
     return bool((result.stdout or "").strip())
 
 
-def publish_release_changes(version_label, notes):
+def read_git_head(*, cwd=None):
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=cwd or ROOT_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return (result.stdout or "").strip() or None
+
+
+def sync_git_release_tag(version_label, *, commit_ref="HEAD", remote_name="origin", cwd=None):
+    working_dir = cwd or ROOT_DIR
+    tag_result = run_git_command(["git", "tag", "-f", version_label, commit_ref], cwd=working_dir)
+    if tag_result != 0:
+        print(f"ERROR: failed to update git tag {version_label}.")
+        return False
+
+    push_result = run_git_command(
+        ["git", "push", remote_name, f"refs/tags/{version_label}", "--force"],
+        cwd=working_dir,
+    )
+    if push_result != 0:
+        print(f"ERROR: failed to push git tag {version_label}.")
+        return False
+    return True
+
+
+def sync_private_dev_manifest_repo(version_label, *, notes, private_dev_config, manifest_source_path):
+    if not is_private_dev_channel_enabled(private_dev_config):
+        print("Private dev repo sync skipped: private dev channel is not enabled.")
+        return True
+
+    owner = str(private_dev_config.get("owner") or "").strip()
+    repo = str(private_dev_config.get("repo") or "").strip()
+    branch_name = str(private_dev_config.get("ref") or "main").strip() or "main"
+    manifest_path = str(private_dev_config.get("manifest_path") or "version-dev.json").strip() or "version-dev.json"
+    if not owner or not repo:
+        print("ERROR: private dev repo owner/repo missing.")
+        return False
+
+    repo_url = f"https://github.com/{owner}/{repo}.git"
+    clone_root = tempfile.mkdtemp(prefix="truecore_private_dev_repo_", dir=ROOT_DIR)
+    clone_dir = os.path.join(clone_root, repo)
+    try:
+        clone_result = run_git_command(["git", "clone", repo_url, clone_dir], cwd=ROOT_DIR)
+        if clone_result != 0:
+            print("ERROR: failed to clone private dev repo.")
+            return False
+
+        target_manifest_path = os.path.join(clone_dir, *manifest_path.split("/"))
+        os.makedirs(os.path.dirname(target_manifest_path), exist_ok=True)
+        shutil.copy2(manifest_source_path, target_manifest_path)
+
+        add_result = run_git_command(["git", "add", manifest_path], cwd=clone_dir)
+        if add_result != 0:
+            print("ERROR: failed to stage private dev manifest update.")
+            return False
+
+        if has_git_changes(cwd=clone_dir):
+            commit_message = f"Update {os.path.basename(manifest_path)} for {version_label}"
+            if str(notes or "").strip():
+                commit_message += f": {str(notes).strip()[:48]}"
+            commit_result = run_git_command(["git", "commit", "-m", commit_message], cwd=clone_dir)
+            if commit_result != 0:
+                print("ERROR: failed to commit private dev manifest update.")
+                return False
+        else:
+            print("Private dev manifest already matches current build.")
+
+        push_result = run_git_command(["git", "push", "origin", branch_name], cwd=clone_dir)
+        if push_result != 0:
+            print("ERROR: failed to push private dev branch update.")
+            return False
+
+        branch_head = read_git_head(cwd=clone_dir)
+        if not branch_head:
+            print("ERROR: failed to resolve private dev repo HEAD.")
+            return False
+
+        if not sync_git_release_tag(version_label, commit_ref=branch_head, remote_name="origin", cwd=clone_dir):
+            return False
+
+        print("Private dev repo manifest and tag synced successfully.")
+        return True
+    finally:
+        shutil.rmtree(clone_root, ignore_errors=True)
+
+
+def publish_release_changes(version_label, notes, *, build_channel, private_dev_config=None, dev_manifest_path=None):
     commit_message = f"Release {version_label}"
     cleaned_notes = str(notes or "").strip()
     if cleaned_notes:
@@ -294,17 +385,34 @@ def publish_release_changes(version_label, notes):
 
     if not has_git_changes():
         print("No git changes detected after build. Nothing to commit.\n")
-        return True
+    else:
+        commit_result = run_git_command(["git", "commit", "-m", commit_message])
+        if commit_result != 0:
+            print("ERROR: git commit failed.")
+            return False
 
-    commit_result = run_git_command(["git", "commit", "-m", commit_message])
-    if commit_result != 0:
-        print("ERROR: git commit failed.")
+        push_result = run_git_command(["git", "push"])
+        if push_result != 0:
+            print("ERROR: git push failed.")
+            return False
+
+    release_commit = read_git_head()
+    if not release_commit:
+        print("ERROR: failed to resolve release commit after publish.")
         return False
 
-    push_result = run_git_command(["git", "push"])
-    if push_result != 0:
-        print("ERROR: git push failed.")
-        return False
+    if build_channel == "production":
+        if not sync_git_release_tag(version_label, commit_ref=release_commit):
+            return False
+    elif build_channel == "dev":
+        manifest_path = dev_manifest_path or VERSION_DEV_JSON_PATH
+        if not sync_private_dev_manifest_repo(
+            version_label,
+            notes=notes,
+            private_dev_config=private_dev_config,
+            manifest_source_path=manifest_path,
+        ):
+            return False
 
     print("\nGit publish completed successfully.\n")
     return True
@@ -943,40 +1051,48 @@ publish_choice = input(
 git_publish_succeeded = False
 
 if publish_choice in {"y", "yes"}:
-    git_publish_succeeded = publish_release_changes(release_tag, notes)
+    git_publish_succeeded = publish_release_changes(
+        release_tag,
+        notes,
+        build_channel=build_channel,
+        private_dev_config=private_dev_config,
+        dev_manifest_path=VERSION_DEV_JSON_PATH,
+    )
 else:
     print("\nGit publish skipped. Your build files remain local until you commit and push them.\n")
 
 print("Manual release follow-up:")
 if git_publish_succeeded:
     if build_channel == "dev" and not PUBLIC_DEV_CHANNEL_ENABLED:
-        print("1. Local-only dev build complete.")
-        print("2. Source changes were pushed, but no public dev update channel was touched.")
-        print(f"3. Local dev tag reference: {release_tag}")
+        print("1. Source changes were pushed.")
+        print("2. Private dev manifest repo and release tag were synced automatically.")
+        print(f"3. Dev tag/release name: {release_tag}")
         print(f"4. Engine package: {zip_path}")
         print(f"5. Launcher package: {launcher_zip_path}")
         print(f"6. Full suite package: {suite_zip_path}\n")
     else:
-        print("1. Create/publish the GitHub release tag when ready.")
-        print(f"2. Build channel: {build_channel.title()}")
-        print(f"3. Tag/release name: {release_tag}")
-        print(f"4. Upload engine: {zip_path}")
-        print(f"5. Launcher package: {launcher_zip_path}")
-        print(f"6. Full suite package: {suite_zip_path}\n")
+        print("1. Source changes were pushed.")
+        print("2. Public release tag was synced automatically.")
+        print(f"3. Build channel: {build_channel.title()}")
+        print(f"4. Tag/release name: {release_tag}")
+        print(f"5. Upload engine: {zip_path}")
+        print(f"6. Launcher package: {launcher_zip_path}")
+        print(f"7. Full suite package: {suite_zip_path}\n")
 else:
     if build_channel == "dev" and not PUBLIC_DEV_CHANNEL_ENABLED:
         print("1. Commit and push source changes when you are ready.")
-        print("2. This dev build is local-only. No public dev release step is required.")
+        print("2. Private dev manifest repo/tag sync will happen automatically the next time you choose publish.")
         print(f"3. Local dev tag reference: {release_tag}")
         print(f"4. Engine package: {zip_path}")
         print(f"5. Launcher package: {launcher_zip_path}")
         print(f"6. Full suite package: {suite_zip_path}\n")
     else:
         print("1. Commit and push source/release metadata when you are ready.")
-        print(f"2. Create/publish GitHub release tag: {release_tag}")
-        print(f"3. Upload engine: {zip_path}")
-        print(f"4. Launcher package: {launcher_zip_path}")
-        print(f"5. Full suite package: {suite_zip_path}\n")
+        print("2. Public release tag sync will happen automatically the next time you choose publish.")
+        print(f"3. Create/publish GitHub release tag/release object if needed: {release_tag}")
+        print(f"4. Upload engine: {zip_path}")
+        print(f"5. Launcher package: {launcher_zip_path}")
+        print(f"6. Full suite package: {suite_zip_path}\n")
 
 # -------------------------------------------------
 # BUILD COMPLETE
