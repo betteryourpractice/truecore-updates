@@ -13,6 +13,7 @@ import re
 from TrueCore.launcher.docs_catalog import export_docs_bundle
 from TrueCore.launcher.launcher_logging import log
 from TrueCore.launcher.launcher_support import (
+    apply_launcher_release_profile,
     build_launcher_support_snapshot,
     build_support_mailto_url,
     load_launcher_release_info,
@@ -27,6 +28,12 @@ from TrueCore.launcher.updater import (
 )
 from TrueCore.core.office_rollout import load_office_profile, record_docs_kit_exported
 from TrueCore.utils.launcher_auth import ensure_launcher_auth_config, verify_launcher_credentials
+from TrueCore.utils.install_mode import (
+    get_primary_update_channel,
+    get_reference_update_channel,
+    is_dev_install,
+)
+from TrueCore.utils.runtime_info import format_version_display
 
 
 ENGINE_DIR = "engine"
@@ -144,10 +151,12 @@ class LauncherWindow(QWidget):
         self.old_pos = None
         self.release_info = dict(load_launcher_release_info() or {})
         self.last_update_state = {}
+        self.install_profile = dict(apply_launcher_release_profile(release_info=self.release_info) or {})
+        self.is_dev_launcher = str(self.release_info.get("update_channel") or "").strip().lower() == "dev"
 
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setWindowTitle("TrueCore Launcher")
+        self.setWindowTitle("TrueCore Dev Launcher" if self.is_dev_launcher else "TrueCore Launcher")
         self.setFixedSize(742, 469)
         self.setWindowIcon(QIcon(resource_path("assets/truecore_icon.ico")))
 
@@ -225,9 +234,9 @@ class LauncherWindow(QWidget):
         version_layout = QVBoxLayout()
         version_layout.setAlignment(Qt.AlignRight)
 
-        self.server_version = QLabel("Server v-")
+        self.server_version = QLabel("Server -")
         launcher_version = self.release_info.get("version") or "1.0"
-        self.launcher_version = QLabel(f"Launcher v{launcher_version}")
+        self.launcher_version = QLabel(f"Launcher {format_version_display(launcher_version)}")
 
         version_layout.addWidget(self.server_version)
         version_layout.addWidget(self.launcher_version)
@@ -356,6 +365,14 @@ class LauncherWindow(QWidget):
         self.center_on_screen()
         self.auto_update()
 
+    def channel_display_name(self, channel_name):
+        normalized = str(channel_name or "").strip().lower()
+        if normalized == "dev":
+            return "Dev"
+        if normalized == "production":
+            return "Production"
+        return "Custom"
+
     def center_on_screen(self):
         screen = QGuiApplication.primaryScreen()
         if not screen:
@@ -386,30 +403,52 @@ class LauncherWindow(QWidget):
         self.old_pos = None
 
     def auto_update(self):
+        self.install_profile = dict(apply_launcher_release_profile(release_info=self.release_info) or {})
+        primary_channel = get_primary_update_channel(self.install_profile)
+        reference_channel = get_reference_update_channel(self.install_profile)
+
         self.news_box.clear()
         self.write_update_summary()
         self.news_box.append("\nChecking for updates...")
+        if is_dev_install(self.install_profile):
+            self.news_box.append(
+                f"Machine role: Dev | Primary channel: {self.channel_display_name(primary_channel)}"
+            )
 
-        update_data = check_updates()
+        update_data = check_updates(primary_channel)
         status = update_data.get("status") if update_data else "error"
         self.last_update_state = dict(update_data or {})
+
+        reference_update = None
+        if reference_channel:
+            reference_update = check_updates(reference_channel)
+            self.last_update_state["reference_channel"] = dict(reference_update or {})
 
         if status == "error":
             message = (update_data or {}).get("message", "Update server unreachable.")
             self.news_box.append(message)
+            if reference_update and reference_update.get("version"):
+                self.news_box.append(
+                    f"{self.channel_display_name(reference_channel)} reference: {format_version_display(reference_update.get('version'))}"
+                )
             return
 
         server_version = str((update_data or {}).get("version") or "").strip()
         manifest_auth = dict((update_data or {}).get("manifest_authentication") or {})
+        primary_channel_name = self.channel_display_name((update_data or {}).get("channel") or primary_channel)
 
         if server_version:
-            self.server_version.setText(f"Server v{server_version}")
+            self.server_version.setText(f"{primary_channel_name} {format_version_display(server_version)}")
             self.write_update_summary(server_version)
 
         local_version = str((update_data or {}).get("local_version") or get_local_version() or "-").strip()
 
-        self.news_box.append(f"Latest engine version: {server_version}")
+        self.news_box.append(f"Latest {primary_channel_name.lower()} engine version: {server_version}")
         self.news_box.append(f"Installed engine version: {local_version}")
+        if reference_update and reference_update.get("version"):
+            self.news_box.append(
+                f"{self.channel_display_name(reference_channel)} reference version: {reference_update.get('version')}"
+            )
         if manifest_auth.get("status") == "verified":
             self.news_box.append("Update manifest signature verified.")
         elif manifest_auth.get("status") == "unsigned_compatibility":
@@ -427,7 +466,8 @@ class LauncherWindow(QWidget):
 
         self.news_box.append("Update available. Downloading...")
 
-        zip_data = download_update(download_url)
+        download_headers = (update_data or {}).get("download_headers")
+        zip_data = download_update(download_url, request_headers=download_headers)
 
         if zip_data is None:
             self.news_box.append("Download failed.")
@@ -456,7 +496,7 @@ class LauncherWindow(QWidget):
                     [
                         "TrueCore Update",
                         "",
-                        f"- Launcher version: v{launcher_version}",
+                        f"- Launcher version: {format_version_display(launcher_version)}",
                         "- Current release notes unavailable.",
                     ]
                 )
@@ -464,7 +504,7 @@ class LauncherWindow(QWidget):
             return
 
         lines = [
-            f"TrueCore Update v{release_entry['version']}",
+            f"TrueCore Update {format_version_display(release_entry['version'])}",
         ]
         if release_entry.get("date"):
             lines.append(f"Released: {release_entry['date']}")
@@ -474,15 +514,21 @@ class LauncherWindow(QWidget):
         self.news_box.setPlainText("\n".join(lines))
 
     def refresh_static_context(self):
+        self.install_profile = dict(apply_launcher_release_profile(release_info=self.release_info) or {})
         office_profile = dict(load_office_profile() or {})
         office_name = office_profile.get("office_name") or "Unknown Office"
         username_hint = (
             dict(office_profile.get("credential_policy") or {}).get("username_hint")
             or "No office username hint configured yet."
         )
-        self.support_summary_label.setText(
-            f"This launcher is tied to {office_name}. Support requests include launcher, program, and office details automatically."
-        )
+        if is_dev_install(self.install_profile):
+            self.support_summary_label.setText(
+                f"Developer install mode is active for {office_name}. Support requests include channel, launcher, program, and office details automatically."
+            )
+        else:
+            self.support_summary_label.setText(
+                f"This launcher is tied to {office_name}. Support requests include launcher, program, and office details automatically."
+            )
         self.username_hint_label.setText(f"Office username hint: {username_hint}")
 
     def update_launch_button_state(self):

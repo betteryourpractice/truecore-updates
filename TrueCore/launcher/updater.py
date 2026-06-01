@@ -8,9 +8,18 @@ import hashlib
 import shutil
 import tempfile
 import json
+import base64
 from datetime import datetime, timezone
 
 from TrueCore.launcher.launcher_logging import log
+from TrueCore.utils.private_dev_channel import (
+    build_github_api_headers,
+    build_private_dev_contents_api_url,
+    build_private_dev_release_by_tag_api_url,
+    get_private_dev_repo_slug,
+    is_private_dev_channel_enabled,
+    load_private_dev_channel_config,
+)
 from TrueCore.utils.release_signing import (
     SIGNATURE_ALGORITHM,
     load_public_key,
@@ -18,7 +27,13 @@ from TrueCore.utils.release_signing import (
 )
 
 
-UPDATE_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version.json"
+PRODUCTION_UPDATE_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version.json"
+DEV_UPDATE_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version-dev.json"
+CHANNEL_UPDATE_URLS = {
+    "production": PRODUCTION_UPDATE_URL,
+    "dev": DEV_UPDATE_URL,
+}
+UPDATE_URL = PRODUCTION_UPDATE_URL
 
 ENGINE_DIR = "engine"
 VERSION_FILE = "version.txt"
@@ -50,6 +65,21 @@ def get_launcher_resource_path(*parts):
 
 def utc_now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def resolve_update_source(update_source=None):
+
+    if not update_source:
+        return "production", PRODUCTION_UPDATE_URL
+
+    normalized = str(update_source).strip().lower()
+    if normalized in CHANNEL_UPDATE_URLS:
+        return normalized, CHANNEL_UPDATE_URLS[normalized]
+
+    if normalized.startswith("http://") or normalized.startswith("https://"):
+        return "custom", str(update_source).strip()
+
+    return "production", PRODUCTION_UPDATE_URL
 
 
 # -------------------------------------------------
@@ -84,7 +114,7 @@ def get_local_version():
 # SAFE REQUEST WITH RETRY
 # -------------------------------------------------
 
-def safe_request(url, timeout=10, retries=3):
+def safe_request(url, timeout=10, retries=3, headers=None):
 
     for attempt in range(retries):
 
@@ -92,7 +122,7 @@ def safe_request(url, timeout=10, retries=3):
 
             log(f"Requesting: {url} (attempt {attempt+1})")
 
-            r = requests.get(url, timeout=timeout)
+            r = requests.get(url, timeout=timeout, headers=headers or {})
 
             return r
 
@@ -238,6 +268,148 @@ def _verify_manifest_authenticity(data):
     return _result("verified", key_id=key_id)
 
 
+def _decode_private_manifest_response(response):
+    payload = dict(response.json() or {})
+    encoded_content = payload.get("content")
+
+    if not encoded_content:
+        raise ValueError("Private dev manifest response did not contain file content.")
+
+    encoding = str(payload.get("encoding") or "").strip().lower()
+    if encoding != "base64":
+        raise ValueError(f"Unsupported private dev manifest encoding: {encoding or 'unknown'}")
+
+    manifest_bytes = base64.b64decode(encoded_content.encode("ascii"))
+    return json.loads(manifest_bytes.decode("utf-8"))
+
+
+def _resolve_private_release_asset_download(manifest, config):
+    release_tag = str(manifest.get("release_tag") or manifest.get("version") or "").strip()
+    if not release_tag:
+        raise ValueError("Private dev manifest is missing a release tag.")
+
+    release_lookup_url = build_private_dev_release_by_tag_api_url(release_tag, config)
+    if not release_lookup_url:
+        raise ValueError("Private dev repo release lookup URL could not be resolved.")
+
+    response = safe_request(
+        release_lookup_url,
+        timeout=10,
+        retries=3,
+        headers=build_github_api_headers(config.get("token")),
+    )
+
+    if response is None:
+        raise ValueError("Private dev release lookup failed after retries.")
+
+    if response.status_code != 200:
+        raise ValueError(f"Private dev release lookup returned status {response.status_code}.")
+
+    release_payload = dict(response.json() or {})
+    asset_name = (
+        manifest.get("release_zip")
+        or manifest.get("asset_name")
+        or str(config.get("asset_name_template") or "TrueCore_{release_tag}.zip").format(
+            release_tag=release_tag
+        )
+    )
+
+    for asset in list(release_payload.get("assets") or []):
+        if str(asset.get("name") or "").strip() == asset_name:
+            asset_api_url = str(asset.get("url") or "").strip()
+            if not asset_api_url:
+                break
+            download_headers = build_github_api_headers(
+                config.get("token"),
+                accept="application/octet-stream",
+            )
+            return asset_api_url, download_headers, asset_name
+
+    raise ValueError(f"Private dev release asset not found: {asset_name}")
+
+
+def _check_private_dev_updates():
+    config = load_private_dev_channel_config()
+    repo_slug = get_private_dev_repo_slug(config) or "private dev repo"
+    manifest_url = build_private_dev_contents_api_url(config)
+
+    if not manifest_url:
+        return _result(
+            "error",
+            message="Private dev channel is enabled but not configured correctly.",
+            channel="dev",
+            update_url="private-dev",
+        )
+
+    response = safe_request(
+        manifest_url,
+        timeout=10,
+        retries=3,
+        headers=build_github_api_headers(config.get("token")),
+    )
+
+    if response is None:
+        return _result(
+            "error",
+            message="Private dev manifest request failed after retries.",
+            channel="dev",
+            update_url=manifest_url,
+        )
+
+    if response.status_code != 200:
+        return _result(
+            "error",
+            message=f"Private dev manifest returned status {response.status_code}.",
+            channel="dev",
+            update_url=manifest_url,
+        )
+
+    data = _decode_private_manifest_response(response)
+    manifest_auth = _verify_manifest_authenticity(data)
+
+    server_version = data.get("version")
+    if not server_version:
+        return _result(
+            "error",
+            message="Private dev manifest is missing a version.",
+            channel="dev",
+            update_url=manifest_url,
+        )
+
+    local_version = get_local_version()
+    log(f"Private dev repo: {repo_slug}")
+    log(f"Server version: {server_version}")
+    log(f"Local version: {local_version}")
+
+    if local_version == server_version:
+        return _result(
+            "up_to_date",
+            version=server_version,
+            local_version=local_version,
+            manifest_authentication=manifest_auth,
+            channel="dev",
+            update_url=manifest_url,
+            repo=repo_slug,
+        )
+
+    download_url, download_headers, asset_name = _resolve_private_release_asset_download(data, config)
+
+    return _result(
+        "update_available",
+        version=server_version,
+        local_version=local_version,
+        download=download_url,
+        download_headers=download_headers,
+        sha256=data.get("sha256"),
+        size=data.get("size"),
+        manifest_authentication=manifest_auth,
+        channel="dev",
+        update_url=manifest_url,
+        repo=repo_slug,
+        asset_name=asset_name,
+    )
+
+
 def _write_engine_integrity_metadata(engine_dir_path, *, version=None, engine_sha256=None, manifest_authentication=None):
     metadata_path = os.path.join(engine_dir_path, ENGINE_INTEGRITY_FILE)
     manifest_authentication = dict(manifest_authentication or {})
@@ -305,21 +477,35 @@ def verify_installed_engine_integrity(base_dir=None):
 # CHECK FOR UPDATES
 # -------------------------------------------------
 
-def check_updates():
+def check_updates(update_source=None):
 
     try:
 
         log("Checking update server...")
 
-        r = safe_request(UPDATE_URL, timeout=10, retries=3)
+        channel_name, update_url = resolve_update_source(update_source)
+        if channel_name == "dev" and is_private_dev_channel_enabled():
+            return _check_private_dev_updates()
+
+        r = safe_request(update_url, timeout=10, retries=3)
 
         if r is None:
             log("Update server request failed after retries.")
-            return _result("error", message="Update server request failed after retries.")
+            return _result(
+                "error",
+                message="Update server request failed after retries.",
+                channel=channel_name,
+                update_url=update_url,
+            )
 
         if r.status_code != 200:
             log(f"Update server returned status {r.status_code}")
-            return _result("error", message=f"Update server returned status {r.status_code}.")
+            return _result(
+                "error",
+                message=f"Update server returned status {r.status_code}.",
+                channel=channel_name,
+                update_url=update_url,
+            )
 
         data = r.json()
         manifest_auth = _verify_manifest_authenticity(data)
@@ -328,7 +514,12 @@ def check_updates():
 
         if not server_version:
             log("Invalid version.json: missing version field.")
-            return _result("error", message="Invalid update manifest: missing version.")
+            return _result(
+                "error",
+                message="Invalid update manifest: missing version.",
+                channel=channel_name,
+                update_url=update_url,
+            )
 
         local_version = get_local_version()
 
@@ -342,11 +533,18 @@ def check_updates():
                 version=server_version,
                 local_version=local_version,
                 manifest_authentication=manifest_auth,
+                channel=channel_name,
+                update_url=update_url,
             )
 
         if not data.get("download"):
             log("Invalid version.json: missing download field.")
-            return _result("error", message="Invalid update manifest: missing download URL.")
+            return _result(
+                "error",
+                message="Invalid update manifest: missing download URL.",
+                channel=channel_name,
+                update_url=update_url,
+            )
 
         log("Update available.")
 
@@ -358,25 +556,28 @@ def check_updates():
             sha256=data.get("sha256"),
             size=data.get("size"),
             manifest_authentication=manifest_auth,
+            channel=channel_name,
+            update_url=update_url,
         )
 
     except Exception as e:
 
         log(f"Update check failed: {e}")
-        return _result("error", message=str(e))
+        channel_name, update_url = resolve_update_source(update_source)
+        return _result("error", message=str(e), channel=channel_name, update_url=update_url)
 
 
 # -------------------------------------------------
 # DOWNLOAD UPDATE
 # -------------------------------------------------
 
-def download_update(download_url):
+def download_update(download_url, request_headers=None):
 
     try:
 
         log("Downloading update...")
 
-        r = safe_request(download_url, timeout=30, retries=3)
+        r = safe_request(download_url, timeout=30, retries=3, headers=request_headers)
 
         if r is None:
             log("Download request failed after retries.")

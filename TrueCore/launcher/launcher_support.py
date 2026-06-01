@@ -8,7 +8,18 @@ from urllib.parse import quote
 
 from TrueCore.core.office_rollout import load_office_profile
 from TrueCore.launcher.launcher_logging import LOG_FILE
-from TrueCore.launcher.updater import UPDATE_URL, get_local_version, verify_installed_engine_integrity
+from TrueCore.launcher.updater import PRODUCTION_UPDATE_URL, get_local_version, verify_installed_engine_integrity
+from TrueCore.utils.install_mode import (
+    get_primary_update_channel,
+    get_reference_update_channel,
+    load_install_profile,
+    normalize_install_profile,
+)
+from TrueCore.utils.private_dev_channel import (
+    get_private_dev_repo_slug,
+    is_private_dev_channel_enabled,
+    load_private_dev_channel_config,
+)
 from TrueCore.utils.runtime_info import get_build_info, get_version, runtime_data_path
 
 
@@ -40,7 +51,8 @@ def load_launcher_release_info():
                     "version": str(payload.get("version") or get_version() or "unknown"),
                     "build_id": payload.get("build_id"),
                     "build_timestamp": payload.get("build_timestamp"),
-                    "release_channel": payload.get("release_channel") or UPDATE_URL,
+                    "release_channel": payload.get("release_channel") or PRODUCTION_UPDATE_URL,
+                    "update_channel": str(payload.get("update_channel") or "production").strip().lower() or "production",
                 }
         except Exception:
             pass
@@ -50,8 +62,23 @@ def load_launcher_release_info():
         "version": get_version() or "unknown",
         "build_id": build_id,
         "build_timestamp": build_timestamp,
-        "release_channel": UPDATE_URL,
+        "release_channel": PRODUCTION_UPDATE_URL,
+        "update_channel": "production",
     }
+
+
+def apply_launcher_release_profile(install_profile=None, release_info=None):
+    payload = normalize_install_profile(install_profile or load_install_profile())
+    release_payload = dict(release_info or load_launcher_release_info() or {})
+    embedded_channel = str(release_payload.get("update_channel") or "").strip().lower()
+
+    if embedded_channel == "dev":
+        payload["machine_role"] = "dev"
+        payload["update_channel"] = "dev"
+        payload["show_production_reference"] = True
+        payload["developer_tools_enabled"] = True
+
+    return payload
 
 
 def ensure_launcher_support_config():
@@ -109,6 +136,8 @@ def build_launcher_support_snapshot(request_type, update_state=None):
     request_key = str(request_type or "launcher_support").strip().lower() or "launcher_support"
     release_info = dict(load_launcher_release_info() or {})
     office_profile = dict(load_office_profile() or {})
+    install_profile = dict(apply_launcher_release_profile(release_info=release_info) or {})
+    private_dev_channel = dict(load_private_dev_channel_config() or {})
     integrity = dict(verify_installed_engine_integrity() or {})
     generated_at = utc_now_iso()
     output_dir = get_launcher_support_request_dir()
@@ -127,6 +156,14 @@ def build_launcher_support_snapshot(request_type, update_state=None):
             "office_id": office_profile.get("office_id"),
             "office_name": office_profile.get("office_name"),
             "install_id": office_profile.get("install_id"),
+        },
+        "install_profile": {
+            "machine_role": install_profile.get("machine_role"),
+            "primary_update_channel": get_primary_update_channel(install_profile),
+            "reference_update_channel": get_reference_update_channel(install_profile),
+            "developer_tools_enabled": bool(install_profile.get("developer_tools_enabled")),
+            "private_dev_repo_enabled": is_private_dev_channel_enabled(private_dev_channel),
+            "private_dev_repo": get_private_dev_repo_slug(private_dev_channel),
         },
         "launcher": {
             "version": release_info.get("version"),
@@ -155,6 +192,7 @@ def build_support_mailto_url(request_type, snapshot_path, payload, recipient=Non
     office = dict((payload or {}).get("office") or {})
     launcher = dict((payload or {}).get("launcher") or {})
     engine = dict((payload or {}).get("engine") or {})
+    install_profile = dict((payload or {}).get("install_profile") or {})
     update_state = dict((payload or {}).get("update_state") or {})
 
     subject = f"TrueCore {request_label} Request - {office.get('office_name') or 'Unknown Office'}"
@@ -163,6 +201,8 @@ def build_support_mailto_url(request_type, snapshot_path, payload, recipient=Non
         f"Office: {office.get('office_name') or 'Unknown'}",
         f"Office ID: {office.get('office_id') or 'Unknown'}",
         f"Install ID: {office.get('install_id') or 'Unknown'}",
+        f"Machine Role: {install_profile.get('machine_role') or 'Unknown'}",
+        f"Primary Update Channel: {install_profile.get('primary_update_channel') or 'Unknown'}",
         "",
         f"Launcher Version: {launcher.get('version') or 'Unknown'}",
         f"Launcher Build ID: {launcher.get('build_id') or 'Unknown'}",

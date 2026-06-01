@@ -502,3 +502,291 @@ CHANGES
 
 * Rubric scoring, math tab, office comparison simplification, and packet detail polish
 
+
+
+VERSION: dv1.0
+DATE: 2026-05-29
+
+CHANGES
+
+* Private dev channel foundation and launcher gating
+
+
+
+VERSION: dv1.1
+DATE: 2026-05-29
+
+CHANGES
+
+* Fix dev launcher channel resolution for private repo updates
+
+
+
+VERSION: dv1.2
+DATE: 2026-05-29
+
+CHANGES
+
+* Fix refresh path for dev launcher channel resolution
+
+
+
+VERSION: dv1.3
+DATE: 2026-05-30
+
+CHANGES
+
+* Packet Builder export polish and automatic dev manifest refresh
+
+
+
+VERSION: dv1.4
+DATE: 2026-05-30
+
+CHANGES
+
+* Packaged dev builds now force Dev Tools visibility when running a dv engine or private dev channel.
+
+
+
+VERSION: dv1.5
+DATE: 2026-05-30
+
+CHANGES
+
+* Add DEV-labeled packaged executable aliases and clearer dev window titles.
+
+
+
+VERSION: dv1.6
+DATE: 2026-05-30
+
+CHANGES
+
+* Add DEV-labeled packaged executable aliases and clearer dev window titles.
+
+
+
+VERSION: dv1.7
+DATE: 2026-05-31
+
+CHANGES
+
+* Refresh Packet Studio build
+
+
+
+VERSION: dv1.8
+DATE: 2026-05-31
+
+CHANGES
+
+* Stabilize exact preview rendering
+
+
+
+VERSION: dv1.9
+DATE: 2026-05-31
+
+CHANGES
+
+* Fix form completion, live consistency flags, and preview layout
+
+
+
+VERSION: dv1.10
+DATE: 2026-05-31
+
+CHANGES
+
+* Tighten preview header spacing
+
+
+
+VERSION: dv1.11
+DATE: 2026-05-31
+
+CHANGES
+
+* Tighten preview header spacing
+
+
+
+VERSION: dv1.12
+DATE: 2026-05-31
+
+CHANGES
+
+* Clean export wording, PDF path, and packet pagination
+
+
+
+VERSION: dv1.13
+DATE: 2026-05-31
+
+CHANGES
+
+* Move packet export off the GUI thread to prevent freezes on blank PDF exports
+
+
+
+VERSION: dv1.14
+DATE: 2026-05-31
+
+CHANGES
+
+* Warn but allow when exporting mostly empty packets from Packet Studio
+
+
+
+VERSION: dv1.15
+DATE: 2026-05-31
+
+CHANGES
+
+* Preserve compiled patient packet PDFs by removing the corrupting page-number overlay
+
+
+
+VERSION: dv1.16
+DATE: 2026-05-31
+
+CHANGES
+
+* Clarify VA referring provider vs Community Care treating provider wording across Packet Studio
+
+
+
+VERSION: dv1.17
+DATE: 2026-05-31
+
+CHANGES
+
+* Prevent Escape from closing Developer Tools; minimize instead of closing
+
+
+
+VERSION: dv1.18
+DATE: 2026-05-31
+
+CHANGES
+
+* Prevent Escape from closing Developer Tools; minimize instead of closing
+
+
+
+VERSION: dv1.19
+DATE: 2026-05-31
+
+CHANGES
+
+* Tighten packet export layout across cover, consent, SEOC, consult, LOMN, and clinical forms
+
+
+
+VERSION: dv1.20
+DATE: 2026-05-31
+
+CHANGES
+
+* Add packet-builder wording assist workflow
+
+
+
+VERSION: dv1.21
+DATE: 2026-05-31
+
+CHANGES
+
+* Open Dev Tools maximized as a movable resizable window
+
+
+
+VERSION: dv1.22
+DATE: 2026-05-31
+
+CHANGES
+
+* Polish Packet Studio sizing and preview shell
+
+
+
+VERSION: dv1.23
+DATE: 2026-05-31
+
+CHANGES
+
+* Polish preview sizing and warning banner spacing
+
+
+
+VERSION: dv1.24
+DATE: 2026-05-31
+
+CHANGES
+
+* Polish preview sizing and warning banner spacing
+
+
+
+VERSION: dv1.25
+DATE: 2026-05-31
+
+CHANGES
+
+* Fix 10-10172 provider mapping, preview crowding, and typing lag
+
+
+
+VERSION: dv1.26
+DATE: 2026-05-31
+
+CHANGES
+
+* Expand wording assist phrasebank using source pack and gold-standard packet
+
+
+
+VERSION: dv1.27
+DATE: 2026-05-31
+
+CHANGES
+
+* Expand wording assist phrasebank using source pack and gold-standard packet
+
+
+
+VERSION: dv1.28
+DATE: 2026-05-31
+
+CHANGES
+
+* Add wording cycle control, clean repetitive phrasing, and add draw-signature support
+
+
+
+VERSION: dv1.29
+DATE: 2026-05-31
+
+CHANGES
+
+* Scenario-based wording blueprint expansion from blueprint library
+
+
+
+VERSION: dv1.30
+DATE: 2026-05-31
+
+CHANGES
+
+* Clarify signature roles across builder preview and exports
+
+
+
+VERSION: dv2.0
+DATE: 2026-06-01
+
+CHANGES
+
+* Dev Tools packet studio stabilization and wording assist expansion
+

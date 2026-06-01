@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import shutil
+import re
 
 # -------------------------------------------------
 # RESOURCE PATH
@@ -240,6 +241,19 @@ def ensure_runtime_environment():
 
 def get_version():
 
+    if getattr(sys, "frozen", False):
+        build_info_path = resource_path("build_info.txt")
+        if os.path.exists(build_info_path):
+            try:
+                with open(build_info_path, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if line.startswith("VERSION="):
+                            version = line.split("=", 1)[1].strip()
+                            if version:
+                                return version
+            except Exception:
+                pass
+
     path = resource_path("VERSION.txt")
 
     if not os.path.exists(path):
@@ -247,6 +261,19 @@ def get_version():
 
     with open(path, "r") as f:
         return f.read().strip()
+
+
+def format_version_display(version):
+
+    raw = str(version or "").strip()
+
+    if not raw:
+        return "unknown"
+
+    if re.match(r"^(?:v|dv)\d", raw, re.IGNORECASE):
+        return raw
+
+    return f"v{raw}"
 
 
 def get_build_info():

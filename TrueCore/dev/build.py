@@ -22,6 +22,12 @@ from TrueCore.utils.release_signing import (
     public_key_id,
     sign_manifest,
 )
+from TrueCore.dev.update_channel_manager import (
+    build_signed_channel_manifest,
+    seed_dev_manifest_from_production,
+    write_manifest,
+)
+from TrueCore.utils.private_dev_channel import load_private_dev_channel_config, is_private_dev_channel_enabled
 
 print("=====================================")
 print("        TRUECORE BUILD SYSTEM")
@@ -52,12 +58,16 @@ CORE_DIR = os.path.join(ROOT_DIR, "TrueCore")
 INTEL_DIR = os.path.join(ROOT_DIR, "TrueCoreIntel")
 
 VERSION_PATH = os.path.join(CORE_DIR, "VERSION.txt")
+DEV_VERSION_PATH = os.path.join(CORE_DIR, "DEV_VERSION.txt")
 CHANGELOG_PATH = os.path.join(CORE_DIR, "CHANGELOG.txt")
 
 ASSETS_DIR = os.path.join(CORE_DIR, "launcher","assets")
 DEV_SYSTEM_DIR = os.path.join(CORE_DIR, "dev_system")
 LOGS_DIR = os.path.join(CORE_DIR, "logs")
 LAUNCHER_RELEASE_INFO_PATH = os.path.join(ASSETS_DIR, "launcher_release_info.json")
+PRODUCTION_RELEASE_CHANNEL_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version.json"
+DEV_RELEASE_CHANNEL_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version-dev.json"
+PUBLIC_DEV_CHANNEL_ENABLED = False
 
 GUI_DIR = os.path.join(CORE_DIR, "ui", "pyside_gui")
 
@@ -73,18 +83,65 @@ def ensure_folder(path):
         os.makedirs(path)
 
 
-def read_version():
-    if not os.path.exists(VERSION_PATH):
-        print("ERROR: VERSION.txt missing.")
+def normalize_numeric_version(version_text, *, default_minor=0):
+    version_text = str(version_text or "").strip()
+    match = re.match(r"^(\d+)(?:\.(\d+))?$", version_text)
+    if not match:
+        return None
+
+    major = int(match.group(1))
+    minor = int(match.group(2) or default_minor)
+    return f"{major}.{minor}"
+
+
+def read_version(version_path=VERSION_PATH, *, default_version=None):
+    if not os.path.exists(version_path):
+        if default_version is not None:
+            return normalize_numeric_version(default_version)
+        print(f"ERROR: {os.path.basename(version_path)} missing.")
         sys.exit()
 
-    with open(VERSION_PATH, "r") as f:
-        return f.read().strip()
+    with open(version_path, "r") as f:
+        version_text = f.read().strip()
+
+    normalized = normalize_numeric_version(version_text)
+    if normalized is None:
+        print(f"ERROR: {os.path.basename(version_path)} format invalid: {version_text}")
+        sys.exit()
+
+    return normalized
 
 
-def write_version(version):
-    with open(VERSION_PATH, "w") as f:
+def write_version(version, version_path=VERSION_PATH):
+    with open(version_path, "w") as f:
         f.write(version)
+
+
+def format_release_tag(build_channel, numeric_version):
+    normalized = normalize_numeric_version(numeric_version)
+    if normalized is None:
+        print(f"ERROR: Invalid numeric version: {numeric_version}")
+        sys.exit(1)
+    return f"dv{normalized}" if build_channel == "dev" else f"v{normalized}"
+
+
+def bump_numeric_version(current_version, is_big_update):
+    normalized = normalize_numeric_version(current_version)
+    if normalized is None:
+        print(f"ERROR: Invalid current version: {current_version}")
+        sys.exit(1)
+
+    match = re.match(r"^(\d+)\.(\d+)$", normalized)
+    major = int(match.group(1))
+    minor = int(match.group(2))
+
+    if is_big_update:
+        major += 1
+        minor = 0
+    else:
+        minor += 1
+
+    return f"{major}.{minor}"
 
 
 def append_changelog(version, notes):
@@ -116,6 +173,16 @@ def compute_file_sha256(path):
     return digest.hexdigest()
 
 
+def build_release_download_url(build_channel, release_tag, asset_name, *, private_dev_config=None):
+    private_dev_config = dict(private_dev_config or {})
+    if build_channel == "dev" and not PUBLIC_DEV_CHANNEL_ENABLED and is_private_dev_channel_enabled(private_dev_config):
+        owner = str(private_dev_config.get("owner") or "").strip()
+        repo = str(private_dev_config.get("repo") or "").strip()
+        if owner and repo:
+            return f"https://github.com/{owner}/{repo}/releases/download/{release_tag}/{asset_name}"
+    return f"https://github.com/betteryourpractice/truecore-updates/releases/download/{release_tag}/{asset_name}"
+
+
 def run_git_command(args):
     return subprocess.call(args, cwd=ROOT_DIR)
 
@@ -131,8 +198,8 @@ def has_git_changes():
     return bool((result.stdout or "").strip())
 
 
-def publish_release_changes(version, notes):
-    commit_message = f"Release v{version}"
+def publish_release_changes(version_label, notes):
+    commit_message = f"Release {version_label}"
     cleaned_notes = str(notes or "").strip()
     if cleaned_notes:
         commit_message += f": {cleaned_notes[:72]}"
@@ -266,62 +333,54 @@ def runtime_startup_test():
 # VERSION BUMP LOGIC
 # -------------------------------------------------
 
-version = read_version()
+print("\nSelect build channel:")
+print("1 - Production")
+print("2 - Dev\n")
 
-print(f"Current Version: v{version}\n")
+channel_choice = input("Choose 1 or 2: ").strip()
+build_channel = "dev" if channel_choice == "2" else "production"
+release_channel_url = DEV_RELEASE_CHANNEL_URL if build_channel == "dev" and PUBLIC_DEV_CHANNEL_ENABLED else PRODUCTION_RELEASE_CHANNEL_URL
+version_track_path = DEV_VERSION_PATH if build_channel == "dev" else VERSION_PATH
+default_track_version = "0.0" if build_channel == "dev" else "5.0"
+current_version = read_version(version_track_path, default_version=default_track_version)
+current_version_label = format_release_tag(build_channel, current_version)
+
+print(f"Current {build_channel.title()} Version: {current_version_label}\n")
 
 print("Select update type:")
 print("1 - BIG update")
 print("2 - SMALL fix\n")
 
 choice = input("Choose 1 or 2: ").strip()
+is_big_update = choice == "1"
+new_version = bump_numeric_version(current_version, is_big_update)
+new_version_label = format_release_tag(build_channel, new_version)
 
-match = re.match(r"(\d+)(?:\.(\d+))?",version)
+print(f"\nNew Version: {new_version_label}")
+print(f"Build Channel: {build_channel.title()}")
 
-if not match:
-    print("\nERROR: VERSION.txt format invalid.")
-    sys.exit()
-
-major = int(match.group(1))
-minor = match.group(2)
-
-if minor is None:
-    minor = 0
-else:
-    minor = int(minor)
-
-if choice == "1":
-    # BIG update
-    major += 1
-    new_version = f"{major}.0"
-
-else:
-    # SMALL update
-    minor += 1
-    new_version = f"{major}.{minor}"
-
-print(f"\nNew Version: v{new_version}")
-
-write_version(new_version)
+write_version(new_version, version_track_path)
 
 notes = input("\nEnter short description of changes:\n> ")
 
-append_changelog(new_version, notes)
+append_changelog(new_version_label, notes)
 
 # -------------------------------------------------
 # BUILD METADATA
 # -------------------------------------------------
 
 build_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-build_id = f"TC{new_version.replace('.', '')}-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}"
+build_prefix = "DTC" if build_channel == "dev" else "TC"
+build_id = f"{build_prefix}{new_version.replace('.', '')}-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}"
 
 BUILD_INFO_PATH = os.path.join(CORE_DIR, "build_info.txt")
 RELEASE_MANIFEST_PATH = os.path.join(CORE_DIR, "release_manifest.json")
+VERSION_DEV_JSON_PATH = os.path.join(ROOT_DIR, "version-dev.json")
 SIGNING_PRIVATE_KEY_PATH = os.path.join(DEV_SYSTEM_DIR, "release_signing_private.pem")
 SIGNING_PUBLIC_KEY_PATH = os.path.join(ASSETS_DIR, "release_signing_public.pem")
 
 with open(BUILD_INFO_PATH, "w") as f:
-    f.write(f"VERSION={new_version}\n")
+    f.write(f"VERSION={new_version_label}\n")
     f.write(f"BUILD_ID={build_id}\n")
     f.write(f"TIMESTAMP={build_timestamp}\n")
 
@@ -336,10 +395,11 @@ ensure_folder(ASSETS_DIR)
 with open(LAUNCHER_RELEASE_INFO_PATH, "w", encoding="utf-8") as f:
     json.dump(
         {
-            "version": new_version,
+            "version": new_version_label,
             "build_id": build_id,
             "build_timestamp": build_timestamp,
-            "release_channel": "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version.json",
+            "release_channel": release_channel_url,
+            "update_channel": build_channel,
         },
         f,
         indent=4,
@@ -462,9 +522,10 @@ os.makedirs(release_dir, exist_ok=True)
 engine_src = os.path.join(ROOT_DIR, "dist", "dist", "TrueCoreEngine.exe")
 launcher_src = os.path.join(ROOT_DIR, "dist", "TrueCoreLauncher.exe")
 
-zip_path = os.path.join(release_dir, f"TrueCore_v{new_version}.zip")
-launcher_zip_path = os.path.join(release_dir, f"TrueCoreLauncher_v{new_version}.zip")
-suite_zip_path = os.path.join(release_dir, f"TrueCoreSuite_v{new_version}.zip")
+release_tag = new_version_label
+zip_path = os.path.join(release_dir, f"TrueCore_{release_tag}.zip")
+launcher_zip_path = os.path.join(release_dir, f"TrueCoreLauncher_{release_tag}.zip")
+suite_zip_path = os.path.join(release_dir, f"TrueCoreSuite_{release_tag}.zip")
 
 import zipfile
 
@@ -476,12 +537,26 @@ with zipfile.ZipFile(launcher_zip_path, "w", compression=zipfile.ZIP_DEFLATED) a
 
 with zipfile.ZipFile(suite_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
     z.write(launcher_src, "TrueCoreLauncher.exe")
-    z.write(engine_src, "TrueCoreEngine.exe")
+    z.write(engine_src, "engine/TrueCoreEngine.exe")
+    z.writestr("engine/version.txt", release_tag)
+
+dev_launcher_alias = None
+dev_engine_alias = None
+
+if build_channel == "dev":
+    dev_launcher_alias = os.path.join(ROOT_DIR, "dist", "TrueCoreLauncher_DEV.exe")
+    dev_engine_alias = os.path.join(ROOT_DIR, "dist", "dist", "TrueCoreEngine_DEV.exe")
+    shutil.copy2(launcher_src, dev_launcher_alias)
+    shutil.copy2(engine_src, dev_engine_alias)
 
 print("\nRelease ZIP created:")
 print(zip_path)
 print(launcher_zip_path)
 print(suite_zip_path)
+if build_channel == "dev":
+    print("\nDev executable aliases created:")
+    print(dev_launcher_alias)
+    print(dev_engine_alias)
 
 
 # -------------------------------------------------
@@ -512,14 +587,19 @@ except Exception as e:
 
 
 # -------------------------------------------------
-# UPDATE VERSION.JSON FOR UPDATE SERVER
+# UPDATE CHANNEL MANIFEST FOR UPDATE SERVER
 # -------------------------------------------------
 
-print("\nUpdating version.json...\n")
+print("\nUpdating release manifest...\n")
 
 version_json_path = os.path.join(ROOT_DIR, "version.json")
-
-download_url = f"https://github.com/betteryourpractice/truecore-updates/releases/download/v{new_version}/TrueCore_v{new_version}.zip"
+private_dev_config = load_private_dev_channel_config()
+download_url = build_release_download_url(
+    build_channel,
+    release_tag,
+    f"TrueCore_{release_tag}.zip",
+    private_dev_config=private_dev_config,
+)
 release_size = os.path.getsize(zip_path)
 release_sha256 = compute_file_sha256(zip_path)
 launcher_release_size = os.path.getsize(launcher_zip_path)
@@ -528,7 +608,9 @@ suite_release_size = os.path.getsize(suite_zip_path)
 suite_release_sha256 = compute_file_sha256(suite_zip_path)
 
 version_data = {
-    "version": new_version,
+    "version": release_tag,
+    "channel": build_channel,
+    "release_tag": release_tag,
     "download": download_url,
     "sha256": release_sha256,
     "size": release_size,
@@ -537,13 +619,44 @@ version_data = {
     "signature_algorithm": SIGNATURE_ALGORITHM,
     "signature_key_id": signing_key_id,
 }
-version_data["signature"] = sign_manifest(version_data, private_signing_key)
+target_manifest_path = version_json_path if build_channel == "production" else VERSION_DEV_JSON_PATH
 
-with open(version_json_path, "w") as f:
-    json.dump(version_data, f, indent=4)
+if build_channel == "production":
+    version_data["signature"] = sign_manifest(version_data, private_signing_key)
+
+    with open(version_json_path, "w") as f:
+        json.dump(version_data, f, indent=4)
+
+    if not PUBLIC_DEV_CHANNEL_ENABLED:
+        seed_dev_manifest_from_production(output_manifest_path=VERSION_DEV_JSON_PATH)
+        print("version-dev.json mirrored to the current production release.")
+    elif not os.path.exists(VERSION_DEV_JSON_PATH):
+        seed_dev_manifest_from_production(output_manifest_path=VERSION_DEV_JSON_PATH)
+        print("version-dev.json bootstrapped from production.")
+else:
+    dev_version_data = build_signed_channel_manifest(version_data, channel="dev")
+    write_manifest(VERSION_DEV_JSON_PATH, dev_version_data)
+    if PUBLIC_DEV_CHANNEL_ENABLED:
+        print("version-dev.json updated for the public dev channel.")
+    else:
+        if is_private_dev_channel_enabled(private_dev_config):
+            print("version-dev.json updated for the private dev channel.")
+        else:
+            print("version-dev.json updated for local dev tracking.")
+    if not os.path.exists(version_json_path):
+        production_fallback = dict(version_data)
+        production_fallback["version"] = format_release_tag("production", new_version)
+        production_fallback["channel"] = "production"
+        production_fallback["release_tag"] = format_release_tag("production", new_version)
+        production_fallback["signature"] = sign_manifest(production_fallback, private_signing_key)
+        with open(version_json_path, "w") as f:
+            json.dump(production_fallback, f, indent=4)
+        print("version.json bootstrapped from the dev build context.")
 
 release_manifest = {
-    "version": new_version,
+    "version": release_tag,
+    "release_tag": release_tag,
+    "build_channel": build_channel,
     "build_id": build_id,
     "published_at": build_timestamp,
     "download": download_url,
@@ -564,7 +677,10 @@ release_manifest["signature"] = sign_manifest(release_manifest, private_signing_
 with open(RELEASE_MANIFEST_PATH, "w", encoding="utf-8") as f:
     json.dump(release_manifest, f, indent=4)
 
-print("version.json updated.")
+if target_manifest_path:
+    print(f"{os.path.basename(target_manifest_path)} updated.")
+else:
+    print("Public update manifests unchanged for this local-only dev build.")
 print("release_manifest.json updated.")
 print(f"SHA256: {release_sha256}")
 print(f"Size: {release_size} bytes")
@@ -580,23 +696,40 @@ publish_choice = input(
 git_publish_succeeded = False
 
 if publish_choice in {"y", "yes"}:
-    git_publish_succeeded = publish_release_changes(new_version, notes)
+    git_publish_succeeded = publish_release_changes(release_tag, notes)
 else:
     print("\nGit publish skipped. Your build files remain local until you commit and push them.\n")
 
 print("Manual release follow-up:")
 if git_publish_succeeded:
-    print("1. Create/publish the GitHub release tag when ready.")
-    print(f"2. Tag/release name: v{new_version}")
-    print(f"3. Upload engine: {zip_path}")
-    print(f"4. Launcher package: {launcher_zip_path}")
-    print(f"5. Full suite package: {suite_zip_path}\n")
+    if build_channel == "dev" and not PUBLIC_DEV_CHANNEL_ENABLED:
+        print("1. Local-only dev build complete.")
+        print("2. Source changes were pushed, but no public dev update channel was touched.")
+        print(f"3. Local dev tag reference: {release_tag}")
+        print(f"4. Engine package: {zip_path}")
+        print(f"5. Launcher package: {launcher_zip_path}")
+        print(f"6. Full suite package: {suite_zip_path}\n")
+    else:
+        print("1. Create/publish the GitHub release tag when ready.")
+        print(f"2. Build channel: {build_channel.title()}")
+        print(f"3. Tag/release name: {release_tag}")
+        print(f"4. Upload engine: {zip_path}")
+        print(f"5. Launcher package: {launcher_zip_path}")
+        print(f"6. Full suite package: {suite_zip_path}\n")
 else:
-    print("1. Commit and push source/release metadata when you are ready.")
-    print(f"2. Create/publish GitHub release tag: v{new_version}")
-    print(f"3. Upload engine: {zip_path}")
-    print(f"4. Launcher package: {launcher_zip_path}")
-    print(f"5. Full suite package: {suite_zip_path}\n")
+    if build_channel == "dev" and not PUBLIC_DEV_CHANNEL_ENABLED:
+        print("1. Commit and push source changes when you are ready.")
+        print("2. This dev build is local-only. No public dev release step is required.")
+        print(f"3. Local dev tag reference: {release_tag}")
+        print(f"4. Engine package: {zip_path}")
+        print(f"5. Launcher package: {launcher_zip_path}")
+        print(f"6. Full suite package: {suite_zip_path}\n")
+    else:
+        print("1. Commit and push source/release metadata when you are ready.")
+        print(f"2. Create/publish GitHub release tag: {release_tag}")
+        print(f"3. Upload engine: {zip_path}")
+        print(f"4. Launcher package: {launcher_zip_path}")
+        print(f"5. Full suite package: {suite_zip_path}\n")
 
 # -------------------------------------------------
 # BUILD COMPLETE
@@ -609,3 +742,6 @@ print("=====================================\n")
 print("Executables created:\n")
 print("dist\\TrueCoreLauncher.exe")
 print("dist\\dist\\TrueCoreEngine.exe\n")
+if build_channel == "dev":
+    print("dist\\TrueCoreLauncher_DEV.exe")
+    print("dist\\dist\\TrueCoreEngine_DEV.exe\n")

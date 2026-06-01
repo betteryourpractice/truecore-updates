@@ -11,6 +11,9 @@ import sys
 import time
 import tempfile
 import unittest
+import json
+
+from TrueCore.utils.release_signing import load_public_key, verify_manifest_signature
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 REPO_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, ".."))
@@ -28,6 +31,7 @@ REQUIRED_FILES = [
     "core/packet_processor.py",
     "dev/build.py",
     "VERSION.txt",
+    "DEV_VERSION.txt",
     "CHANGELOG.txt"
 ]
 
@@ -120,17 +124,70 @@ def check_required_files():
 
 def check_version_format():
 
-    print("Checking VERSION.txt format...")
+    print("Checking version track formats...")
 
-    version_path = os.path.join(PROJECT_ROOT, "VERSION.txt")
+    version_specs = [
+        ("VERSION.txt", os.path.join(PROJECT_ROOT, "VERSION.txt")),
+        ("DEV_VERSION.txt", os.path.join(PROJECT_ROOT, "DEV_VERSION.txt")),
+    ]
 
-    with open(version_path, "r") as f:
-        version = f.read().strip()
+    for label, version_path in version_specs:
+        with open(version_path, "r") as f:
+            version = f.read().strip()
 
-    if not re.match(r"^\d+(\.\d+)?$", version):
-        print("ERROR: VERSION.txt format invalid:", version)
+        if not re.match(r"^\d+(\.\d+)?$", version):
+            print(f"ERROR: {label} format invalid: {version}")
+            return False
+
+    return True
+
+
+def check_update_manifests():
+
+    print("Checking update manifests...")
+
+    public_key_path = os.path.join(PROJECT_ROOT, "launcher", "assets", "release_signing_public.pem")
+    if not os.path.exists(public_key_path):
+        print("ERROR: release_signing_public.pem missing.")
         return False
 
+    public_key = load_public_key(public_key_path)
+    manifest_specs = [
+        ("production", os.path.join(REPO_ROOT, "version.json")),
+        ("dev", os.path.join(REPO_ROOT, "version-dev.json")),
+    ]
+
+    for channel_name, path in manifest_specs:
+        if not os.path.exists(path):
+            print(f"ERROR: {os.path.basename(path)} missing.")
+            return False
+
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = dict(json.load(handle) or {})
+        except Exception as exc:
+            print(f"ERROR: {os.path.basename(path)} is not valid JSON: {exc}")
+            return False
+
+        required_keys = ["version", "download", "signature", "signature_algorithm", "signature_key_id"]
+        missing = [key for key in required_keys if not payload.get(key)]
+        if missing:
+            print(f"ERROR: {os.path.basename(path)} missing required keys: {', '.join(missing)}")
+            return False
+
+        if str(payload.get("signature_algorithm")).strip().lower() != "ed25519":
+            print(f"ERROR: {os.path.basename(path)} uses an unexpected signature algorithm.")
+            return False
+
+        if channel_name == "dev" and str(payload.get("channel") or "").strip().lower() != "dev":
+            print("ERROR: version-dev.json is not marked as channel=dev.")
+            return False
+
+        if not verify_manifest_signature(payload, payload.get("signature"), public_key):
+            print(f"ERROR: {os.path.basename(path)} failed signature verification.")
+            return False
+
+    print("Update manifests verified.")
     return True
 
 
@@ -586,6 +643,7 @@ def run_validation():
     checks = [
         check_required_files,
         check_version_format,
+        check_update_manifests,
         check_forbidden_entrypoints,
         check_protected_functions,
         check_pipeline_order,

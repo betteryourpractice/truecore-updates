@@ -1,6 +1,7 @@
 {
-    "version": "5",
-    "build_id": "TC5-20260517-1619",
-    "build_timestamp": "2026-05-17 16:19:12",
-    "release_channel": "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version.json"
+    "version": "dv2.0",
+    "build_id": "DTC20-20260601-0001",
+    "build_timestamp": "2026-06-01 00:01:39",
+    "release_channel": "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version.json",
+    "update_channel": "dev"
 }

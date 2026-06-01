@@ -38,10 +38,21 @@ from TrueCore.utils.logging_system import LOG_FILE, log_event, mask_phi
 from TrueCore.utils.admin_auth import ensure_admin_auth_config, verify_admin_password
 from TrueCore.utils.runtime_info import (
     ensure_runtime_environment,
+    format_version_display,
     get_version,
     get_build_info,
     resource_path
     
+)
+from TrueCore.utils.install_mode import (
+    get_primary_update_channel,
+    get_reference_update_channel,
+    is_dev_install,
+    load_install_profile,
+    update_install_profile,
+)
+from TrueCore.utils.private_dev_channel import (
+    load_private_dev_channel_config,
 )
 
 from TrueCore.core.packet_processor import process_packet
@@ -103,6 +114,7 @@ from TrueCore.ui.pyside_gui.packet_details_renderer import (
     render_build_packet_details_html_condensed,
     render_build_scan_diagnostics_html,
 )
+from TrueCore.ui.pyside_gui.dev_tools_dialog import DevToolsDialog
 from TrueCore.ui.pyside_gui.main_window_admin_mixin import MainWindowAdminMixin
 from TrueCore.ui.pyside_gui.main_window_packet_ui_mixin import MainWindowPacketUiMixin
 
@@ -183,8 +195,48 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         self.version = get_version()
         self.build_id, self.build_timestamp = get_build_info()
+        self.private_dev_channel = dict(load_private_dev_channel_config() or {})
+        self.install_profile = dict(load_install_profile() or {})
+        self._dev_tools_dialog = None
+        embedded_dev_build = str(self.version or "").strip().lower().startswith("dv")
+        private_dev_enabled = bool(self.private_dev_channel.get("enabled"))
+        profile_primary_channel = get_primary_update_channel(self.install_profile)
+        inferred_dev_install = (
+            is_dev_install(self.install_profile)
+            or embedded_dev_build
+            or private_dev_enabled
+            or profile_primary_channel == "dev"
+        )
 
-        self.setWindowTitle(f"TrueValour Packet Auditor v{self.version}")
+        if inferred_dev_install and (
+            not is_dev_install(self.install_profile)
+            or not bool(self.install_profile.get("developer_tools_enabled"))
+            or profile_primary_channel != "dev"
+        ):
+            self.install_profile = dict(
+                update_install_profile(
+                    {
+                        "machine_role": "dev",
+                        "update_channel": "dev",
+                        "show_production_reference": True,
+                        "developer_tools_enabled": True,
+                    }
+                )
+                or self.install_profile
+            )
+
+        self.machine_role = "dev" if inferred_dev_install else "office"
+        self.primary_update_channel = get_primary_update_channel(self.install_profile)
+        self.reference_update_channel = get_reference_update_channel(self.install_profile)
+        self.developer_tools_enabled = bool(
+            inferred_dev_install or self.install_profile.get("developer_tools_enabled")
+        )
+
+        window_version = format_version_display(self.version)
+        if self.developer_tools_enabled or self.machine_role == "dev":
+            self.setWindowTitle(f"TrueValour Packet Auditor DEV {window_version}")
+        else:
+            self.setWindowTitle(f"TrueValour Packet Auditor {window_version}")
         self.resize(1400, 900)
         self.showFullScreen()
 
@@ -260,7 +312,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         title = QLabel("TRUEVALOUR PACKET AUDITOR")
         title.setObjectName("appTitle")
 
-        subtitle = QLabel(f"Powered by TrueCore Engine v{self.version}")
+        subtitle = QLabel(f"Powered by TrueCore Engine {format_version_display(self.version)}")
         subtitle.setObjectName("appSubtitle")
 
         title_block.addWidget(title)
@@ -286,12 +338,23 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         self.btn_record_outcome.setToolTip(
             "Save what actually happened to the selected packet after human review."
         )
+        self.btn_dev_tools = None
+        if self.developer_tools_enabled:
+            self.btn_dev_tools = QPushButton(
+                QIcon(icon_base + "settings.svg"),
+                "Dev Tools"
+            )
+            self.btn_dev_tools.setToolTip(
+                "Developer-only tools and channel context. This does not appear on office installs."
+            )
 
         self.btn_close = QPushButton("Exit")
         self.btn_close.setObjectName("closeButton")
 
         header_layout.addWidget(self.btn_scan_diagnostics)
         header_layout.addWidget(self.btn_record_outcome)
+        if self.btn_dev_tools:
+            header_layout.addWidget(self.btn_dev_tools)
         header_layout.addWidget(self.btn_admin)
         header_layout.addWidget(self.btn_close)
 
@@ -331,7 +394,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             "Clear Results"
         )
 
-        for btn in [
+        button_list = [
             self.btn_select,
             self.btn_analyze,
             self.btn_folder,
@@ -340,7 +403,11 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             self.btn_scan_diagnostics,
             self.btn_record_outcome,
             self.btn_admin
-        ]:
+        ]
+        if self.btn_dev_tools:
+            button_list.append(self.btn_dev_tools)
+
+        for btn in button_list:
             btn.setIconSize(QSize(18,18))
 
         toolbar.addWidget(self.btn_select,1)
@@ -503,6 +570,8 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         self.btn_clear.clicked.connect(self.clear_results)
         self.btn_scan_diagnostics.clicked.connect(self.open_scan_diagnostics)
         self.btn_record_outcome.clicked.connect(self.open_record_outcome)
+        if self.btn_dev_tools:
+            self.btn_dev_tools.clicked.connect(self.open_dev_tools_hub)
         self.btn_admin.clicked.connect(self.open_admin_panel)
         self.btn_close.clicked.connect(self.close)
         self.show_reviewer_empty_state("startup")
@@ -566,6 +635,35 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             self.btn_admin,
         ]:
             button.setEnabled(enabled)
+        if self.btn_dev_tools:
+            self.btn_dev_tools.setEnabled(enabled)
+
+    def open_dev_tools_hub(self):
+
+        if not self.developer_tools_enabled:
+            return
+        if self._dev_tools_dialog and self._dev_tools_dialog.isVisible():
+            if self._dev_tools_dialog.isMinimized():
+                self._dev_tools_dialog.showNormal()
+            self._dev_tools_dialog.showMaximized()
+            self._dev_tools_dialog.raise_()
+            self._dev_tools_dialog.activateWindow()
+            return
+
+        dialog = DevToolsDialog(
+            machine_role=self.machine_role,
+            primary_update_channel=self.primary_update_channel,
+            reference_update_channel=self.reference_update_channel,
+            developer_tools_enabled=self.developer_tools_enabled,
+            private_dev_channel=self.private_dev_channel,
+            parent=self,
+        )
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(lambda *_: setattr(self, "_dev_tools_dialog", None))
+        self._dev_tools_dialog = dialog
+        dialog.showMaximized()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def append_analysis_result_row(self, file, result):
 

@@ -7,6 +7,25 @@ from TrueCore.launcher import launcher_support
 
 
 class LauncherSupportTests(unittest.TestCase):
+    def test_apply_launcher_release_profile_forces_dev_channel_for_dev_launcher(self):
+        profile = launcher_support.apply_launcher_release_profile(
+            install_profile={
+                "machine_role": "office",
+                "update_channel": "production",
+                "show_production_reference": False,
+                "developer_tools_enabled": False,
+            },
+            release_info={
+                "version": "dv1.0",
+                "update_channel": "dev",
+            },
+        )
+
+        self.assertEqual(profile["machine_role"], "dev")
+        self.assertEqual(profile["update_channel"], "dev")
+        self.assertTrue(profile["show_production_reference"])
+        self.assertTrue(profile["developer_tools_enabled"])
+
     def test_build_launcher_support_snapshot_writes_expected_payload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with mock.patch.object(
@@ -24,12 +43,31 @@ class LauncherSupportTests(unittest.TestCase):
                 },
             ), mock.patch.object(
                 launcher_support,
+                "load_install_profile",
+                return_value={
+                    "machine_role": "dev",
+                    "update_channel": "production",
+                    "show_production_reference": True,
+                    "developer_tools_enabled": True,
+                },
+            ), mock.patch.object(
+                launcher_support,
+                "load_private_dev_channel_config",
+                return_value={
+                    "enabled": True,
+                    "owner": "betteryourpractice",
+                    "repo": "truecore-dev-updates",
+                    "token": "secret",
+                },
+            ), mock.patch.object(
+                launcher_support,
                 "load_launcher_release_info",
                 return_value={
                     "version": "4.4",
                     "build_id": "L-123",
                     "build_timestamp": "2026-05-09 22:00:00",
                     "release_channel": "https://example.com/version.json",
+                    "update_channel": "dev",
                 },
             ), mock.patch.object(
                 launcher_support,
@@ -50,6 +88,14 @@ class LauncherSupportTests(unittest.TestCase):
                 self.assertEqual(payload["office"]["office_name"], "Demo Office")
                 self.assertEqual(payload["launcher"]["version"], "4.4")
                 self.assertEqual(payload["engine"]["installed_version"], "4.3")
+                self.assertEqual(payload["install_profile"]["machine_role"], "dev")
+                self.assertEqual(payload["install_profile"]["primary_update_channel"], "dev")
+                self.assertEqual(payload["install_profile"]["reference_update_channel"], "production")
+                self.assertTrue(payload["install_profile"]["private_dev_repo_enabled"])
+                self.assertEqual(
+                    payload["install_profile"]["private_dev_repo"],
+                    "betteryourpractice/truecore-dev-updates",
+                )
 
     def test_build_support_mailto_url_contains_snapshot_and_versions(self):
         payload = {
