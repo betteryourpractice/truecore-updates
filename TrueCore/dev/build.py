@@ -18,6 +18,7 @@ import hashlib
 import json
 import tempfile
 import atexit
+import zipfile
 from TrueCore.utils.release_signing import (
     SIGNATURE_ALGORITHM,
     ensure_signing_keypair,
@@ -254,6 +255,80 @@ def stage_portable_runtime(runtime_root, *, launcher_source_path, launcher_outpu
         "integrity_file": os.path.join(engine_dir, "install_integrity.json"),
         "readme": readme_path,
     }
+
+
+def runtime_has_payload(runtime_root):
+    engine_dir = os.path.join(runtime_root, "engine")
+    if not os.path.isdir(runtime_root) or not os.path.isdir(engine_dir):
+        return False
+
+    launchers = [entry for entry in os.listdir(runtime_root) if entry.lower().endswith(".exe")]
+    engines = [entry for entry in os.listdir(engine_dir) if entry.lower().endswith(".exe")]
+    return bool(launchers and engines)
+
+
+def find_latest_suite_zip(channel_name):
+    release_dir = os.path.join(ROOT_DIR, "release")
+    if not os.path.isdir(release_dir):
+        return None
+
+    prefix = "dv" if channel_name == "dev" else "v"
+    candidates = []
+    for name in os.listdir(release_dir):
+        if not (name.startswith(f"TrueCoreSuite_{prefix}") and name.endswith(".zip")):
+            continue
+        path = os.path.join(release_dir, name)
+        candidates.append((os.path.getmtime(path), path))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def hydrate_runtime_from_suite_zip(runtime_root, *, suite_zip_path, launcher_output_name, signing_key_id):
+    temp_dir = tempfile.mkdtemp(prefix="truecore_runtime_hydrate_", dir=ROOT_DIR)
+    try:
+        with zipfile.ZipFile(suite_zip_path, "r") as archive:
+            archive.extract("TrueCoreLauncher.exe", temp_dir)
+            archive.extract("engine/TrueCoreEngine.exe", temp_dir)
+            version_label = ""
+            if "engine/version.txt" in archive.namelist():
+                archive.extract("engine/version.txt", temp_dir)
+                version_path = os.path.join(temp_dir, "engine", "version.txt")
+                with open(version_path, "r", encoding="utf-8") as handle:
+                    version_label = str(handle.read() or "").strip()
+
+        launcher_source = os.path.join(temp_dir, "TrueCoreLauncher.exe")
+        engine_source = os.path.join(temp_dir, "engine", "TrueCoreEngine.exe")
+        return stage_portable_runtime(
+            runtime_root,
+            launcher_source_path=launcher_source,
+            launcher_output_name=launcher_output_name,
+            engine_source_path=engine_source,
+            version_label=version_label,
+            signing_key_id=signing_key_id,
+        )
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def ensure_opposite_runtime_available(channel_name, *, runtime_root, launcher_output_name, signing_key_id):
+    if runtime_has_payload(runtime_root):
+        return None
+
+    suite_zip_path = find_latest_suite_zip(channel_name)
+    if not suite_zip_path:
+        ensure_folder(runtime_root)
+        return None
+
+    return hydrate_runtime_from_suite_zip(
+        runtime_root,
+        suite_zip_path=suite_zip_path,
+        launcher_output_name=launcher_output_name,
+        signing_key_id=signing_key_id,
+    )
 
 
 def build_release_download_url(build_channel, release_tag, asset_name, *, private_dev_config=None):
@@ -867,6 +942,7 @@ with zipfile.ZipFile(suite_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z
 
 portable_office_runtime = None
 portable_dev_runtime = None
+preserved_opposite_runtime = None
 
 if build_channel == "dev":
     portable_dev_runtime = stage_portable_runtime(
@@ -877,7 +953,12 @@ if build_channel == "dev":
         version_label=release_tag,
         signing_key_id=signing_key_id,
     )
-    ensure_folder(os.path.join(DIST_ROOT, "OFFICE"))
+    preserved_opposite_runtime = ensure_opposite_runtime_available(
+        "production",
+        runtime_root=os.path.join(DIST_ROOT, "OFFICE"),
+        launcher_output_name="TrueCoreLauncher_OFFICE.exe",
+        signing_key_id=signing_key_id,
+    )
 else:
     portable_office_runtime = stage_portable_runtime(
         os.path.join(DIST_ROOT, "OFFICE"),
@@ -887,7 +968,12 @@ else:
         version_label=release_tag,
         signing_key_id=signing_key_id,
     )
-    ensure_folder(os.path.join(DIST_ROOT, "DEVELOPMENT"))
+    preserved_opposite_runtime = ensure_opposite_runtime_available(
+        "dev",
+        runtime_root=os.path.join(DIST_ROOT, "DEVELOPMENT"),
+        launcher_output_name="TrueCoreLauncher_DEV.exe",
+        signing_key_id=signing_key_id,
+    )
 
 print("\nRelease ZIP created:")
 print(zip_path)
@@ -897,10 +983,18 @@ if build_channel == "dev":
     print("\nDevelopment runtime folder created:")
     print(portable_dev_runtime["launcher"])
     print(portable_dev_runtime["engine"])
+    if preserved_opposite_runtime:
+        print("\nOffice runtime hydrated from latest release package:")
+        print(preserved_opposite_runtime["launcher"])
+        print(preserved_opposite_runtime["engine"])
 else:
     print("\nOffice runtime folder created:")
     print(portable_office_runtime["launcher"])
     print(portable_office_runtime["engine"])
+    if preserved_opposite_runtime:
+        print("\nDevelopment runtime hydrated from latest release package:")
+        print(preserved_opposite_runtime["launcher"])
+        print(preserved_opposite_runtime["engine"])
 
 
 # -------------------------------------------------
