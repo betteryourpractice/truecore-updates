@@ -1,13 +1,18 @@
 TrueCore Development Notes
 
 Architecture:
-GUI -> packet_processor -> parser -> extractor
+Office GUI -> packet_processor -> intel bridge -> TrueCoreIntel pipeline
+Dev GUI -> Packet Studio / Dev Tools -> export / validation helpers
 
 Build:
-build_truecore.bat uses PyInstaller.
+Use `python -m TrueCore.dev.build`.
+Portable runtime outputs live in `dist\\OFFICE` and `dist\\DEVELOPMENT`.
+Release upload artifacts live in `release\\`.
 
 Versioning:
-VERSION.txt stores current version.
+`TrueCore/VERSION.txt` stores the production version track.
+`TrueCore/DEV_VERSION.txt` stores the dev version track.
+`version.json` and `version-dev.json` are the update manifests.
 
 Rules:
 Return full file replacements only.
