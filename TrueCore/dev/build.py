@@ -17,6 +17,7 @@ import time
 import hashlib
 import json
 import tempfile
+import atexit
 from TrueCore.utils.release_signing import (
     SIGNATURE_ALGORITHM,
     ensure_signing_keypair,
@@ -68,6 +69,7 @@ LAUNCHER_RELEASE_INFO_PATH = os.path.join(ASSETS_DIR, "launcher_release_info.jso
 PRODUCTION_RELEASE_CHANNEL_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version.json"
 DEV_RELEASE_CHANNEL_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version-dev.json"
 PUBLIC_DEV_CHANNEL_ENABLED = False
+DIST_ROOT = os.path.join(ROOT_DIR, "dist")
 
 GUI_DIR = os.path.join(CORE_DIR, "ui", "pyside_gui")
 
@@ -541,7 +543,7 @@ def clean_build(active_variant=None):
         if file.endswith(".spec"):
             os.remove(os.path.join(ROOT_DIR, file))
 
-    os.makedirs(os.path.join(ROOT_DIR, "dist"), exist_ok=True)
+    os.makedirs(DIST_ROOT, exist_ok=True)
     restore_dist_variants(preserved_root, preserved_variants)
 
 
@@ -727,6 +729,25 @@ runtime_startup_test()
 active_portable_variant = "DEVELOPMENT" if build_channel == "dev" else "OFFICE"
 clean_build(active_portable_variant)
 
+build_output_root = tempfile.mkdtemp(prefix="truecore_pyinstaller_", dir=tempfile.gettempdir())
+atexit.register(lambda: shutil.rmtree(build_output_root, ignore_errors=True))
+engine_dist_dir = os.path.join(build_output_root, "engine_dist")
+engine_work_dir = os.path.join(build_output_root, "engine_work")
+engine_spec_dir = os.path.join(build_output_root, "engine_spec")
+launcher_dist_dir = os.path.join(build_output_root, "launcher_dist")
+launcher_work_dir = os.path.join(build_output_root, "launcher_work")
+launcher_spec_dir = os.path.join(build_output_root, "launcher_spec")
+
+for path in (
+    engine_dist_dir,
+    engine_work_dir,
+    engine_spec_dir,
+    launcher_dist_dir,
+    launcher_work_dir,
+    launcher_spec_dir,
+):
+    os.makedirs(path, exist_ok=True)
+
 # -------------------------------------------------
 # BUILD ENGINE
 # -------------------------------------------------
@@ -752,6 +773,9 @@ engine_cmd = (
     f'--onefile '
     f'--windowed '
     f'--name TrueCoreEngine '
+    f'--distpath "{engine_dist_dir}" '
+    f'--workpath "{engine_work_dir}" '
+    f'--specpath "{engine_spec_dir}" '
     f'--paths "{ROOT_DIR}" '
     f'--add-data "{GUI_DIR};ui/pyside_gui" '
     f'--hidden-import=PySide6.QtCore '
@@ -780,6 +804,9 @@ launcher_cmd = (
     f'--onefile '
     f'--windowed '
     f'--name TrueCoreLauncher '
+    f'--distpath "{launcher_dist_dir}" '
+    f'--workpath "{launcher_work_dir}" '
+    f'--specpath "{launcher_spec_dir}" '
     f'--paths "{ROOT_DIR}" '
     f'--icon "{os.path.join(ASSETS_DIR, "truecore_icon.ico")}" '
     f'--add-data "{ASSETS_DIR};launcher/assets" '
@@ -793,19 +820,6 @@ if result != 0:
     print("\nLauncher build failed.")
     sys.exit(1)
 
-# -------------------------------------------------
-# MOVE ENGINE INTO LAUNCHER DIST STRUCTURE
-# -------------------------------------------------
-
-print("\nArranging build output...\n")
-
-engine_src = os.path.join(ROOT_DIR, "dist", "TrueCoreEngine.exe")
-engine_dest_dir = os.path.join(ROOT_DIR, "dist", "dist")
-
-os.makedirs(engine_dest_dir, exist_ok=True)
-
-shutil.move(engine_src, os.path.join(engine_dest_dir, "TrueCoreEngine.exe"))
-
 post_build_clean()
 
 # -------------------------------------------------
@@ -817,8 +831,8 @@ print("\nCreating release package...\n")
 release_dir = os.path.join(ROOT_DIR, "release")
 os.makedirs(release_dir, exist_ok=True)
 
-engine_src = os.path.join(ROOT_DIR, "dist", "dist", "TrueCoreEngine.exe")
-launcher_src = os.path.join(ROOT_DIR, "dist", "TrueCoreLauncher.exe")
+engine_src = os.path.join(engine_dist_dir, "TrueCoreEngine.exe")
+launcher_src = os.path.join(launcher_dist_dir, "TrueCoreLauncher.exe")
 
 release_tag = new_version_label
 zip_path = os.path.join(release_dir, f"TrueCore_{release_tag}.zip")
@@ -851,57 +865,39 @@ with zipfile.ZipFile(suite_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z
         ),
     )
 
-dev_launcher_alias = None
-dev_engine_alias = None
-office_launcher_alias = None
-office_engine_alias = None
 portable_office_runtime = None
 portable_dev_runtime = None
 
 if build_channel == "dev":
-    dev_launcher_alias = os.path.join(ROOT_DIR, "dist", "TrueCoreLauncher_DEV.exe")
-    dev_engine_alias = os.path.join(ROOT_DIR, "dist", "dist", "TrueCoreEngine_DEV.exe")
-    shutil.copy2(launcher_src, dev_launcher_alias)
-    shutil.copy2(engine_src, dev_engine_alias)
     portable_dev_runtime = stage_portable_runtime(
-        os.path.join(ROOT_DIR, "dist", "DEVELOPMENT"),
+        os.path.join(DIST_ROOT, "DEVELOPMENT"),
         launcher_source_path=launcher_src,
         launcher_output_name="TrueCoreLauncher_DEV.exe",
         engine_source_path=engine_src,
         version_label=release_tag,
         signing_key_id=signing_key_id,
     )
-    ensure_folder(os.path.join(ROOT_DIR, "dist", "OFFICE"))
+    ensure_folder(os.path.join(DIST_ROOT, "OFFICE"))
 else:
-    office_launcher_alias = os.path.join(ROOT_DIR, "dist", "TrueCoreLauncher_OFFICE.exe")
-    office_engine_alias = os.path.join(ROOT_DIR, "dist", "dist", "TrueCoreEngine_OFFICE.exe")
-    shutil.copy2(launcher_src, office_launcher_alias)
-    shutil.copy2(engine_src, office_engine_alias)
     portable_office_runtime = stage_portable_runtime(
-        os.path.join(ROOT_DIR, "dist", "OFFICE"),
+        os.path.join(DIST_ROOT, "OFFICE"),
         launcher_source_path=launcher_src,
         launcher_output_name="TrueCoreLauncher_OFFICE.exe",
         engine_source_path=engine_src,
         version_label=release_tag,
         signing_key_id=signing_key_id,
     )
-    ensure_folder(os.path.join(ROOT_DIR, "dist", "DEVELOPMENT"))
+    ensure_folder(os.path.join(DIST_ROOT, "DEVELOPMENT"))
 
 print("\nRelease ZIP created:")
 print(zip_path)
 print(launcher_zip_path)
 print(suite_zip_path)
 if build_channel == "dev":
-    print("\nDev executable aliases created:")
-    print(dev_launcher_alias)
-    print(dev_engine_alias)
     print("\nDevelopment runtime folder created:")
     print(portable_dev_runtime["launcher"])
     print(portable_dev_runtime["engine"])
 else:
-    print("\nOffice executable aliases created:")
-    print(office_launcher_alias)
-    print(office_engine_alias)
     print("\nOffice runtime folder created:")
     print(portable_office_runtime["launcher"])
     print(portable_office_runtime["engine"])
@@ -1094,6 +1090,9 @@ else:
         print(f"5. Launcher package: {launcher_zip_path}")
         print(f"6. Full suite package: {suite_zip_path}\n")
 
+if os.path.isdir(build_output_root):
+    shutil.rmtree(build_output_root, ignore_errors=True)
+
 # -------------------------------------------------
 # BUILD COMPLETE
 # -------------------------------------------------
@@ -1102,16 +1101,18 @@ print("\n=====================================")
 print("BUILD COMPLETE")
 print("=====================================\n")
 
-print("Executables created:\n")
-print("dist\\TrueCoreLauncher.exe")
-print("dist\\dist\\TrueCoreEngine.exe\n")
 if build_channel == "dev":
-    print("dist\\TrueCoreLauncher_DEV.exe")
-    print("dist\\dist\\TrueCoreEngine_DEV.exe\n")
+    print("Portable runtime created:\n")
     print("dist\\DEVELOPMENT\\TrueCoreLauncher_DEV.exe")
-    print("dist\\DEVELOPMENT\\engine\\TrueCoreEngine.exe\n")
+    print("dist\\DEVELOPMENT\\engine\\TrueCoreEngine_DEV.exe\n")
+    print("dist\\OFFICE\\ (preserved if already present)\n")
 else:
-    print("dist\\TrueCoreLauncher_OFFICE.exe")
-    print("dist\\dist\\TrueCoreEngine_OFFICE.exe\n")
+    print("Portable runtime created:\n")
     print("dist\\OFFICE\\TrueCoreLauncher_OFFICE.exe")
-    print("dist\\OFFICE\\engine\\TrueCoreEngine.exe\n")
+    print("dist\\OFFICE\\engine\\TrueCoreEngine_OFFICE.exe\n")
+    print("dist\\DEVELOPMENT\\ (preserved if already present)\n")
+
+print("Release packages:\n")
+print(zip_path)
+print(launcher_zip_path)
+print(suite_zip_path)
