@@ -1,7 +1,7 @@
 {
-    "version": "v5.2",
-    "build_id": "TC52-20260601-1400",
-    "build_timestamp": "2026-06-01 14:00:34",
+    "version": "v5.4",
+    "build_id": "TC54-20260601-1548",
+    "build_timestamp": "2026-06-01 15:48:41",
     "release_channel": "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version.json",
     "update_channel": "production"
 }

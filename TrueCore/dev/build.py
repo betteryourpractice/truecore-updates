@@ -16,6 +16,7 @@ import compileall
 import time
 import hashlib
 import json
+import tempfile
 from TrueCore.utils.release_signing import (
     SIGNATURE_ALGORITHM,
     ensure_signing_keypair,
@@ -172,6 +173,87 @@ def compute_file_sha256(path):
     return digest.hexdigest()
 
 
+def write_engine_version_file(engine_dir, version_label):
+    version_path = os.path.join(engine_dir, "version.txt")
+    with open(version_path, "w", encoding="utf-8") as handle:
+        handle.write(str(version_label or "").strip())
+    return version_path
+
+
+def build_engine_integrity_payload(*, version_label, engine_executable_path, signing_key_id):
+    return {
+        "schema_version": "1.0",
+        "recorded_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "engine_executable": os.path.basename(engine_executable_path),
+        "version": str(version_label or "").strip(),
+        "engine_sha256": compute_file_sha256(engine_executable_path),
+        "manifest_authentication": {
+            "status": "verified",
+            "key_id": signing_key_id,
+        },
+    }
+
+
+def write_engine_integrity_metadata(engine_dir, *, version_label, engine_executable_path, signing_key_id):
+    metadata_path = os.path.join(engine_dir, "install_integrity.json")
+    payload = build_engine_integrity_payload(
+        version_label=version_label,
+        engine_executable_path=engine_executable_path,
+        signing_key_id=signing_key_id,
+    )
+
+    with open(metadata_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=4, ensure_ascii=True, sort_keys=True)
+
+    return metadata_path
+
+
+def stage_portable_runtime(runtime_root, *, launcher_source_path, launcher_output_name, engine_source_path, version_label, signing_key_id):
+    if os.path.isdir(runtime_root):
+        shutil.rmtree(runtime_root)
+
+    os.makedirs(runtime_root, exist_ok=True)
+    engine_dir = os.path.join(runtime_root, "engine")
+    os.makedirs(engine_dir, exist_ok=True)
+
+    launcher_target = os.path.join(runtime_root, launcher_output_name)
+    launcher_output_name_lower = str(launcher_output_name or "").strip().lower()
+    if launcher_output_name_lower.endswith("_office.exe"):
+        engine_output_name = "TrueCoreEngine_OFFICE.exe"
+    elif launcher_output_name_lower.endswith("_dev.exe"):
+        engine_output_name = "TrueCoreEngine_DEV.exe"
+    else:
+        engine_output_name = "TrueCoreEngine.exe"
+    engine_target = os.path.join(engine_dir, engine_output_name)
+
+    shutil.copy2(launcher_source_path, launcher_target)
+    shutil.copy2(engine_source_path, engine_target)
+
+    write_engine_version_file(engine_dir, version_label)
+    write_engine_integrity_metadata(
+        engine_dir,
+        version_label=version_label,
+        engine_executable_path=engine_target,
+        signing_key_id=signing_key_id,
+    )
+
+    readme_path = os.path.join(runtime_root, "README.txt")
+    with open(readme_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "Drag this entire folder to the desktop or another location.\n"
+            "Do not mix files between OFFICE and DEVELOPMENT folders.\n"
+            "Launcher must stay beside the engine folder.\n"
+        )
+
+    return {
+        "launcher": launcher_target,
+        "engine": engine_target,
+        "version_file": os.path.join(engine_dir, "version.txt"),
+        "integrity_file": os.path.join(engine_dir, "install_integrity.json"),
+        "readme": readme_path,
+    }
+
+
 def build_release_download_url(build_channel, release_tag, asset_name, *, private_dev_config=None):
     private_dev_config = dict(private_dev_config or {})
     if build_channel == "dev" and not PUBLIC_DEV_CHANNEL_ENABLED and is_private_dev_channel_enabled(private_dev_config):
@@ -228,13 +310,118 @@ def publish_release_changes(version_label, notes):
     return True
 
 
+PORTABLE_VARIANT_FOLDERS = ("OFFICE", "DEVELOPMENT")
+
+
+def preserve_dist_variants(active_variant=None):
+    dist_dir = os.path.join(ROOT_DIR, "dist")
+    preserved_root = tempfile.mkdtemp(prefix="truecore_dist_variants_", dir=ROOT_DIR)
+    preserved = {}
+
+    if not os.path.isdir(dist_dir):
+        return preserved_root, preserved
+
+    for variant_name in PORTABLE_VARIANT_FOLDERS:
+        if variant_name == active_variant:
+            continue
+        source_dir = os.path.join(dist_dir, variant_name)
+        if not os.path.isdir(source_dir):
+            continue
+        target_dir = os.path.join(preserved_root, variant_name)
+        shutil.copytree(source_dir, target_dir)
+        preserved[variant_name] = target_dir
+
+    return preserved_root, preserved
+
+
+def restore_dist_variants(preserved_root, preserved_variants):
+    dist_dir = os.path.join(ROOT_DIR, "dist")
+    os.makedirs(dist_dir, exist_ok=True)
+
+    for variant_name, source_dir in dict(preserved_variants or {}).items():
+        target_dir = os.path.join(dist_dir, variant_name)
+        if os.path.isdir(target_dir):
+            shutil.rmtree(target_dir)
+        shutil.copytree(source_dir, target_dir)
+
+    if preserved_root and os.path.isdir(preserved_root):
+        shutil.rmtree(preserved_root, ignore_errors=True)
+
+
+def restore_public_facing_metadata(*, version_json_path, release_dir, build_info_path, launcher_release_info_path, release_manifest_path, private_signing_key, signing_key_id):
+    if not os.path.exists(version_json_path):
+        return False
+
+    with open(version_json_path, "r", encoding="utf-8") as handle:
+        version_payload = dict(json.load(handle) or {})
+
+    release_tag = str(version_payload.get("release_tag") or version_payload.get("version") or "").strip()
+    if not release_tag:
+        return False
+
+    build_id = str(version_payload.get("build_id") or "").strip()
+    published_at = str(version_payload.get("published_at") or "").strip()
+
+    with open(build_info_path, "w", encoding="utf-8") as handle:
+        handle.write(f"VERSION={release_tag}\n")
+        handle.write(f"BUILD_ID={build_id}\n")
+        handle.write(f"TIMESTAMP={published_at}\n")
+
+    with open(launcher_release_info_path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "version": release_tag,
+                "build_id": build_id,
+                "build_timestamp": published_at,
+                "release_channel": PRODUCTION_RELEASE_CHANNEL_URL,
+                "update_channel": "production",
+            },
+            handle,
+            indent=4,
+        )
+
+    engine_zip = os.path.join(release_dir, f"TrueCore_{release_tag}.zip")
+    launcher_zip = os.path.join(release_dir, f"TrueCoreLauncher_{release_tag}.zip")
+    suite_zip = os.path.join(release_dir, f"TrueCoreSuite_{release_tag}.zip")
+    if not all(os.path.exists(path) for path in (engine_zip, launcher_zip, suite_zip)):
+        return True
+
+    payload = {
+        "version": release_tag,
+        "release_tag": release_tag,
+        "build_channel": "production",
+        "build_id": build_id,
+        "published_at": published_at,
+        "download": version_payload.get("download"),
+        "sha256": version_payload.get("sha256"),
+        "size": version_payload.get("size"),
+        "release_zip": os.path.basename(engine_zip),
+        "launcher_release_zip": os.path.basename(launcher_zip),
+        "launcher_release_sha256": compute_file_sha256(launcher_zip),
+        "launcher_release_size": os.path.getsize(launcher_zip),
+        "suite_release_zip": os.path.basename(suite_zip),
+        "suite_release_sha256": compute_file_sha256(suite_zip),
+        "suite_release_size": os.path.getsize(suite_zip),
+        "signature_algorithm": SIGNATURE_ALGORITHM,
+        "signature_key_id": signing_key_id,
+    }
+    payload["signature"] = sign_manifest(payload, private_signing_key)
+
+    with open(release_manifest_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=4)
+
+    return True
+
+
 # -------------------------------------------------
 # CLEAN BUILD FOLDERS
 # -------------------------------------------------
 
-def clean_build():
+def clean_build(active_variant=None):
 
     print("\nCleaning previous builds...")
+
+    preserved_root, preserved_variants = preserve_dist_variants(active_variant)
 
     for folder in ["build", "dist"]:
         path = os.path.join(ROOT_DIR, folder)
@@ -245,6 +432,9 @@ def clean_build():
     for file in os.listdir(ROOT_DIR):
         if file.endswith(".spec"):
             os.remove(os.path.join(ROOT_DIR, file))
+
+    os.makedirs(os.path.join(ROOT_DIR, "dist"), exist_ok=True)
+    restore_dist_variants(preserved_root, preserved_variants)
 
 
 # -------------------------------------------------
@@ -426,7 +616,8 @@ runtime_startup_test()
 # CLEAN BUILD
 # -------------------------------------------------
 
-clean_build()
+active_portable_variant = "DEVELOPMENT" if build_channel == "dev" else "OFFICE"
+clean_build(active_portable_variant)
 
 # -------------------------------------------------
 # BUILD ENGINE
@@ -538,22 +729,55 @@ with zipfile.ZipFile(suite_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z
     z.write(launcher_src, "TrueCoreLauncher.exe")
     z.write(engine_src, "engine/TrueCoreEngine.exe")
     z.writestr("engine/version.txt", release_tag)
+    z.writestr(
+        "engine/install_integrity.json",
+        json.dumps(
+            build_engine_integrity_payload(
+                version_label=release_tag,
+                engine_executable_path=engine_src,
+                signing_key_id=signing_key_id,
+            ),
+            indent=4,
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+    )
 
 dev_launcher_alias = None
 dev_engine_alias = None
 office_launcher_alias = None
 office_engine_alias = None
+portable_office_runtime = None
+portable_dev_runtime = None
 
 if build_channel == "dev":
     dev_launcher_alias = os.path.join(ROOT_DIR, "dist", "TrueCoreLauncher_DEV.exe")
     dev_engine_alias = os.path.join(ROOT_DIR, "dist", "dist", "TrueCoreEngine_DEV.exe")
     shutil.copy2(launcher_src, dev_launcher_alias)
     shutil.copy2(engine_src, dev_engine_alias)
+    portable_dev_runtime = stage_portable_runtime(
+        os.path.join(ROOT_DIR, "dist", "DEVELOPMENT"),
+        launcher_source_path=launcher_src,
+        launcher_output_name="TrueCoreLauncher_DEV.exe",
+        engine_source_path=engine_src,
+        version_label=release_tag,
+        signing_key_id=signing_key_id,
+    )
+    ensure_folder(os.path.join(ROOT_DIR, "dist", "OFFICE"))
 else:
     office_launcher_alias = os.path.join(ROOT_DIR, "dist", "TrueCoreLauncher_OFFICE.exe")
     office_engine_alias = os.path.join(ROOT_DIR, "dist", "dist", "TrueCoreEngine_OFFICE.exe")
     shutil.copy2(launcher_src, office_launcher_alias)
     shutil.copy2(engine_src, office_engine_alias)
+    portable_office_runtime = stage_portable_runtime(
+        os.path.join(ROOT_DIR, "dist", "OFFICE"),
+        launcher_source_path=launcher_src,
+        launcher_output_name="TrueCoreLauncher_OFFICE.exe",
+        engine_source_path=engine_src,
+        version_label=release_tag,
+        signing_key_id=signing_key_id,
+    )
+    ensure_folder(os.path.join(ROOT_DIR, "dist", "DEVELOPMENT"))
 
 print("\nRelease ZIP created:")
 print(zip_path)
@@ -563,10 +787,16 @@ if build_channel == "dev":
     print("\nDev executable aliases created:")
     print(dev_launcher_alias)
     print(dev_engine_alias)
+    print("\nDevelopment runtime folder created:")
+    print(portable_dev_runtime["launcher"])
+    print(portable_dev_runtime["engine"])
 else:
     print("\nOffice executable aliases created:")
     print(office_launcher_alias)
     print(office_engine_alias)
+    print("\nOffice runtime folder created:")
+    print(portable_office_runtime["launcher"])
+    print(portable_office_runtime["engine"])
 
 
 # -------------------------------------------------
@@ -681,6 +911,19 @@ release_manifest["signature"] = sign_manifest(release_manifest, private_signing_
 with open(RELEASE_MANIFEST_PATH, "w", encoding="utf-8") as f:
     json.dump(release_manifest, f, indent=4)
 
+if build_channel == "dev":
+    restored_public_metadata = restore_public_facing_metadata(
+        version_json_path=version_json_path,
+        release_dir=release_dir,
+        build_info_path=BUILD_INFO_PATH,
+        launcher_release_info_path=LAUNCHER_RELEASE_INFO_PATH,
+        release_manifest_path=RELEASE_MANIFEST_PATH,
+        private_signing_key=private_signing_key,
+        signing_key_id=signing_key_id,
+    )
+    if restored_public_metadata:
+        print("Public-facing metadata restored after dev build.")
+
 if target_manifest_path:
     print(f"{os.path.basename(target_manifest_path)} updated.")
 else:
@@ -749,6 +992,10 @@ print("dist\\dist\\TrueCoreEngine.exe\n")
 if build_channel == "dev":
     print("dist\\TrueCoreLauncher_DEV.exe")
     print("dist\\dist\\TrueCoreEngine_DEV.exe\n")
+    print("dist\\DEVELOPMENT\\TrueCoreLauncher_DEV.exe")
+    print("dist\\DEVELOPMENT\\engine\\TrueCoreEngine.exe\n")
 else:
     print("dist\\TrueCoreLauncher_OFFICE.exe")
     print("dist\\dist\\TrueCoreEngine_OFFICE.exe\n")
+    print("dist\\OFFICE\\TrueCoreLauncher_OFFICE.exe")
+    print("dist\\OFFICE\\engine\\TrueCoreEngine.exe\n")

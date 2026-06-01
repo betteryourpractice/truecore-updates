@@ -77,6 +77,11 @@ def apply_launcher_release_profile(install_profile=None, release_info=None):
         payload["update_channel"] = "dev"
         payload["show_production_reference"] = True
         payload["developer_tools_enabled"] = True
+    else:
+        payload["machine_role"] = "office"
+        payload["update_channel"] = "production"
+        payload["show_production_reference"] = False
+        payload["developer_tools_enabled"] = False
 
     return payload
 

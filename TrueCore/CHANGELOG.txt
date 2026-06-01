@@ -808,3 +808,30 @@ CHANGES
 
 * Office-only production build gating fix; semantic scoring/reporting improvements; no Dev Tools on v5.x builds
 
+
+
+VERSION: v5.3
+DATE: 2026-06-01
+
+CHANGES
+
+* office runtime split and named portable folders
+
+
+
+VERSION: v5.4
+DATE: 2026-06-01
+
+CHANGES
+
+* office launcher forced production channel and runtime split
+
+
+
+VERSION: dv2.1
+DATE: 2026-06-01
+
+CHANGES
+
+* dev portable runtime split and named development folder
+

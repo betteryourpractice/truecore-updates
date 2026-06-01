@@ -24,6 +24,7 @@ from TrueCore.launcher.updater import (
     download_update,
     get_local_version,
     install_update,
+    resolve_engine_executable_path,
     verify_installed_engine_integrity,
 )
 from TrueCore.core.office_rollout import load_office_profile, record_docs_kit_exported
@@ -58,7 +59,7 @@ def find_engine():
         return [executable, "-m", "TrueCore.ui.truecore_app"]
 
     base_dir = os.path.dirname(sys.executable)
-    engine_path = os.path.join(base_dir, "engine", "TrueCoreEngine.exe")
+    engine_path = resolve_engine_executable_path(base_dir)
 
     if os.path.exists(engine_path):
         return engine_path

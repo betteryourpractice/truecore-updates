@@ -38,6 +38,8 @@ UPDATE_URL = PRODUCTION_UPDATE_URL
 ENGINE_DIR = "engine"
 VERSION_FILE = "version.txt"
 ENGINE_EXE = "TrueCoreEngine.exe"
+DEV_ENGINE_EXE = "TrueCoreEngine_DEV.exe"
+OFFICE_ENGINE_EXE = "TrueCoreEngine_OFFICE.exe"
 SIGNING_PUBLIC_KEY_FILE = "release_signing_public.pem"
 ENGINE_INTEGRITY_FILE = "install_integrity.json"
 
@@ -52,6 +54,45 @@ def get_base_dir():
         return os.path.dirname(sys.executable)
     else:
         return os.path.abspath(".")
+
+
+def get_launcher_executable_name():
+    if getattr(sys, "frozen", False):
+        return os.path.basename(sys.executable)
+    return ""
+
+
+def get_preferred_engine_executable_name():
+    launcher_name = str(get_launcher_executable_name() or "").strip().lower()
+    if launcher_name.endswith("_office.exe"):
+        return OFFICE_ENGINE_EXE
+    if launcher_name.endswith("_dev.exe"):
+        return DEV_ENGINE_EXE
+    return ENGINE_EXE
+
+
+def get_candidate_engine_executable_names():
+    preferred = get_preferred_engine_executable_name()
+    ordered = [preferred, ENGINE_EXE, OFFICE_ENGINE_EXE, DEV_ENGINE_EXE]
+    unique = []
+    seen = set()
+    for name in ordered:
+        normalized = str(name or "").strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(name)
+    return unique
+
+
+def resolve_engine_executable_path(base_dir=None):
+    base_dir = base_dir or get_base_dir()
+    engine_dir = os.path.join(base_dir, ENGINE_DIR)
+    for executable_name in get_candidate_engine_executable_names():
+        candidate = os.path.join(engine_dir, executable_name)
+        if os.path.exists(candidate):
+            return candidate
+    return os.path.join(engine_dir, get_preferred_engine_executable_name())
 
 
 def get_launcher_resource_path(*parts):
@@ -410,13 +451,14 @@ def _check_private_dev_updates():
     )
 
 
-def _write_engine_integrity_metadata(engine_dir_path, *, version=None, engine_sha256=None, manifest_authentication=None):
+def _write_engine_integrity_metadata(engine_dir_path, *, version=None, engine_sha256=None, manifest_authentication=None, engine_executable_name=None):
     metadata_path = os.path.join(engine_dir_path, ENGINE_INTEGRITY_FILE)
     manifest_authentication = dict(manifest_authentication or {})
+    engine_executable_name = str(engine_executable_name or get_preferred_engine_executable_name()).strip() or ENGINE_EXE
     payload = {
         "schema_version": "1.0",
         "recorded_at": utc_now_iso(),
-        "engine_executable": ENGINE_EXE,
+        "engine_executable": engine_executable_name,
         "version": version,
         "engine_sha256": engine_sha256,
         "manifest_authentication": {
@@ -434,7 +476,7 @@ def _write_engine_integrity_metadata(engine_dir_path, *, version=None, engine_sh
 def verify_installed_engine_integrity(base_dir=None):
     base_dir = base_dir or get_base_dir()
     engine_dir_path = os.path.join(base_dir, ENGINE_DIR)
-    engine_path = os.path.join(engine_dir_path, ENGINE_EXE)
+    engine_path = resolve_engine_executable_path(base_dir)
     metadata_path = os.path.join(engine_dir_path, ENGINE_INTEGRITY_FILE)
 
     if not os.path.exists(engine_path):
@@ -636,6 +678,14 @@ def install_update(zip_data, version=None, expected_sha256=None, expected_size=N
         if not os.path.exists(staged_engine_exe):
             raise FileNotFoundError("Updated engine executable missing after extraction.")
 
+        target_engine_name = get_preferred_engine_executable_name()
+        if target_engine_name != ENGINE_EXE:
+            renamed_engine_exe = os.path.join(staged_engine_path, target_engine_name)
+            if os.path.exists(renamed_engine_exe):
+                os.remove(renamed_engine_exe)
+            os.replace(staged_engine_exe, renamed_engine_exe)
+            staged_engine_exe = renamed_engine_exe
+
         log("Engine extracted")
         engine_sha256 = _compute_file_sha256(staged_engine_exe)
 
@@ -663,6 +713,7 @@ def install_update(zip_data, version=None, expected_sha256=None, expected_size=N
             version=version,
             engine_sha256=engine_sha256,
             manifest_authentication=manifest_authentication,
+            engine_executable_name=os.path.basename(staged_engine_exe),
         )
 
         if os.path.exists(backup_path):
