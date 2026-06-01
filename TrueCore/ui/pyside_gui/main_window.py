@@ -114,7 +114,6 @@ from TrueCore.ui.pyside_gui.packet_details_renderer import (
     render_build_packet_details_html_condensed,
     render_build_scan_diagnostics_html,
 )
-from TrueCore.ui.pyside_gui.dev_tools_dialog import DevToolsDialog
 from TrueCore.ui.pyside_gui.main_window_admin_mixin import MainWindowAdminMixin
 from TrueCore.ui.pyside_gui.main_window_packet_ui_mixin import MainWindowPacketUiMixin
 
@@ -199,38 +198,41 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         self.install_profile = dict(load_install_profile() or {})
         self._dev_tools_dialog = None
         embedded_dev_build = str(self.version or "").strip().lower().startswith("dv")
-        private_dev_enabled = bool(self.private_dev_channel.get("enabled"))
-        profile_primary_channel = get_primary_update_channel(self.install_profile)
-        inferred_dev_install = (
-            is_dev_install(self.install_profile)
-            or embedded_dev_build
-            or private_dev_enabled
-            or profile_primary_channel == "dev"
-        )
-
-        if inferred_dev_install and (
-            not is_dev_install(self.install_profile)
-            or not bool(self.install_profile.get("developer_tools_enabled"))
-            or profile_primary_channel != "dev"
-        ):
-            self.install_profile = dict(
-                update_install_profile(
-                    {
-                        "machine_role": "dev",
-                        "update_channel": "dev",
-                        "show_production_reference": True,
-                        "developer_tools_enabled": True,
-                    }
-                )
-                or self.install_profile
+        if embedded_dev_build:
+            private_dev_enabled = bool(self.private_dev_channel.get("enabled"))
+            profile_primary_channel = get_primary_update_channel(self.install_profile)
+            inferred_dev_install = (
+                is_dev_install(self.install_profile)
+                or private_dev_enabled
+                or profile_primary_channel == "dev"
             )
 
-        self.machine_role = "dev" if inferred_dev_install else "office"
-        self.primary_update_channel = get_primary_update_channel(self.install_profile)
-        self.reference_update_channel = get_reference_update_channel(self.install_profile)
-        self.developer_tools_enabled = bool(
-            inferred_dev_install or self.install_profile.get("developer_tools_enabled")
-        )
+            if inferred_dev_install and (
+                not is_dev_install(self.install_profile)
+                or not bool(self.install_profile.get("developer_tools_enabled"))
+                or profile_primary_channel != "dev"
+            ):
+                self.install_profile = dict(
+                    update_install_profile(
+                        {
+                            "machine_role": "dev",
+                            "update_channel": "dev",
+                            "show_production_reference": True,
+                            "developer_tools_enabled": True,
+                        }
+                    )
+                    or self.install_profile
+                )
+
+            self.machine_role = "dev"
+            self.primary_update_channel = "dev"
+            self.reference_update_channel = get_reference_update_channel(self.install_profile)
+            self.developer_tools_enabled = True
+        else:
+            self.machine_role = "office"
+            self.primary_update_channel = "production"
+            self.reference_update_channel = None
+            self.developer_tools_enabled = False
 
         window_version = format_version_display(self.version)
         if self.developer_tools_enabled or self.machine_role == "dev":
@@ -642,6 +644,9 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         if not self.developer_tools_enabled:
             return
+
+        from TrueCore.ui.pyside_gui.dev_tools_dialog import DevToolsDialog
+
         if self._dev_tools_dialog and self._dev_tools_dialog.isVisible():
             if self._dev_tools_dialog.isMinimized():
                 self._dev_tools_dialog.showNormal()

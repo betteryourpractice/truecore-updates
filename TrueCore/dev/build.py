@@ -24,7 +24,6 @@ from TrueCore.utils.release_signing import (
 )
 from TrueCore.dev.update_channel_manager import (
     build_signed_channel_manifest,
-    seed_dev_manifest_from_production,
     write_manifest,
 )
 from TrueCore.utils.private_dev_channel import load_private_dev_channel_config, is_private_dev_channel_enabled
@@ -542,12 +541,19 @@ with zipfile.ZipFile(suite_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z
 
 dev_launcher_alias = None
 dev_engine_alias = None
+office_launcher_alias = None
+office_engine_alias = None
 
 if build_channel == "dev":
     dev_launcher_alias = os.path.join(ROOT_DIR, "dist", "TrueCoreLauncher_DEV.exe")
     dev_engine_alias = os.path.join(ROOT_DIR, "dist", "dist", "TrueCoreEngine_DEV.exe")
     shutil.copy2(launcher_src, dev_launcher_alias)
     shutil.copy2(engine_src, dev_engine_alias)
+else:
+    office_launcher_alias = os.path.join(ROOT_DIR, "dist", "TrueCoreLauncher_OFFICE.exe")
+    office_engine_alias = os.path.join(ROOT_DIR, "dist", "dist", "TrueCoreEngine_OFFICE.exe")
+    shutil.copy2(launcher_src, office_launcher_alias)
+    shutil.copy2(engine_src, office_engine_alias)
 
 print("\nRelease ZIP created:")
 print(zip_path)
@@ -557,6 +563,10 @@ if build_channel == "dev":
     print("\nDev executable aliases created:")
     print(dev_launcher_alias)
     print(dev_engine_alias)
+else:
+    print("\nOffice executable aliases created:")
+    print(office_launcher_alias)
+    print(office_engine_alias)
 
 
 # -------------------------------------------------
@@ -626,13 +636,7 @@ if build_channel == "production":
 
     with open(version_json_path, "w") as f:
         json.dump(version_data, f, indent=4)
-
-    if not PUBLIC_DEV_CHANNEL_ENABLED:
-        seed_dev_manifest_from_production(output_manifest_path=VERSION_DEV_JSON_PATH)
-        print("version-dev.json mirrored to the current production release.")
-    elif not os.path.exists(VERSION_DEV_JSON_PATH):
-        seed_dev_manifest_from_production(output_manifest_path=VERSION_DEV_JSON_PATH)
-        print("version-dev.json bootstrapped from production.")
+    print("version-dev.json left unchanged for this production build.")
 else:
     dev_version_data = build_signed_channel_manifest(version_data, channel="dev")
     write_manifest(VERSION_DEV_JSON_PATH, dev_version_data)
@@ -745,3 +749,6 @@ print("dist\\dist\\TrueCoreEngine.exe\n")
 if build_channel == "dev":
     print("dist\\TrueCoreLauncher_DEV.exe")
     print("dist\\dist\\TrueCoreEngine_DEV.exe\n")
+else:
+    print("dist\\TrueCoreLauncher_OFFICE.exe")
+    print("dist\\dist\\TrueCoreEngine_OFFICE.exe\n")
