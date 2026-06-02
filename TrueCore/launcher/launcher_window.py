@@ -18,6 +18,7 @@ from TrueCore.launcher.launcher_support import (
     build_support_mailto_url,
     load_launcher_release_info,
     resolve_it_email,
+    validate_engine_bundle_lane,
 )
 from TrueCore.launcher.updater import (
     check_updates,
@@ -597,6 +598,26 @@ class LauncherWindow(QWidget):
                 log("Blocked engine launch because local engine integrity verification failed.")
                 self.news_box.append("\nEngine integrity check failed. Local engine files appear to have changed unexpectedly.")
                 self.news_box.append("Please reinstall or update the engine before launching.")
+                return
+
+            lane_result = validate_engine_bundle_lane(
+                release_info=self.release_info,
+                integrity_result=integrity_result,
+            )
+            if lane_result.get("status") != "verified":
+                log(
+                    "Blocked engine launch because launcher/engine lane verification failed: "
+                    f"{lane_result}"
+                )
+                self.news_box.append("\nLaunch blocked. The packaged engine does not match this launcher.")
+                self.news_box.append(
+                    f"Expected {lane_result.get('expected_role') or 'unknown'} runtime, "
+                    f"but detected {lane_result.get('actual_role') or 'unknown'} "
+                    f"({lane_result.get('version') or 'unknown'})."
+                )
+                self.news_box.append(
+                    "Reinstall this lane from the matching OFFICE or DEVELOPMENT folder before continuing."
+                )
                 return
 
             if integrity_status == "compatibility_mode":

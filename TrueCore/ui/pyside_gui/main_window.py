@@ -44,10 +44,8 @@ from TrueCore.utils.runtime_info import (
     resource_path
     
 )
+from TrueCore.utils.runtime_identity import resolve_runtime_identity
 from TrueCore.utils.install_mode import (
-    get_primary_update_channel,
-    get_reference_update_channel,
-    is_dev_install,
     load_install_profile,
     update_install_profile,
 )
@@ -197,42 +195,26 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         self.private_dev_channel = dict(load_private_dev_channel_config() or {})
         self.install_profile = dict(load_install_profile() or {})
         self._dev_tools_dialog = None
-        embedded_dev_build = str(self.version or "").strip().lower().startswith("dv")
-        if embedded_dev_build:
-            private_dev_enabled = bool(self.private_dev_channel.get("enabled"))
-            profile_primary_channel = get_primary_update_channel(self.install_profile)
-            inferred_dev_install = (
-                is_dev_install(self.install_profile)
-                or private_dev_enabled
-                or profile_primary_channel == "dev"
+        runtime_identity = resolve_runtime_identity(
+            version=self.version,
+            install_profile=self.install_profile,
+            private_dev_channel=self.private_dev_channel,
+        )
+        if runtime_identity.get("should_promote_install_profile"):
+            self.install_profile = dict(
+                update_install_profile(runtime_identity.get("promoted_install_profile"))
+                or self.install_profile
+            )
+            runtime_identity = resolve_runtime_identity(
+                version=self.version,
+                install_profile=self.install_profile,
+                private_dev_channel=self.private_dev_channel,
             )
 
-            if inferred_dev_install and (
-                not is_dev_install(self.install_profile)
-                or not bool(self.install_profile.get("developer_tools_enabled"))
-                or profile_primary_channel != "dev"
-            ):
-                self.install_profile = dict(
-                    update_install_profile(
-                        {
-                            "machine_role": "dev",
-                            "update_channel": "dev",
-                            "show_production_reference": True,
-                            "developer_tools_enabled": True,
-                        }
-                    )
-                    or self.install_profile
-                )
-
-            self.machine_role = "dev"
-            self.primary_update_channel = "dev"
-            self.reference_update_channel = get_reference_update_channel(self.install_profile)
-            self.developer_tools_enabled = True
-        else:
-            self.machine_role = "office"
-            self.primary_update_channel = "production"
-            self.reference_update_channel = None
-            self.developer_tools_enabled = False
+        self.machine_role = runtime_identity.get("machine_role") or "office"
+        self.primary_update_channel = runtime_identity.get("primary_update_channel") or "production"
+        self.reference_update_channel = runtime_identity.get("reference_update_channel")
+        self.developer_tools_enabled = bool(runtime_identity.get("developer_tools_enabled"))
 
         window_version = format_version_display(self.version)
         if self.developer_tools_enabled or self.machine_role == "dev":

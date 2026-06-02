@@ -3,12 +3,18 @@ from __future__ import annotations
 import json
 import os
 import sys
+import subprocess
+import tempfile
 from datetime import datetime, timezone
 from urllib.parse import quote
 
 from TrueCore.core.office_rollout import load_office_profile
 from TrueCore.launcher.launcher_logging import LOG_FILE
-from TrueCore.launcher.updater import PRODUCTION_UPDATE_URL, get_local_version, verify_installed_engine_integrity
+from TrueCore.launcher.updater import (
+    PRODUCTION_UPDATE_URL,
+    get_local_version,
+    verify_installed_engine_integrity,
+)
 from TrueCore.utils.install_mode import (
     get_primary_update_channel,
     get_reference_update_channel,
@@ -230,3 +236,161 @@ def build_support_mailto_url(request_type, snapshot_path, payload, recipient=Non
     )
 
     return f"mailto:{quote(recipient)}?subject={quote(subject)}&body={quote(os.linesep.join(body_lines))}"
+
+
+def probe_engine_runtime_identity(engine_command, *, timeout_seconds=20):
+    output_fd, output_path = tempfile.mkstemp(
+        prefix="truecore_runtime_probe_",
+        suffix=".json",
+        dir=runtime_data_path("Outputs"),
+    )
+    os.close(output_fd)
+
+    try:
+        env = dict(os.environ)
+        env["TRUECORE_RUNTIME_DIAGNOSTIC"] = "1"
+        env["TRUECORE_RUNTIME_DIAGNOSTIC_FILE"] = output_path
+
+        popen_kwargs = {
+            "env": env,
+            "timeout": timeout_seconds,
+            "check": False,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+        command = engine_command if isinstance(engine_command, list) else [engine_command]
+        result = subprocess.run(command, **popen_kwargs)
+
+        if not os.path.exists(output_path):
+            return {"status": "probe_failed", "returncode": result.returncode}
+
+        with open(output_path, "r", encoding="utf-8") as handle:
+            payload = dict(json.load(handle) or {})
+
+        return {
+            "status": "ok",
+            "returncode": result.returncode,
+            "payload": payload,
+        }
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout"}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+    finally:
+        try:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+        except Exception:
+            pass
+
+
+def validate_engine_lane(engine_command, *, release_info=None):
+    release_payload = dict(release_info or load_launcher_release_info() or {})
+    expected_channel = str(release_payload.get("update_channel") or "production").strip().lower() or "production"
+    expected_role = "dev" if expected_channel == "dev" else "office"
+
+    probe = probe_engine_runtime_identity(engine_command)
+    if probe.get("status") != "ok":
+        return {
+            "status": "probe_failed",
+            "expected_role": expected_role,
+            "probe": probe,
+        }
+
+    payload = dict(probe.get("payload") or {})
+    actual_role = str(payload.get("machine_role") or "").strip().lower()
+    developer_tools_enabled = bool(payload.get("developer_tools_enabled"))
+    version = str(payload.get("version") or "").strip()
+
+    if actual_role != expected_role:
+        return {
+            "status": "lane_mismatch",
+            "expected_role": expected_role,
+            "actual_role": actual_role,
+            "developer_tools_enabled": developer_tools_enabled,
+            "version": version,
+            "probe": probe,
+        }
+
+    if expected_role == "dev" and not developer_tools_enabled:
+        return {
+            "status": "lane_mismatch",
+            "expected_role": expected_role,
+            "actual_role": actual_role,
+            "developer_tools_enabled": developer_tools_enabled,
+            "version": version,
+            "probe": probe,
+        }
+
+    if expected_role == "dev" and not version.lower().startswith("dv"):
+        return {
+            "status": "lane_mismatch",
+            "expected_role": expected_role,
+            "actual_role": actual_role,
+            "developer_tools_enabled": developer_tools_enabled,
+            "version": version,
+            "probe": probe,
+        }
+
+    if expected_role == "office" and version.lower().startswith("dv"):
+        return {
+            "status": "lane_mismatch",
+            "expected_role": expected_role,
+            "actual_role": actual_role,
+            "developer_tools_enabled": developer_tools_enabled,
+            "version": version,
+            "probe": probe,
+        }
+
+    return {
+        "status": "verified",
+        "expected_role": expected_role,
+        "actual_role": actual_role,
+        "developer_tools_enabled": developer_tools_enabled,
+        "version": version,
+        "probe": probe,
+    }
+
+
+def validate_engine_bundle_lane(*, release_info=None, integrity_result=None):
+    release_payload = dict(release_info or load_launcher_release_info() or {})
+    expected_channel = str(release_payload.get("update_channel") or "production").strip().lower() or "production"
+    expected_role = "dev" if expected_channel == "dev" else "office"
+    expected_engine_name = "TrueCoreEngine_DEV.exe" if expected_role == "dev" else "TrueCoreEngine_OFFICE.exe"
+    local_version = str(get_local_version() or "").strip()
+
+    integrity = dict(integrity_result or verify_installed_engine_integrity() or {})
+    if integrity.get("status") == "tampered":
+        return {
+            "status": "tampered",
+            "expected_role": expected_role,
+            "version": local_version,
+        }
+
+    metadata = dict(integrity.get("manifest_authentication") or {})
+    engine_version = str(integrity.get("version") or local_version or "").strip()
+
+    if expected_role == "dev":
+        version_ok = engine_version.lower().startswith("dv")
+        executable_ok = expected_engine_name.lower().endswith("_dev.exe")
+    else:
+        version_ok = bool(engine_version) and not engine_version.lower().startswith("dv")
+        executable_ok = expected_engine_name.lower().endswith("_office.exe")
+
+    if not version_ok or not executable_ok:
+        return {
+            "status": "lane_mismatch",
+            "expected_role": expected_role,
+            "version": engine_version or local_version,
+            "engine_executable": expected_engine_name,
+            "manifest_authentication": metadata,
+        }
+
+    return {
+        "status": "verified",
+        "expected_role": expected_role,
+        "version": engine_version or local_version,
+        "engine_executable": expected_engine_name,
+        "manifest_authentication": metadata,
+    }

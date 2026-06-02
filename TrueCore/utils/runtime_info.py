@@ -97,6 +97,37 @@ def _copy_file_if_richer(source_path, target_path):
     return True
 
 
+def _read_text_file(path):
+
+    if not os.path.exists(path):
+        return None
+
+    try:
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            value = str(handle.read() or "").strip()
+            return value or None
+    except Exception:
+        return None
+
+
+def _read_version_from_build_info(path):
+
+    if not os.path.exists(path):
+        return None
+
+    try:
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            for line in handle:
+                if line.startswith("VERSION="):
+                    version = line.split("=", 1)[1].strip()
+                    if version:
+                        return version
+    except Exception:
+        return None
+
+    return None
+
+
 def _legacy_runtime_project_dirs():
 
     candidates = []
@@ -242,25 +273,34 @@ def ensure_runtime_environment():
 def get_version():
 
     if getattr(sys, "frozen", False):
-        build_info_path = resource_path("build_info.txt")
-        if os.path.exists(build_info_path):
-            try:
-                with open(build_info_path, "r", encoding="utf-8") as handle:
-                    for line in handle:
-                        if line.startswith("VERSION="):
-                            version = line.split("=", 1)[1].strip()
-                            if version:
-                                return version
-            except Exception:
-                pass
+        exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", "")))
+        frozen_candidates = []
 
-    path = resource_path("VERSION.txt")
+        if exe_dir:
+            frozen_candidates.append(os.path.join(exe_dir, "version.txt"))
+            frozen_candidates.append(os.path.join(exe_dir, "VERSION.txt"))
 
-    if not os.path.exists(path):
-        return "unknown"
+        for path in frozen_candidates:
+            version = _read_text_file(path)
+            if version:
+                return version
 
-    with open(path, "r") as f:
-        return f.read().strip()
+        for path in (
+            os.path.join(exe_dir, "build_info.txt") if exe_dir else "",
+            resource_path("build_info.txt"),
+        ):
+            if not path:
+                continue
+            version = _read_version_from_build_info(path)
+            if version:
+                return version
+
+    for path in (resource_path("VERSION.txt"),):
+        version = _read_text_file(path)
+        if version:
+            return version
+
+    return "unknown"
 
 
 def format_version_display(version):

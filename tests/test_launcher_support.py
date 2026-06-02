@@ -116,6 +116,33 @@ class LauncherSupportTests(unittest.TestCase):
         self.assertIn("TrueCore%20Forgot%20Username%20Request", url)
         self.assertIn("C%3A%5Csnapshot.json", url)
 
+    def test_validate_engine_bundle_lane_accepts_dev_runtime(self):
+        result = launcher_support.validate_engine_bundle_lane(
+            release_info={"update_channel": "dev"},
+            integrity_result={
+                "status": "verified",
+                "version": "dv2.1",
+                "manifest_authentication": {"status": "verified", "key_id": "abc"},
+            },
+        )
+
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(result["expected_role"], "dev")
+        self.assertEqual(result["engine_executable"], "TrueCoreEngine_DEV.exe")
+
+    def test_validate_engine_bundle_lane_rejects_lane_mismatch(self):
+        result = launcher_support.validate_engine_bundle_lane(
+            release_info={"update_channel": "production"},
+            integrity_result={
+                "status": "verified",
+                "version": "dv2.1",
+                "manifest_authentication": {"status": "verified", "key_id": "abc"},
+            },
+        )
+
+        self.assertEqual(result["status"], "lane_mismatch")
+        self.assertEqual(result["expected_role"], "office")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -331,6 +331,77 @@ def ensure_opposite_runtime_available(channel_name, *, runtime_root, launcher_ou
     )
 
 
+def packaged_engine_contains_build_metadata(engine_executable_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "PyInstaller.utils.cliutils.archive_viewer",
+            engine_executable_path,
+            "-l",
+        ],
+        cwd=ROOT_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return False
+    output = str(result.stdout or "")
+    return "build_info.txt" in output
+
+
+def verify_portable_runtime_lane(runtime_info, *, expected_role, expected_version_prefix):
+    engine_path = str(dict(runtime_info or {}).get("engine") or "").strip()
+    if not engine_path or not os.path.exists(engine_path):
+        print(f"ERROR: portable runtime engine missing for expected {expected_role} lane.")
+        sys.exit(1)
+
+    runtime_root = os.path.dirname(os.path.dirname(engine_path))
+    version_path = os.path.join(os.path.dirname(engine_path), "version.txt")
+    integrity_path = os.path.join(os.path.dirname(engine_path), "install_integrity.json")
+
+    if not os.path.exists(version_path) or not os.path.exists(integrity_path):
+        print(f"ERROR: portable runtime metadata missing for {runtime_root}.")
+        sys.exit(1)
+
+    with open(version_path, "r", encoding="utf-8-sig") as handle:
+        version = str(handle.read() or "").strip()
+
+    with open(integrity_path, "r", encoding="utf-8-sig") as handle:
+        integrity_payload = dict(json.load(handle) or {})
+
+    expected_engine_name = "TrueCoreEngine_DEV.exe" if expected_role == "dev" else "TrueCoreEngine_OFFICE.exe"
+    actual_engine_name = str(integrity_payload.get("engine_executable") or "").strip()
+    integrity_version = str(integrity_payload.get("version") or "").strip()
+
+    if actual_engine_name != expected_engine_name:
+        print(
+            f"ERROR: packaged runtime executable mismatch. Expected {expected_engine_name}, "
+            f"got {actual_engine_name or 'unknown'}."
+        )
+        sys.exit(1)
+
+    if expected_version_prefix and not version.lower().startswith(expected_version_prefix.lower()):
+        print(
+            f"ERROR: packaged runtime version mismatch. Expected prefix {expected_version_prefix}, "
+            f"got {version or 'unknown'}."
+        )
+        sys.exit(1)
+
+    if integrity_version != version:
+        print(
+            f"ERROR: runtime version metadata mismatch. version.txt={version or 'unknown'} "
+            f"install_integrity.json={integrity_version or 'unknown'}."
+        )
+        sys.exit(1)
+
+    if not packaged_engine_contains_build_metadata(engine_path):
+        print("ERROR: packaged engine is missing embedded build metadata.")
+        sys.exit(1)
+
+
 def build_release_download_url(build_channel, release_tag, asset_name, *, private_dev_config=None):
     private_dev_config = dict(private_dev_config or {})
     if build_channel == "dev" and not PUBLIC_DEV_CHANNEL_ENABLED and is_private_dev_channel_enabled(private_dev_config):
@@ -853,6 +924,7 @@ engine_cmd = (
     f'--specpath "{engine_spec_dir}" '
     f'--paths "{ROOT_DIR}" '
     f'--add-data "{GUI_DIR};ui/pyside_gui" '
+    f'--add-data "{BUILD_INFO_PATH};." '
     f'--hidden-import=PySide6.QtCore '
     f'--hidden-import=PySide6.QtGui '
     f'--hidden-import=PySide6.QtWidgets '
@@ -973,6 +1045,19 @@ else:
         runtime_root=os.path.join(DIST_ROOT, "DEVELOPMENT"),
         launcher_output_name="TrueCoreLauncher_DEV.exe",
         signing_key_id=signing_key_id,
+        )
+
+if build_channel == "dev":
+    verify_portable_runtime_lane(
+        portable_dev_runtime,
+        expected_role="dev",
+        expected_version_prefix="dv",
+    )
+else:
+    verify_portable_runtime_lane(
+        portable_office_runtime,
+        expected_role="office",
+        expected_version_prefix="v",
     )
 
 print("\nRelease ZIP created:")

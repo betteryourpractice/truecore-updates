@@ -31,6 +31,34 @@ class RuntimeInfoTests(unittest.TestCase):
                 self.assertEqual(runtime_info.get_runtime_root(), r"C:\Deploy")
                 self.assertEqual(runtime_info.get_runtime_project_dir(), r"C:\Deploy\TrueCore")
 
+    def test_get_version_prefers_runtime_engine_version_file_when_frozen(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_root = os.path.join(temp_dir, "Runtime")
+            engine_dir = os.path.join(runtime_root, "engine")
+            os.makedirs(engine_dir, exist_ok=True)
+
+            with open(os.path.join(engine_dir, "version.txt"), "w", encoding="utf-8") as handle:
+                handle.write("dv2.1")
+
+            with mock.patch.object(runtime_info.sys, "frozen", True, create=True):
+                with mock.patch.object(runtime_info.sys, "executable", os.path.join(engine_dir, "TrueCoreEngine_DEV.exe")):
+                    self.assertEqual(runtime_info.get_version(), "dv2.1")
+
+    def test_get_version_falls_back_to_embedded_build_info_when_frozen(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_root = os.path.join(temp_dir, "Runtime")
+            engine_dir = os.path.join(runtime_root, "engine")
+            os.makedirs(engine_dir, exist_ok=True)
+            build_info_path = os.path.join(temp_dir, "build_info.txt")
+
+            with open(build_info_path, "w", encoding="utf-8") as handle:
+                handle.write("VERSION=v5.4\nBUILD_ID=TC54-TEST\n")
+
+            with mock.patch.object(runtime_info.sys, "frozen", True, create=True):
+                with mock.patch.object(runtime_info.sys, "executable", os.path.join(engine_dir, "TrueCoreEngine_OFFICE.exe")):
+                    with mock.patch("TrueCore.utils.runtime_info.resource_path", return_value=build_info_path):
+                        self.assertEqual(runtime_info.get_version(), "v5.4")
+
     def test_runtime_data_root_migrates_richer_legacy_memory_db(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             target_root = os.path.join(temp_dir, "appdata_truecore")
