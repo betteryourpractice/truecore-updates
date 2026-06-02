@@ -844,3 +844,12 @@ CHANGES
 
 * Harden runtime lane identity and launcher safety
 
+
+
+VERSION: dv2.2
+DATE: 2026-06-02
+
+CHANGES
+
+* Harden runtime lane identity and launcher safety
+

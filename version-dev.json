@@ -1,14 +1,14 @@
 {
-    "version": "dv2.1",
+    "version": "dv2.2",
     "channel": "dev",
-    "release_tag": "dv2.1",
-    "download": "https://github.com/betteryourpractice/truecore-dev-updates/releases/download/dv2.1/TrueCore_dv2.1.zip",
-    "sha256": "b4a2bf84dc29feb1960c06cc9af18edd8a4beab7422d7295fc4036355a610ae7",
-    "size": 340464550,
-    "build_id": "DTC21-20260601-1608",
-    "published_at": "2026-06-01 16:08:33",
+    "release_tag": "dv2.2",
+    "download": "https://github.com/betteryourpractice/truecore-dev-updates/releases/download/dv2.2/TrueCore_dv2.2.zip",
+    "sha256": "eca84debbcc3f321f69ab947ad69d921851b72a0070989d6e5311a7ea260d6ca",
+    "size": 340466368,
+    "build_id": "DTC22-20260602-1459",
+    "published_at": "2026-06-02 14:59:31",
     "signature_algorithm": "ed25519",
     "signature_key_id": "d45f23a852c8fc86",
     "promoted_from_channel": "dev",
-    "signature": "5IvxmWOjPxD4VofDsoaY/D2zlahZdkdIkquuugUJVV3aG/uo6BHnp6jWfR1iKQL3juhZvr/YL1NecS+w3YxaAQ=="
+    "signature": "DQoRX+0gkbA8199uqh0e83wJOLgemfwox8hrc85zIE4p8rTy+tTab/KsEkSN/pnGaHuLB/g+CGZQQidxlQZWCQ=="
 }
