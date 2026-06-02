@@ -835,3 +835,12 @@ CHANGES
 
 * dev portable runtime split and named development folder
 
+
+
+VERSION: v5.5
+DATE: 2026-06-02
+
+CHANGES
+
+* Harden runtime lane identity and launcher safety
+
