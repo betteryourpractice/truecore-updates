@@ -26,12 +26,12 @@ from TrueCore.utils.private_dev_channel import (
     is_private_dev_channel_enabled,
     load_private_dev_channel_config,
 )
-from TrueCore.utils.runtime_info import get_build_info, get_version, runtime_data_path
+from TrueCore.utils.runtime_info import get_build_info, get_version, office_runtime_data_path, runtime_data_path
 
 
 LAUNCHER_RELEASE_INFO_FILENAME = "launcher_release_info.json"
 DEFAULT_IT_EMAIL = "aaron@betteryourpractice.com"
-LAUNCHER_SUPPORT_CONFIG_PATH = runtime_data_path("dev_system", "launcher_support.json")
+LAUNCHER_SUPPORT_CONFIG_PATH = office_runtime_data_path("launcher_support.json")
 
 
 def utc_now_iso():
@@ -148,7 +148,7 @@ def build_launcher_support_snapshot(request_type, update_state=None):
     release_info = dict(load_launcher_release_info() or {})
     office_profile = dict(load_office_profile() or {})
     install_profile = dict(apply_launcher_release_profile(release_info=release_info) or {})
-    private_dev_channel = dict(load_private_dev_channel_config() or {})
+    private_dev_channel = dict(load_private_dev_channel_config() or {}) if install_profile.get("machine_role") == "dev" else {}
     integrity = dict(verify_installed_engine_integrity() or {})
     generated_at = utc_now_iso()
     output_dir = get_launcher_support_request_dir()

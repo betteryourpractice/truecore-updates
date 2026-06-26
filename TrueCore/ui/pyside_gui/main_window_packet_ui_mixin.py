@@ -58,7 +58,7 @@ class MainWindowPacketUiMixin:
             ("Packet", os.path.basename(file_path)),
             ("Displayed Score", f"{score_value:.2f}" if score_value else self.format_detail_value(score)),
             ("Base Rubric Score", f"{rubric_score_value:.2f}" if rubric_score_value else self.format_detail_value(rubric_score)),
-            ("Legacy Score", f"{float(legacy_score):.2f}" if legacy_score not in (None, "", [], {}) else "Missing"),
+            ("Baseline Score", f"{float(legacy_score):.2f}" if legacy_score not in (None, "", [], {}) else "Missing"),
             ("Approval Outlook", self.format_operator_display_value("Approval Outlook", approval_outlook)),
             ("Readiness", self.format_operator_display_value("Submission Readiness", intel_display.get("submission_readiness"))),
         ]
@@ -97,7 +97,7 @@ class MainWindowPacketUiMixin:
                 formula_lines.extend(
                     [
                         "",
-                        "Legacy score comparison:",
+                        "Baseline score comparison:",
                         f"({evidence_numeric:.2f} × 0.35) + ({assembly_numeric:.2f} × 0.65) = {legacy_numeric:.2f}",
                     ]
                 )

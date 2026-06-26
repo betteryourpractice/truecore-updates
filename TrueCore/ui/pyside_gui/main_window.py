@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect
 )
 
-from PySide6.QtGui import QIcon, QColor, QPixmap, QFont
+from PySide6.QtGui import QGuiApplication, QIcon, QColor, QPixmap, QFont
 from PySide6.QtCore import Qt, QSize, QTimer, QObject, QThread, Signal
 
 import os
@@ -68,13 +68,11 @@ from TrueCore.core.case_memory import (
     parse_intel_summary,
 )
 from TrueCore.core.cross_office_learning import (
-    OFFICE_PROFILE_PATH,
     SNAPSHOT_OUTPUT_PATH,
     build_full_cross_office_snapshot,
     export_cross_office_snapshot,
 )
 from TrueCore.core.cross_office_benchmarking import (
-    IMPORTED_SNAPSHOT_DIR,
     NETWORK_ROLLUP_OUTPUT_PATH,
     build_local_network_rollup,
     import_cross_office_snapshot_files,
@@ -192,7 +190,11 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         self.version = get_version()
         self.build_id, self.build_timestamp = get_build_info()
-        self.private_dev_channel = dict(load_private_dev_channel_config() or {})
+        self.private_dev_channel = (
+            dict(load_private_dev_channel_config() or {})
+            if str(self.version or "").strip().lower().startswith("dv")
+            else {}
+        )
         self.install_profile = dict(load_install_profile() or {})
         self._dev_tools_dialog = None
         runtime_identity = resolve_runtime_identity(
@@ -218,9 +220,9 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         window_version = format_version_display(self.version)
         if self.developer_tools_enabled or self.machine_role == "dev":
-            self.setWindowTitle(f"TrueValour Packet Auditor DEV {window_version}")
+            self.setWindowTitle(f"TrueCore Dev Workspace {window_version}")
         else:
-            self.setWindowTitle(f"TrueValour Packet Auditor {window_version}")
+            self.setWindowTitle(f"TrueCore Review Workspace {window_version}")
         self.resize(1400, 900)
         self.showFullScreen()
 
@@ -307,7 +309,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         self.btn_admin = QPushButton(
             QIcon(icon_base + "settings.svg"),
-            "Admin"
+            "Office Manager"
         )
         self.btn_scan_diagnostics = QPushButton(
             QIcon(icon_base + "search.svg"),
@@ -400,7 +402,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         toolbar.addWidget(self.btn_export,1)
         toolbar.addWidget(self.btn_clear,1)
 
-        self.btn_admin.setFixedWidth(self.btn_clear.sizeHint().width())
+        self.btn_admin.setMinimumWidth(max(self.btn_admin.sizeHint().width() + 16, self.btn_clear.sizeHint().width()))
 
         root_layout.addLayout(toolbar)
 
@@ -2095,7 +2097,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
     def prompt_admin_password(self):
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Admin Access")
+        dialog.setWindowTitle("Office Manager Access")
         dialog.setModal(True)
         dialog.resize(420, 190)
         dialog.setStyleSheet(
@@ -2156,18 +2158,18 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(12)
 
-        title = QLabel("Admin Panel Access")
+        title = QLabel("Office Manager Console")
         title.setObjectName("adminTitle")
         layout.addWidget(title)
 
-        subtitle = QLabel("Enter the admin password to open system controls and diagnostics.")
+        subtitle = QLabel("Enter the office manager password to open operations, office comparison, and support diagnostics.")
         subtitle.setWordWrap(True)
         subtitle.setObjectName("adminSubtitle")
         layout.addWidget(subtitle)
 
         password_input = QLineEdit()
         password_input.setEchoMode(QLineEdit.Password)
-        password_input.setPlaceholderText("Admin password")
+        password_input.setPlaceholderText("Office manager password")
         layout.addWidget(password_input)
 
         button_row = QHBoxLayout()
@@ -2488,13 +2490,13 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             ("Organization ID", office_profile.get("organization_id")),
             ("Office ID", office_profile.get("office_id")),
             ("Install ID", office_profile.get("install_id")),
-            ("Office Profile Path", OFFICE_PROFILE_PATH),
+            ("Office Identity Status", "Configured" if office_profile.get("office_name") and office_profile.get("office_name") != "Office Setup Required" else "Setup required"),
             ("Snapshot File Status", "Exported" if snapshot_file_exists else "Not exported yet"),
-            ("Snapshot Output Path", SNAPSHOT_OUTPUT_PATH),
-            ("Imported Snapshot Folder", IMPORTED_SNAPSHOT_DIR),
+            ("Snapshot Sharing", "Ready"),
+            ("Imported Snapshot Library", "Available locally"),
             ("Imported Snapshot Count", imported_office_count),
             ("Network Rollup Status", network_status),
-            ("Network Rollup Path", NETWORK_ROLLUP_OUTPUT_PATH),
+            ("Comparison Workspace", "Ready"),
         ]
 
         network_status_html = ""
@@ -2584,9 +2586,9 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         hybrid_package_status_rows = [
             ("Office Sync Package", "Ready" if os.path.exists(OFFICE_SYNC_PACKAGE_PATH) else "Not exported yet"),
-            ("Office Sync Path", OFFICE_SYNC_PACKAGE_PATH),
+            ("Office Sync Delivery", "Stored locally for export"),
             ("Network Intelligence Package", "Active" if active_network_package else "Not imported"),
-            ("Active Network Package Path", ACTIVE_NETWORK_INTELLIGENCE_PACKAGE_PATH),
+            ("Imported Package Status", "Active locally" if active_network_package else "Waiting for import"),
             ("Imported Package Generated", (active_network_package or {}).get("generated_at") or "—"),
             ("Imported Package Source", (active_network_package or {}).get("source", {}).get("office_name") or "—"),
             ("Imported Package Offices", imported_network_rollup.get("office_count") or "—"),
@@ -2752,7 +2754,9 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             predictive_guidance.append("Reviewer overrides are recurring, which suggests policy or routing rules should be revisited.")
 
         operations_guide_items = [
-            "Office Profile Editor: lets you set the real office identity, rollout tier, support contact, and launcher username hint for this install.",
+            "Office Profile Editor: lets you set the real office identity, rollout tier, and support contact for this install.",
+            "Update Launcher Sign-In: rotates the launcher username and password staff use before the program opens.",
+            "Update Office Manager Password: rotates the password required to open the manager console.",
             "Install Profile: refreshes the local record of this office's version, build, install, and learning state.",
             "Support Package: exports a troubleshooting snapshot you can share internally without digging through folders by hand.",
             "Archive + Reset Local PHI: creates a de-identified archive first, then resets local PHI-bearing history for this install.",
@@ -2804,7 +2808,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             ("Onboarding Progress", f"{rollout_summary.get('completed_steps', 0)}/{rollout_summary.get('total_steps', 0)}"),
             ("Version", deployment_platform.get("version") or self.version),
             ("Build ID", deployment_platform.get("build_id") or self.build_id or "Unknown"),
-            ("Office", deployment_details.get("office_name") or office_profile.get("office_name") or "Default Office"),
+            ("Office", deployment_details.get("office_name") or office_profile.get("office_name") or "Office Setup Required"),
             ("Install ID", deployment_details.get("install_id") or office_profile.get("install_id") or "Unknown"),
             ("Runtime Mode", "Packaged" if deployment_platform.get("frozen") else "Source"),
             ("Release Manifest", "Available" if deployment_details.get("release_manifest_available") else "Pending"),
@@ -2815,7 +2819,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             ("Office Identity Configured", "Yes" if rollout_summary.get("office_identity_configured") else "No"),
             ("Docs Kit Exported", "Yes" if rollout_summary.get("docs_kit_exported") else "No"),
             ("Launcher Credential Mode", self.format_field((rollout_summary.get("credential_policy") or {}).get("mode") or "local_install_shared")),
-            ("Launcher Username", (rollout_summary.get("credential_policy") or {}).get("username_hint") or "Not set"),
+            ("Launcher Sign-In", (rollout_summary.get("credential_policy") or {}).get("username_hint") or "Not set"),
             ("First Packet Analyzed", "Yes" if rollout_summary.get("first_packet_analyzed") else "No"),
             ("First Real Outcome Recorded", "Yes" if rollout_summary.get("first_real_outcome_recorded") else "No"),
         ]
@@ -2834,14 +2838,14 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         ]
 
         deployment_asset_rows = [
-            ("Deployment Manifest Path", DEPLOYMENT_MANIFEST_PATH),
-            ("Support Bundle Path", SUPPORT_BUNDLE_OUTPUT_PATH),
-            ("Snapshot Export Path", deployment_details.get("snapshot_output_path") or SNAPSHOT_OUTPUT_PATH),
+            ("Deployment Manifest", "Ready" if os.path.exists(DEPLOYMENT_MANIFEST_PATH) else "Not generated yet"),
+            ("Support Package", "Ready" if os.path.exists(SUPPORT_BUNDLE_OUTPUT_PATH) else "Not exported yet"),
+            ("Snapshot Export", "Ready" if os.path.exists(deployment_details.get("snapshot_output_path") or SNAPSHOT_OUTPUT_PATH) else "Not exported yet"),
             ("Imported Snapshot Count", deployment_data_state.get("imported_snapshot_count") or 0),
             ("Network Rollup Status", self.format_field(deployment_data_state.get("network_rollup_status") or "pending")),
             ("Active Network Package", self.format_field(deployment_data_state.get("active_network_package_status") or "pending")),
             ("Update Channel", deployment_details.get("update_channel")),
-            ("Runtime Root", deployment_platform.get("runtime_root")),
+            ("Runtime Storage", "Managed locally by TrueCore"),
         ]
 
         platform_actions = []
@@ -2990,7 +2994,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         ]
 
         current_office_rows = [
-            ("Office", office_profile.get("office_name") or "Default Office"),
+            ("Office", office_profile.get("office_name") or "Office Setup Required"),
             ("Organization", office_profile.get("organization_id") or "Unknown"),
             ("Office ID", office_profile.get("office_id") or "Unknown"),
             ("Packets In Snapshot", current_snapshot_summary.get("packet_count") or 0),
@@ -3365,7 +3369,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             error_html = (
                 "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
                 "font-family:'Segoe UI'; font-size:13px; line-height:1.45; margin:0; text-align:left;\">"
-                f"{self.build_detail_card('Admin Panel Error', '<div style=\"color:#EB5757;\">' + html.escape(str(exc)) + '</div>', accent_color='#EB5757', margin_top=0)}"
+                f"{self.build_detail_card('Manager Console Error', '<div style=\"color:#EB5757;\">' + html.escape(str(exc)) + '</div>', accent_color='#EB5757', margin_top=0)}"
                 "</body></html>"
             )
 
@@ -3589,9 +3593,13 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             return
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("TrueCore Admin Panel")
-        dialog.resize(1260, 820)
-        dialog.setMinimumSize(1080, 760)
+        dialog.setWindowTitle("TrueCore Office Manager Console")
+        available = QGuiApplication.primaryScreen().availableGeometry() if QGuiApplication.primaryScreen() else None
+        dialog.setMinimumSize(920, 620)
+        if available is not None:
+            dialog.resize(min(1260, max(960, available.width() - 80)), min(820, max(640, available.height() - 80)))
+        else:
+            dialog.resize(1260, 820)
         dialog.setStyleSheet(self.admin_modal_stylesheet())
 
         layout = QVBoxLayout()
@@ -3657,6 +3665,8 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         operations_actions = [
             ("Edit Office Profile", self.open_office_profile_editor, "Set the real office identity, rollout tier, and support contact for this install."),
+            ("Update Launcher Sign-In", self.open_launcher_sign_in_editor, "Rotate the username and password staff use at the launcher."),
+            ("Update Manager Password", self.open_office_manager_password_editor, "Rotate the password required to open the Office Manager console."),
             ("Refresh Install Profile", self.refresh_deployment_manifest_action, "Update the local record of version, build, office, and learning state."),
             ("Export Support Package", self.export_support_bundle_action, "Export a troubleshooting snapshot for this install."),
             ("Open Support Files", self.open_support_data_folder_action, "Open the folder that contains support and rollout files."),
@@ -3679,7 +3689,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         tab_widget.addTab(overview_tab, "Overview")
         tab_widget.addTab(cross_office_tab, "Office Comparison")
         tab_widget.addTab(operations_tab, "Operations")
-        tab_widget.addTab(audit_tab, "Audit & Logs")
+        tab_widget.addTab(audit_tab, "Audit & Support")
 
         dialog.setLayout(layout)
 

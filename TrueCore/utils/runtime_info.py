@@ -4,6 +4,23 @@ import json
 import shutil
 import re
 
+OFFICE_SYSTEM_DIR_NAME = "office_system"
+DEV_SYSTEM_DIR_NAME = "dev_system"
+RUNTIME_STATE_DIR_NAME = "runtime_state"
+
+OFFICE_SYSTEM_FILE_NAMES = {
+    "admin_auth.json",
+    "deployment_manifest.json",
+    "install_profile.json",
+    "launcher_auth.json",
+    "launcher_support.json",
+    "office_profile.json",
+}
+RUNTIME_STATE_FILE_NAMES = {
+    "dev_tracker.json",
+    "rotation_state.json",
+}
+
 # -------------------------------------------------
 # RESOURCE PATH
 # -------------------------------------------------
@@ -97,6 +114,23 @@ def _copy_file_if_richer(source_path, target_path):
     return True
 
 
+def _copy_named_files_if_missing(source_dir, target_dir, file_names):
+
+    if not os.path.isdir(source_dir):
+        return False
+
+    copied_any = False
+    os.makedirs(target_dir, exist_ok=True)
+
+    for file_name in sorted(set(file_names or [])):
+        source_path = os.path.join(source_dir, file_name)
+        target_path = os.path.join(target_dir, file_name)
+        if _copy_file_if_missing(source_path, target_path):
+            copied_any = True
+
+    return copied_any
+
+
 def _read_text_file(path):
 
     if not os.path.exists(path):
@@ -153,11 +187,23 @@ def _path_has_runtime_state(project_dir):
 
     checks = [
         os.path.join(project_dir, "Outputs", "truecore_memory.db"),
-        os.path.join(project_dir, "dev_system", "office_profile.json"),
-        os.path.join(project_dir, "dev_system", "launcher_auth.json"),
+        os.path.join(project_dir, OFFICE_SYSTEM_DIR_NAME, "office_profile.json"),
+        os.path.join(project_dir, OFFICE_SYSTEM_DIR_NAME, "launcher_auth.json"),
+        os.path.join(project_dir, DEV_SYSTEM_DIR_NAME, "office_profile.json"),
+        os.path.join(project_dir, DEV_SYSTEM_DIR_NAME, "launcher_auth.json"),
         os.path.join(project_dir, "logs", "activity.log"),
     ]
     return any(os.path.exists(path) for path in checks)
+
+
+def _migrate_runtime_aliases(target_root):
+
+    legacy_dev_dir = os.path.join(target_root, DEV_SYSTEM_DIR_NAME)
+    office_dir = os.path.join(target_root, OFFICE_SYSTEM_DIR_NAME)
+    state_dir = os.path.join(target_root, RUNTIME_STATE_DIR_NAME)
+
+    _copy_named_files_if_missing(legacy_dev_dir, office_dir, OFFICE_SYSTEM_FILE_NAMES)
+    _copy_named_files_if_missing(legacy_dev_dir, state_dir, RUNTIME_STATE_FILE_NAMES)
 
 
 def ensure_runtime_data_root():
@@ -190,7 +236,7 @@ def ensure_runtime_data_root():
             target_dir = os.path.join(target_root, folder_name)
             _copy_tree_contents(source_dir, target_dir)
 
-        for folder_name in ("Outputs", "dev_system"):
+        for folder_name in ("Outputs", DEV_SYSTEM_DIR_NAME, OFFICE_SYSTEM_DIR_NAME, RUNTIME_STATE_DIR_NAME):
             source_dir = os.path.join(legacy_dir, folder_name)
             target_dir = os.path.join(target_root, folder_name)
             if not os.path.isdir(source_dir):
@@ -207,6 +253,8 @@ def ensure_runtime_data_root():
                     continue
                 _copy_file_if_missing(source_path, target_path)
         break
+
+    _migrate_runtime_aliases(target_root)
 
     return target_root
 
@@ -228,21 +276,34 @@ def runtime_dir_path(*parts):
     return path
 
 
+def office_runtime_data_path(*parts, ensure_parent=False):
+    return runtime_data_path(OFFICE_SYSTEM_DIR_NAME, *parts, ensure_parent=ensure_parent)
+
+
+def dev_runtime_data_path(*parts, ensure_parent=False):
+    return runtime_data_path(DEV_SYSTEM_DIR_NAME, *parts, ensure_parent=ensure_parent)
+
+
+def runtime_state_path(*parts, ensure_parent=False):
+    return runtime_data_path(RUNTIME_STATE_DIR_NAME, *parts, ensure_parent=ensure_parent)
+
+
 # -------------------------------------------------
 # RUNTIME ENVIRONMENT
 # -------------------------------------------------
 
 def ensure_runtime_environment():
 
-    logs_path = runtime_dir_path("logs")
-    dev_path = runtime_dir_path("dev_system")
+    runtime_dir_path("logs")
+    runtime_dir_path(OFFICE_SYSTEM_DIR_NAME)
+    runtime_dir_path(RUNTIME_STATE_DIR_NAME)
 
     log_file = runtime_data_path("logs", "activity.log", ensure_parent=True)
 
     if not os.path.exists(log_file):
         open(log_file, "w").close()
 
-    tracker_file = runtime_data_path("dev_system", "dev_tracker.json", ensure_parent=True)
+    tracker_file = runtime_state_path("dev_tracker.json", ensure_parent=True)
 
     if not os.path.exists(tracker_file):
 
@@ -254,7 +315,7 @@ def ensure_runtime_environment():
                 indent=4
             )
 
-    rotation_file = runtime_data_path("dev_system", "rotation_state.json", ensure_parent=True)
+    rotation_file = runtime_state_path("rotation_state.json", ensure_parent=True)
 
     if not os.path.exists(rotation_file):
 

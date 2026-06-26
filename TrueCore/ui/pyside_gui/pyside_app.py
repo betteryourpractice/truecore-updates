@@ -5,7 +5,7 @@ import json
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QFont
 
-from TrueCore.utils.runtime_info import resource_path
+from TrueCore.utils.runtime_info import get_version, resource_path
 from TrueCore.utils.runtime_identity import resolve_runtime_identity
 from TrueCore.utils.install_mode import load_install_profile
 from TrueCore.utils.private_dev_channel import load_private_dev_channel_config
@@ -24,9 +24,12 @@ def configure_runtime_warnings():
 
 def emit_runtime_diagnostic():
 
+    version = get_version()
+    private_dev_channel = load_private_dev_channel_config() if str(version or "").strip().lower().startswith("dv") else {}
     runtime_identity = resolve_runtime_identity(
+        version=version,
         install_profile=load_install_profile(),
-        private_dev_channel=load_private_dev_channel_config(),
+        private_dev_channel=private_dev_channel,
     )
     payload = {
         "version": runtime_identity.get("version"),

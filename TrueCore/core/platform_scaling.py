@@ -22,11 +22,12 @@ from TrueCore.utils.runtime_info import (
     get_runtime_project_dir,
     get_runtime_root,
     get_version,
+    office_runtime_data_path,
     runtime_data_path,
 )
 
 
-DEPLOYMENT_MANIFEST_PATH = runtime_data_path("dev_system", "deployment_manifest.json")
+DEPLOYMENT_MANIFEST_PATH = office_runtime_data_path("deployment_manifest.json")
 SUPPORT_BUNDLE_OUTPUT_PATH = runtime_data_path("Outputs", "truecore_support_bundle.json")
 
 

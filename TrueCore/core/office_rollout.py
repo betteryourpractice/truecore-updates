@@ -6,17 +6,22 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 
-from TrueCore.utils.launcher_auth import load_launcher_auth_config, normalize_launcher_username
-from TrueCore.utils.runtime_info import runtime_data_path
+from TrueCore.utils.admin_auth import admin_auth_uses_default_password, load_admin_auth_config
+from TrueCore.utils.launcher_auth import (
+    launcher_auth_uses_default_credentials,
+    load_launcher_auth_config,
+    normalize_launcher_username,
+)
+from TrueCore.utils.runtime_info import office_runtime_data_path
 
 
-OFFICE_PROFILE_PATH = runtime_data_path("dev_system", "office_profile.json")
+OFFICE_PROFILE_PATH = office_runtime_data_path("office_profile.json")
 
 DEFAULT_OFFICE_PROFILE = {
     "version": 2,
-    "organization_id": "truecore-local",
-    "office_id": "office-default",
-    "office_name": "Default Office",
+    "organization_id": "organization-pending",
+    "office_id": "office-pending",
+    "office_name": "Office Setup Required",
     "install_id": None,
     "created_at": None,
     "deidentification_salt": None,
@@ -93,6 +98,12 @@ def _normalize_credential_policy(payload):
 
 def normalize_office_profile(data):
     payload = _deep_merge(DEFAULT_OFFICE_PROFILE, dict(data or {}))
+    if str(payload.get("organization_id") or "").strip().lower() == "truecore-local":
+        payload["organization_id"] = DEFAULT_OFFICE_PROFILE["organization_id"]
+    if str(payload.get("office_id") or "").strip().lower() == "office-default":
+        payload["office_id"] = DEFAULT_OFFICE_PROFILE["office_id"]
+    if str(payload.get("office_name") or "").strip().lower() == "default office":
+        payload["office_name"] = DEFAULT_OFFICE_PROFILE["office_name"]
     payload["version"] = int(payload.get("version") or DEFAULT_OFFICE_PROFILE["version"])
     payload["organization_id"] = _normalized_text(
         payload.get("organization_id"),
@@ -121,6 +132,25 @@ def normalize_office_profile(data):
     payload["onboarding"] = _normalize_onboarding(payload.get("onboarding"))
     payload["credential_policy"] = _normalize_credential_policy(payload.get("credential_policy"))
     return payload
+
+
+def office_identity_is_configured(profile=None):
+    payload = normalize_office_profile(profile or load_office_profile())
+    return any(
+        payload.get(key) != DEFAULT_OFFICE_PROFILE.get(key)
+        for key in ("organization_id", "office_id", "office_name")
+    )
+
+
+def office_setup_is_required(profile=None, launcher_auth=None, admin_auth=None):
+    payload = normalize_office_profile(profile or load_office_profile())
+    onboarding = dict(payload.get("onboarding") or {})
+
+    identity_ready = office_identity_is_configured(payload) and bool(onboarding.get("office_profile_confirmed_at"))
+    launcher_ready = not launcher_auth_uses_default_credentials(launcher_auth or load_launcher_auth_config())
+    manager_ready = not admin_auth_uses_default_password(admin_auth or load_admin_auth_config())
+
+    return not (identity_ready and launcher_ready and manager_ready)
 
 
 def ensure_office_profile():
@@ -190,15 +220,15 @@ def build_rollout_summary(profile=None, *, packet_count=0, outcome_count=0, impo
     profile = normalize_office_profile(profile or load_office_profile())
     onboarding = dict(profile.get("onboarding") or {})
     credential_policy = dict(profile.get("credential_policy") or {})
+    launcher_auth = load_launcher_auth_config()
+    admin_auth = load_admin_auth_config()
 
-    office_identity_configured = any(
-        profile.get(key) != DEFAULT_OFFICE_PROFILE.get(key)
-        for key in ("organization_id", "office_id", "office_name")
-    )
+    office_identity_configured = office_identity_is_configured(profile) and bool(onboarding.get("office_profile_confirmed_at"))
     docs_exported = bool(onboarding.get("docs_kit_exported_at"))
     first_packet = bool(onboarding.get("first_packet_analyzed_at")) or int(packet_count or 0) > 0
     first_outcome = bool(onboarding.get("first_real_outcome_at")) or int(outcome_count or 0) > 0
-    credential_ready = bool(credential_policy.get("username_hint"))
+    credential_ready = not launcher_auth_uses_default_credentials(launcher_auth)
+    manager_password_ready = not admin_auth_uses_default_password(admin_auth)
 
     checklist = [
         {
@@ -218,6 +248,12 @@ def build_rollout_summary(profile=None, *, packet_count=0, outcome_count=0, impo
             "label": "Launcher credential profile defined",
             "complete": credential_ready,
             "detail": credential_policy.get("username_hint"),
+        },
+        {
+            "key": "office_manager_password_ready",
+            "label": "Office manager password defined",
+            "complete": manager_password_ready,
+            "detail": "Configured" if manager_password_ready else "Still using the packaged default",
         },
         {
             "key": "first_packet_analyzed",
@@ -253,6 +289,8 @@ def build_rollout_summary(profile=None, *, packet_count=0, outcome_count=0, impo
         actions.append("Replace the default office identity with the real organization and office names before broader rollout.")
     if not credential_ready:
         actions.append("Define the launcher username policy for this office so credentials are not just generic local defaults.")
+    if not manager_password_ready:
+        actions.append("Set a unique office manager password before staff start using the install operationally.")
     if not first_packet:
         actions.append("Analyze a real packet on this install to complete the first operational onboarding milestone.")
     if not first_outcome:
@@ -269,7 +307,10 @@ def build_rollout_summary(profile=None, *, packet_count=0, outcome_count=0, impo
         "credential_policy": credential_policy,
         "recommended_actions": actions,
         "office_identity_configured": office_identity_configured,
+        "launcher_credentials_ready": credential_ready,
+        "office_manager_password_ready": manager_password_ready,
         "docs_kit_exported": docs_exported,
         "first_packet_analyzed": first_packet,
         "first_real_outcome_recorded": first_outcome,
+        "setup_required": office_setup_is_required(profile, launcher_auth=launcher_auth, admin_auth=admin_auth),
     }

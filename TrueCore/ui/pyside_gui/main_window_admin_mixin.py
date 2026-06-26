@@ -48,6 +48,8 @@ from TrueCore.core.office_rollout import (
     record_office_profile_confirmed,
     update_office_profile,
 )
+from TrueCore.utils.admin_auth import update_admin_password
+from TrueCore.utils.launcher_auth import load_launcher_auth_config, update_launcher_credentials
 
 
 class MainWindowAdminMixin:
@@ -236,6 +238,7 @@ class MainWindowAdminMixin:
         profile = dict(load_office_profile() or {})
         onboarding = dict(profile.get("onboarding") or {})
         credential_policy = dict(profile.get("credential_policy") or {})
+        launcher_auth = dict(load_launcher_auth_config() or {})
 
         dialog = QDialog(self.admin_dialog or self)
         dialog.setWindowTitle("Edit Office Profile")
@@ -275,7 +278,11 @@ class MainWindowAdminMixin:
         office_name_edit = QLineEdit(profile.get("office_name") or "")
         support_name_edit = QLineEdit(profile.get("support_contact_name") or "")
         support_email_edit = QLineEdit(profile.get("support_contact_email") or "")
-        username_hint_edit = QLineEdit(credential_policy.get("username_hint") or "")
+        launcher_sign_in_value = QLineEdit(
+            str(launcher_auth.get("username") or credential_policy.get("username_hint") or "")
+        )
+        launcher_sign_in_value.setReadOnly(True)
+        launcher_sign_in_value.setPlaceholderText("Use Update Launcher Sign-In from Operations")
 
         rollout_tier_combo = QComboBox(dialog)
         rollout_tiers = [
@@ -326,7 +333,7 @@ class MainWindowAdminMixin:
             ("Rollout Tier", rollout_tier_combo),
             ("Support Contact Name", support_name_edit),
             ("Support Contact Email", support_email_edit),
-            ("Launcher Username", username_hint_edit),
+            ("Launcher Sign-In", launcher_sign_in_value),
             ("Credential Mode", credential_mode_combo),
         ]
 
@@ -341,7 +348,7 @@ class MainWindowAdminMixin:
 
         footer_hint = QLabel(
             "Tip: use real office names and support contacts here before wider rollout. "
-            "This makes support exports and benchmarking much easier to trust."
+            "Use the dedicated launcher sign-in and office manager password actions in Operations when credentials need to change."
         )
         footer_hint.setWordWrap(True)
         footer_hint.setStyleSheet("color:#9CA3AF;")
@@ -387,7 +394,7 @@ class MainWindowAdminMixin:
                 },
                 "credential_policy": {
                     "mode": credential_mode_combo.currentData(),
-                    "username_hint": username_hint_edit.text().strip(),
+                    "username_hint": str(launcher_auth.get("username") or credential_policy.get("username_hint") or "").strip(),
                 },
             })
             record_office_profile_confirmed()
@@ -401,6 +408,235 @@ class MainWindowAdminMixin:
             )
 
         save_button.clicked.connect(save_profile)
+
+        dialog.exec()
+
+    def open_launcher_sign_in_editor(self):
+
+        profile = dict(load_office_profile() or {})
+        launcher_auth = dict(load_launcher_auth_config() or {})
+        credential_policy = dict(profile.get("credential_policy") or {})
+
+        dialog = QDialog(self.admin_dialog or self)
+        dialog.setWindowTitle("Update Launcher Sign-In")
+        dialog.setMinimumWidth(560)
+        dialog.setStyleSheet(self.admin_modal_stylesheet())
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("Launcher sign-in for this office")
+        title.setStyleSheet("font-size:18px; font-weight:700; color:#FFFFFF;")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        intro = QLabel(
+            "Update the username and password staff use at the launcher. The new username also becomes the office login hint shown on the launcher."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#B8C4D6;")
+        layout.addWidget(intro)
+
+        def make_label(text):
+            label = QLabel(text)
+            label.setStyleSheet("font-weight:600; color:#FFFFFF;")
+            return label
+
+        current_username = str(launcher_auth.get("username") or credential_policy.get("username_hint") or "").strip()
+        current_value = QLabel(current_username or "Unknown")
+        current_value.setWordWrap(True)
+        current_value.setStyleSheet(
+            "background-color:#0F1722; border:1px solid #253243; border-radius:8px; "
+            "padding:10px; color:#C9D5E6;"
+        )
+        layout.addWidget(make_label("Current Launcher Sign-In"))
+        layout.addWidget(current_value)
+
+        username_edit = QLineEdit(current_username)
+        username_edit.setPlaceholderText("Office login username")
+        password_edit = QLineEdit()
+        password_edit.setEchoMode(QLineEdit.Password)
+        password_edit.setPlaceholderText("New launcher password")
+        password_confirm_edit = QLineEdit()
+        password_confirm_edit.setEchoMode(QLineEdit.Password)
+        password_confirm_edit.setPlaceholderText("Confirm new launcher password")
+
+        layout.addWidget(make_label("Launcher Sign-In"))
+        layout.addWidget(username_edit)
+        layout.addWidget(make_label("New Launcher Password"))
+        layout.addWidget(password_edit)
+        layout.addWidget(make_label("Confirm Launcher Password"))
+        layout.addWidget(password_confirm_edit)
+
+        note = QLabel(
+            "Changing launcher sign-in takes effect the next time staff launch TrueCore from the launcher."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#9CA3AF;")
+        layout.addWidget(note)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        cancel_button = QPushButton("Cancel")
+        save_button = QPushButton("Save Launcher Sign-In")
+        save_button.setStyleSheet(
+            "background-color:#1E6FDB; color:#FFFFFF; border:1px solid #2F80ED; "
+            "border-radius:6px; padding:8px 14px;"
+        )
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(save_button)
+        layout.addLayout(button_row)
+
+        cancel_button.clicked.connect(dialog.reject)
+
+        def save_credentials():
+            username = username_edit.text().strip()
+            password = password_edit.text()
+            confirm_password = password_confirm_edit.text()
+
+            if not username:
+                self.show_admin_message(
+                    "Launcher Sign-In Required",
+                    "Enter the launcher sign-in this office should use.",
+                    icon=QMessageBox.Warning,
+                )
+                return
+            if len(password.strip()) < 8:
+                self.show_admin_message(
+                    "Launcher Password Too Short",
+                    "Launcher password must be at least 8 characters.",
+                    icon=QMessageBox.Warning,
+                )
+                return
+            if password != confirm_password:
+                self.show_admin_message(
+                    "Launcher Password Mismatch",
+                    "Launcher password confirmation does not match.",
+                    icon=QMessageBox.Warning,
+                )
+                return
+
+            try:
+                auth_payload = update_launcher_credentials(username, password)
+                update_office_profile(
+                    {
+                        "credential_policy": {
+                            "mode": credential_policy.get("mode") or "local_install_shared",
+                            "username_hint": auth_payload.get("username"),
+                            "per_office_ready": bool(credential_policy.get("per_office_ready", True)),
+                            "future_plan": credential_policy.get("future_plan") or "per_office_credentials",
+                        }
+                    }
+                )
+                dialog.accept()
+                self.refresh_admin_panel()
+                self.log(f"Updated launcher sign-in for office: {auth_payload.get('username')}")
+                self.show_admin_message(
+                    "Launcher Sign-In Updated",
+                    "Launcher sign-in was updated successfully.\n\n"
+                    "Use the new username and password the next time the launcher opens.",
+                )
+            except Exception as exc:
+                self.show_admin_message("Launcher Sign-In Update Failed", str(exc), icon=QMessageBox.Warning)
+
+        save_button.clicked.connect(save_credentials)
+
+        dialog.exec()
+
+    def open_office_manager_password_editor(self):
+
+        dialog = QDialog(self.admin_dialog or self)
+        dialog.setWindowTitle("Update Office Manager Password")
+        dialog.setMinimumWidth(520)
+        dialog.setStyleSheet(self.admin_modal_stylesheet())
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("Office manager password")
+        title.setStyleSheet("font-size:18px; font-weight:700; color:#FFFFFF;")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        intro = QLabel(
+            "Update the password required to open the Office Manager console. This does not change the launcher sign-in."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#B8C4D6;")
+        layout.addWidget(intro)
+
+        def make_label(text):
+            label = QLabel(text)
+            label.setStyleSheet("font-weight:600; color:#FFFFFF;")
+            return label
+
+        password_edit = QLineEdit()
+        password_edit.setEchoMode(QLineEdit.Password)
+        password_edit.setPlaceholderText("New office manager password")
+        password_confirm_edit = QLineEdit()
+        password_confirm_edit.setEchoMode(QLineEdit.Password)
+        password_confirm_edit.setPlaceholderText("Confirm office manager password")
+
+        layout.addWidget(make_label("New Office Manager Password"))
+        layout.addWidget(password_edit)
+        layout.addWidget(make_label("Confirm Office Manager Password"))
+        layout.addWidget(password_confirm_edit)
+
+        note = QLabel(
+            "The new password applies the next time someone opens the Office Manager console."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#9CA3AF;")
+        layout.addWidget(note)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        cancel_button = QPushButton("Cancel")
+        save_button = QPushButton("Save Manager Password")
+        save_button.setStyleSheet(
+            "background-color:#1E6FDB; color:#FFFFFF; border:1px solid #2F80ED; "
+            "border-radius:6px; padding:8px 14px;"
+        )
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(save_button)
+        layout.addLayout(button_row)
+
+        cancel_button.clicked.connect(dialog.reject)
+
+        def save_password():
+            password = password_edit.text()
+            confirm_password = password_confirm_edit.text()
+
+            if len(password.strip()) < 8:
+                self.show_admin_message(
+                    "Manager Password Too Short",
+                    "Office manager password must be at least 8 characters.",
+                    icon=QMessageBox.Warning,
+                )
+                return
+            if password != confirm_password:
+                self.show_admin_message(
+                    "Manager Password Mismatch",
+                    "Office manager password confirmation does not match.",
+                    icon=QMessageBox.Warning,
+                )
+                return
+
+            try:
+                update_admin_password(password)
+                dialog.accept()
+                self.refresh_admin_panel()
+                self.log("Updated office manager password.")
+                self.show_admin_message(
+                    "Office Manager Password Updated",
+                    "Office Manager password was updated successfully.",
+                )
+            except Exception as exc:
+                self.show_admin_message("Manager Password Update Failed", str(exc), icon=QMessageBox.Warning)
+
+        save_button.clicked.connect(save_password)
 
         dialog.exec()
 
@@ -862,7 +1098,7 @@ class MainWindowAdminMixin:
         card_grid.setVerticalSpacing(10)
 
         metric_cards = [
-            ("Office", office_profile.get("office_name") or "Default Office", office_profile.get("organization_id") or "Local organization", "#57B6FF"),
+            ("Office", office_profile.get("office_name") or "Office Setup Required", office_profile.get("organization_id") or "Organization setup pending", "#57B6FF"),
             ("Packets Analyzed", current_summary.get("packet_count") or 0, "Local retained packet history", "#2DCE89"),
             ("Average Score", int(round(float(data["recent_avg_score"]))) if data.get("recent_avg_score") not in (None, "") else "-", "Recent packet quality average", "#F2C94C"),
             ("Average Runtime", self.format_runtime_value(data.get("recent_avg_runtime")), "Recent local processing speed", "#9B8CFF"),

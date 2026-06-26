@@ -2,11 +2,12 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 
-from TrueCore.utils.runtime_info import runtime_data_path
+from TrueCore.utils.runtime_info import office_runtime_data_path
 
 
-ADMIN_AUTH_PATH = runtime_data_path("dev_system", "admin_auth.json")
+ADMIN_AUTH_PATH = office_runtime_data_path("admin_auth.json")
 DEFAULT_ADMIN_AUTH = {
     "version": 1,
     "algorithm": "pbkdf2_sha256",
@@ -47,6 +48,14 @@ def load_admin_auth_config():
         return dict(DEFAULT_ADMIN_AUTH)
 
 
+def save_admin_auth_config(data):
+    payload = _normalize_auth_config(data)
+    os.makedirs(os.path.dirname(ADMIN_AUTH_PATH), exist_ok=True)
+    with open(ADMIN_AUTH_PATH, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=4)
+    return payload
+
+
 def hash_admin_password(password, *, salt, iterations):
     secret = str(password or "").encode("utf-8")
     salt_bytes = bytes.fromhex(str(salt or ""))
@@ -63,3 +72,29 @@ def verify_admin_password(password):
         iterations=config.get("iterations"),
     )
     return hmac.compare_digest(candidate, expected)
+
+
+def admin_auth_uses_default_password(config=None):
+    payload = _normalize_auth_config(config or load_admin_auth_config())
+    defaults = _normalize_auth_config(DEFAULT_ADMIN_AUTH)
+    return (
+        payload.get("password_hash") == defaults.get("password_hash")
+        and payload.get("salt") == defaults.get("salt")
+    )
+
+
+def update_admin_password(password, *, iterations=None):
+    secret = str(password or "")
+    if not secret.strip():
+        raise ValueError("Office manager password is required.")
+
+    iteration_count = int(iterations or DEFAULT_ADMIN_AUTH["iterations"])
+    salt = secrets.token_hex(16)
+    payload = {
+        "version": DEFAULT_ADMIN_AUTH["version"],
+        "algorithm": DEFAULT_ADMIN_AUTH["algorithm"],
+        "iterations": iteration_count,
+        "salt": salt,
+        "password_hash": hash_admin_password(secret, salt=salt, iterations=iteration_count),
+    }
+    return save_admin_auth_config(payload)

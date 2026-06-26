@@ -1,8 +1,10 @@
 from PySide6.QtWidgets import (
     QWidget, QLabel, QPushButton, QTextEdit,
-    QLineEdit, QVBoxLayout, QHBoxLayout, QFrame
+    QLineEdit, QVBoxLayout, QHBoxLayout, QFrame,
+    QScrollArea,
+    QDialog, QCheckBox, QMessageBox
 )
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QPixmap, QIcon, QPainter, QDesktopServices, QGuiApplication
 
 import subprocess
@@ -28,8 +30,21 @@ from TrueCore.launcher.updater import (
     resolve_engine_executable_path,
     verify_installed_engine_integrity,
 )
-from TrueCore.core.office_rollout import load_office_profile, record_docs_kit_exported
-from TrueCore.utils.launcher_auth import ensure_launcher_auth_config, verify_launcher_credentials
+from TrueCore.core.office_rollout import (
+    load_office_profile,
+    office_setup_is_required,
+    record_docs_kit_exported,
+    record_office_profile_confirmed,
+    update_office_profile,
+)
+from TrueCore.utils.admin_auth import ensure_admin_auth_config, update_admin_password
+from TrueCore.utils.launcher_auth import (
+    ensure_launcher_auth_config,
+    launcher_auth_uses_default_credentials,
+    load_launcher_auth_config,
+    update_launcher_credentials,
+    verify_launcher_credentials,
+)
 from TrueCore.utils.install_mode import (
     get_primary_update_channel,
     get_reference_update_channel,
@@ -155,10 +170,12 @@ class LauncherWindow(QWidget):
         self.last_update_state = {}
         self.install_profile = dict(apply_launcher_release_profile(release_info=self.release_info) or {})
         self.is_dev_launcher = str(self.release_info.get("update_channel") or "").strip().lower() == "dev"
+        self.setup_required = False
+        self.setup_prompted = False
 
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setWindowTitle("TrueCore Dev Launcher" if self.is_dev_launcher else "TrueCore Launcher")
+        self.setWindowTitle("TrueCore Dev Launcher" if self.is_dev_launcher else "TrueCore Office Launcher")
         self.setFixedSize(742, 469)
         self.setWindowIcon(QIcon(resource_path("assets/truecore_icon.ico")))
 
@@ -312,6 +329,10 @@ class LauncherWindow(QWidget):
         self.username.textChanged.connect(self.update_launch_button_state)
         self.password.textChanged.connect(self.update_launch_button_state)
 
+        self.setup_button = QPushButton("Complete First-Time Setup")
+        self.setup_button.clicked.connect(self.open_first_time_setup_dialog)
+        self.setup_button.setVisible(False)
+
         login_layout.addWidget(login_title)
         login_layout.addWidget(self.username)
         login_layout.addWidget(self.password)
@@ -320,6 +341,7 @@ class LauncherWindow(QWidget):
         login_layout.addWidget(self.support_summary_label)
         login_layout.addWidget(self.username_hint_label)
         login_layout.addStretch()
+        login_layout.addWidget(self.setup_button)
         login_layout.addWidget(self.play_button)
         login_panel.setLayout(login_layout)
 
@@ -362,10 +384,12 @@ class LauncherWindow(QWidget):
         main_layout.addLayout(footer_layout)
 
         ensure_launcher_auth_config()
+        ensure_admin_auth_config()
         self.refresh_static_context()
         self.update_launch_button_state()
         self.center_on_screen()
         self.auto_update()
+        QTimer.singleShot(0, self.maybe_run_first_time_setup)
 
     def channel_display_name(self, channel_name):
         normalized = str(channel_name or "").strip().lower()
@@ -499,7 +523,7 @@ class LauncherWindow(QWidget):
                         "TrueCore Update",
                         "",
                         f"- Launcher version: {format_version_display(launcher_version)}",
-                        "- Current release notes unavailable.",
+                        "- Release notes were not bundled with this launcher build.",
                     ]
                 )
             )
@@ -523,24 +547,53 @@ class LauncherWindow(QWidget):
             dict(office_profile.get("credential_policy") or {}).get("username_hint")
             or "No office username hint configured yet."
         )
-        if is_dev_install(self.install_profile):
+        self.setup_required = (
+            not is_dev_install(self.install_profile)
+            and not self.is_dev_launcher
+            and office_setup_is_required(profile=office_profile)
+        )
+        if self.setup_required:
             self.support_summary_label.setText(
-                f"Developer install mode is active for {office_name}. Support requests include channel, launcher, program, and office details automatically."
+                "First-time office setup is required before staff can sign in. Claim this install, set office credentials, and define the office manager password."
             )
+            self.username_hint_label.setText("Sign-in unlocks after first-time setup is completed.")
+        elif is_dev_install(self.install_profile):
+            self.support_summary_label.setText(
+                f"Developer workspace is active for {office_name}. Support requests include channel, launcher, program, and office details automatically."
+            )
+            self.username_hint_label.setText(f"Office login hint: {username_hint}")
         else:
             self.support_summary_label.setText(
-                f"This launcher is tied to {office_name}. Support requests include launcher, program, and office details automatically."
+                f"Office workspace: {office_name}. Support requests include launcher, program, and office details automatically."
             )
-        self.username_hint_label.setText(f"Office username hint: {username_hint}")
+            self.username_hint_label.setText(f"Office login hint: {username_hint}")
+        self.setup_button.setVisible(self.setup_required)
 
     def update_launch_button_state(self):
         has_username = bool((self.username.text() or "").strip())
         has_password = bool((self.password.text() or "").strip())
-        self.play_button.setEnabled(has_username and has_password)
+        sign_in_enabled = has_username and has_password and not self.setup_required
+        self.username.setEnabled(not self.setup_required)
+        self.password.setEnabled(not self.setup_required)
+        self.help_links.setEnabled(not self.setup_required)
+        self.play_button.setText("Setup Required" if self.setup_required else "Launch TrueCore")
+        self.play_button.setEnabled(sign_in_enabled)
+
+    def maybe_run_first_time_setup(self):
+        self.refresh_static_context()
+        self.update_launch_button_state()
+        if self.setup_required and not self.setup_prompted:
+            self.setup_prompted = True
+            self.open_first_time_setup_dialog()
 
     def handle_help_link(self, target):
         request_type = str(target or "").strip().lower()
         if request_type not in {"forgot_username", "forgot_password"}:
+            return
+
+        if self.setup_required:
+            self.news_box.append("\nComplete first-time office setup before requesting sign-in help.")
+            self.open_first_time_setup_dialog()
             return
 
         snapshot_path, payload = build_launcher_support_snapshot(request_type, update_state=self.last_update_state)
@@ -560,7 +613,290 @@ class LauncherWindow(QWidget):
         self.news_box.append(f"Support snapshot exported: {snapshot_path}")
         QDesktopServices.openUrl(QUrl(mailto_url))
 
+    def open_first_time_setup_dialog(self):
+        if self.is_dev_launcher or is_dev_install(self.install_profile):
+            return
+
+        profile = dict(load_office_profile() or {})
+        current_launcher_auth = dict(load_launcher_auth_config() or {})
+        current_username_hint = (
+            dict(profile.get("credential_policy") or {}).get("username_hint")
+            or current_launcher_auth.get("username")
+            or ""
+        )
+        if launcher_auth_uses_default_credentials(current_launcher_auth):
+            current_username_hint = ""
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("First-Time Office Setup")
+        dialog.setModal(True)
+        dialog.setMinimumSize(540, 520)
+        available = QGuiApplication.primaryScreen().availableGeometry() if QGuiApplication.primaryScreen() else None
+        if available is not None:
+            dialog.resize(min(680, max(540, available.width() - 160)), min(820, max(560, available.height() - 120)))
+        else:
+            dialog.resize(620, 720)
+        dialog.setSizeGripEnabled(True)
+        dialog.setStyleSheet(
+            """
+            QDialog {
+                background-color: #11161E;
+                color: #E5E7EB;
+            }
+            QLabel#setupTitle {
+                color: #FFFFFF;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            QLabel#setupSubtitle {
+                color: #9CA3AF;
+                font-size: 12px;
+            }
+            QLabel#setupFieldLabel {
+                color: #DCE6F2;
+                font-size: 12px;
+                font-weight: 600;
+                margin-bottom: 4px;
+            }
+            QLineEdit {
+                background-color: #0B1017;
+                color: #E5E7EB;
+                border: 1px solid #2B3A4D;
+                border-radius: 6px;
+                padding: 10px 12px;
+                selection-background-color: #2F80ED;
+                selection-color: #FFFFFF;
+            }
+            QLineEdit:focus {
+                background-color: #111A25;
+                border: 1px solid #57B6FF;
+            }
+            QLineEdit::placeholder {
+                color: #7F8FA5;
+            }
+            QCheckBox {
+                color: #DCE6F2;
+                spacing: 8px;
+            }
+            QPushButton {
+                background-color: #1A2430;
+                color: #E5E7EB;
+                border: 1px solid #2B3A4D;
+                border-radius: 6px;
+                padding: 9px 16px;
+                min-width: 110px;
+            }
+            QPushButton:hover {
+                background-color: #223247;
+            }
+            QPushButton#primaryButton {
+                background-color: #2F80ED;
+                border: 1px solid #2F80ED;
+                color: #FFFFFF;
+                font-weight: 600;
+            }
+            QPushButton#primaryButton:hover {
+                background-color: #3B8FFF;
+            }
+            """
+        )
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        scroll = QScrollArea(dialog)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            "QScrollArea { background-color: transparent; border: 0; } "
+            "QScrollArea > QWidget > QWidget { background-color: transparent; }"
+        )
+        layout.addWidget(scroll, 1)
+
+        content = QWidget()
+        scroll.setWidget(content)
+
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(6, 6, 10, 6)
+        content_layout.setSpacing(12)
+
+        title = QLabel("Claim This Office Install")
+        title.setObjectName("setupTitle")
+        content_layout.addWidget(title)
+
+        subtitle = QLabel(
+            "Complete this one-time setup before staff sign in. This defines the office identity, launcher credentials, and office manager password for this install."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setObjectName("setupSubtitle")
+        content_layout.addWidget(subtitle)
+
+        def add_field(label_text, placeholder="", text="", password=False):
+            label = QLabel(label_text)
+            label.setObjectName("setupFieldLabel")
+            label.setWordWrap(True)
+            content_layout.addWidget(label)
+            field = QLineEdit()
+            field.setPlaceholderText(placeholder)
+            field.setText(str(text or ""))
+            if password:
+                field.setEchoMode(QLineEdit.Password)
+            content_layout.addWidget(field)
+            return field
+
+        organization_id_edit = add_field(
+            "Organization ID / Parent Group",
+            "Example: betteryourpractice",
+            profile.get("organization_id") if profile.get("organization_id") != "organization-pending" else "",
+        )
+        office_id_edit = add_field(
+            "Office ID",
+            "Example: aiken-sc",
+            profile.get("office_id") if profile.get("office_id") != "office-pending" else "",
+        )
+        office_name_edit = add_field(
+            "Office Name",
+            "Example: Aiken Neuroscience",
+            profile.get("office_name") if profile.get("office_name") != "Office Setup Required" else "",
+        )
+        support_name_edit = add_field(
+            "Support Contact Name",
+            "Optional",
+            profile.get("support_contact_name") or "",
+        )
+        support_email_edit = add_field(
+            "Support Contact Email",
+            "Optional",
+            profile.get("support_contact_email") or "",
+        )
+        launcher_username_edit = add_field(
+            "Launcher Username",
+            "Office login username",
+            current_username_hint,
+        )
+        launcher_password_edit = add_field(
+            "Launcher Password",
+            "At least 8 characters",
+            password=True,
+        )
+        launcher_password_confirm_edit = add_field(
+            "Confirm Launcher Password",
+            "Repeat launcher password",
+            password=True,
+        )
+        manager_password_edit = add_field(
+            "Office Manager Password",
+            "At least 8 characters",
+            password=True,
+        )
+        manager_password_confirm_edit = add_field(
+            "Confirm Office Manager Password",
+            "Repeat office manager password",
+            password=True,
+        )
+
+        export_docs_checkbox = QCheckBox("Export onboarding kit to the desktop after setup")
+        export_docs_checkbox.setChecked(not profile.get("onboarding", {}).get("docs_kit_exported_at"))
+        content_layout.addWidget(export_docs_checkbox)
+        content_layout.addStretch()
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        cancel_button = QPushButton("Cancel")
+        save_button = QPushButton("Complete Setup")
+        save_button.setObjectName("primaryButton")
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(save_button)
+        layout.addLayout(button_row)
+
+        cancel_button.clicked.connect(dialog.reject)
+
+        def complete_setup():
+            organization_id = organization_id_edit.text().strip()
+            office_id = office_id_edit.text().strip()
+            office_name = office_name_edit.text().strip()
+            launcher_username = launcher_username_edit.text().strip()
+            launcher_password = launcher_password_edit.text()
+            launcher_password_confirm = launcher_password_confirm_edit.text()
+            manager_password = manager_password_edit.text()
+            manager_password_confirm = manager_password_confirm_edit.text()
+            support_email = support_email_edit.text().strip()
+
+            if not organization_id or not office_id or not office_name:
+                QMessageBox.warning(dialog, "Setup Incomplete", "Organization ID, Office ID, and Office Name are required.")
+                return
+            if not launcher_username:
+                QMessageBox.warning(dialog, "Setup Incomplete", "Launcher username is required.")
+                return
+            if len(launcher_password.strip()) < 8:
+                QMessageBox.warning(dialog, "Launcher Password", "Launcher password must be at least 8 characters.")
+                return
+            if launcher_password != launcher_password_confirm:
+                QMessageBox.warning(dialog, "Launcher Password", "Launcher password confirmation does not match.")
+                return
+            if len(manager_password.strip()) < 8:
+                QMessageBox.warning(dialog, "Office Manager Password", "Office manager password must be at least 8 characters.")
+                return
+            if manager_password != manager_password_confirm:
+                QMessageBox.warning(dialog, "Office Manager Password", "Office manager password confirmation does not match.")
+                return
+            if support_email and "@" not in support_email:
+                QMessageBox.warning(dialog, "Support Contact Email", "Enter a valid support email address or leave it blank.")
+                return
+
+            try:
+                update_launcher_credentials(launcher_username, launcher_password)
+                update_admin_password(manager_password)
+                update_office_profile(
+                    {
+                        "organization_id": organization_id,
+                        "office_id": office_id,
+                        "office_name": office_name,
+                        "support_contact_name": support_name_edit.text().strip(),
+                        "support_contact_email": support_email,
+                        "credential_policy": {
+                            "mode": "local_install_shared",
+                            "username_hint": launcher_username,
+                            "per_office_ready": True,
+                            "future_plan": "per_office_credentials",
+                        },
+                    }
+                )
+                record_office_profile_confirmed()
+            except Exception as exc:
+                QMessageBox.warning(dialog, "Setup Failed", str(exc))
+                return
+
+            dialog.accept()
+
+        save_button.clicked.connect(complete_setup)
+
+        if dialog.exec() != QDialog.Accepted:
+            if self.setup_required:
+                self.news_box.append("\nFirst-time office setup is still required before staff can sign in.")
+                self.update_launch_button_state()
+            return
+
+        self.refresh_static_context()
+        self.username.setText(
+            dict(load_office_profile().get("credential_policy") or {}).get("username_hint")
+            or launcher_username_edit.text().strip()
+        )
+        self.password.clear()
+        self.update_launch_button_state()
+        self.news_box.append("\nFirst-time office setup completed. Sign in using the new office launcher credentials.")
+
+        if export_docs_checkbox.isChecked():
+            self.open_docs()
+
     def launch_engine(self):
+        if self.setup_required:
+            self.news_box.append("\nFirst-time office setup must be completed before launch.")
+            self.open_first_time_setup_dialog()
+            return
+
         username = (self.username.text() or "").strip()
         password = self.password.text() or ""
 

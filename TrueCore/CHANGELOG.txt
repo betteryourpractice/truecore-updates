@@ -853,3 +853,12 @@ CHANGES
 
 * Harden runtime lane identity and launcher safety
 
+
+
+VERSION: v5.6
+DATE: 2026-06-26
+
+CHANGES
+
+* Office setup gating, credential hardening, and manager console polish
+

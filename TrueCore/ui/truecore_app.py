@@ -8,7 +8,7 @@ implementation for the TrueCore engine.
 import os
 import json
 
-from TrueCore.utils.runtime_info import resource_path, runtime_data_path
+from TrueCore.utils.runtime_info import resource_path, runtime_state_path
 
 
 SUPPORTED_EXTENSIONS = (
@@ -25,7 +25,7 @@ MAX_WORKERS = 6
 
 def load_dev_tracker():
 
-    path = runtime_data_path("dev_system", "dev_tracker.json")
+    path = runtime_state_path("dev_tracker.json")
 
     if not os.path.exists(path):
         return None
@@ -41,7 +41,7 @@ def load_dev_tracker():
 
 def load_rotation():
 
-    path = runtime_data_path("dev_system", "rotation_state.json")
+    path = runtime_state_path("rotation_state.json")
 
     if not os.path.exists(path):
         return None

@@ -9,7 +9,7 @@ from TrueCore.core.platform_scaling import build_support_bundle
 from TrueCore.utils.runtime_info import runtime_data_path, runtime_dir_path
 
 
-LEGACY_WORKBOOK_PATH = runtime_data_path("Outputs", "TrueValour Operations.xlsx")
+LEGACY_WORKBOOK_PATH = runtime_data_path("Outputs", "TrueCore Operations.xlsx")
 PRIVACY_RESET_ARCHIVE_DIR = runtime_dir_path("Outputs", "privacy_reset_archives")
 
 
@@ -38,7 +38,7 @@ def build_local_phi_storage_status():
         },
         "legacy_workbook": {
             **workbook,
-            "label": "Retired Excel workbook",
+            "label": "Retired operations workbook",
         },
         "deidentified_exports": {
             "status": "available",

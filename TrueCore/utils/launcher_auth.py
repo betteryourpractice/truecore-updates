@@ -2,11 +2,12 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 
-from TrueCore.utils.runtime_info import runtime_data_path
+from TrueCore.utils.runtime_info import office_runtime_data_path
 
 
-LAUNCHER_AUTH_PATH = runtime_data_path("dev_system", "launcher_auth.json")
+LAUNCHER_AUTH_PATH = office_runtime_data_path("launcher_auth.json")
 DEFAULT_LAUNCHER_AUTH = {
     "version": 1,
     "username": "truevalour",
@@ -54,6 +55,14 @@ def load_launcher_auth_config():
         return dict(DEFAULT_LAUNCHER_AUTH)
 
 
+def save_launcher_auth_config(data):
+    payload = _normalize_auth_config(data)
+    os.makedirs(os.path.dirname(LAUNCHER_AUTH_PATH), exist_ok=True)
+    with open(LAUNCHER_AUTH_PATH, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=4)
+    return payload
+
+
 def hash_launcher_password(password, *, salt, iterations):
     secret = str(password or "").encode("utf-8")
     salt_bytes = bytes.fromhex(str(salt or ""))
@@ -77,3 +86,35 @@ def verify_launcher_credentials(username, password):
     )
 
     return hmac.compare_digest(candidate, expected_hash)
+
+
+def launcher_auth_uses_default_credentials(config=None):
+    payload = _normalize_auth_config(config or load_launcher_auth_config())
+    defaults = _normalize_auth_config(DEFAULT_LAUNCHER_AUTH)
+    return (
+        payload.get("username") == defaults.get("username")
+        and payload.get("password_hash") == defaults.get("password_hash")
+        and payload.get("salt") == defaults.get("salt")
+    )
+
+
+def update_launcher_credentials(username, password, *, iterations=None):
+    normalized_username = normalize_launcher_username(username)
+    if not normalized_username:
+        raise ValueError("Launcher username is required.")
+
+    secret = str(password or "")
+    if not secret.strip():
+        raise ValueError("Launcher password is required.")
+
+    iteration_count = int(iterations or DEFAULT_LAUNCHER_AUTH["iterations"])
+    salt = secrets.token_hex(16)
+    payload = {
+        "version": DEFAULT_LAUNCHER_AUTH["version"],
+        "username": normalized_username,
+        "algorithm": DEFAULT_LAUNCHER_AUTH["algorithm"],
+        "iterations": iteration_count,
+        "salt": salt,
+        "password_hash": hash_launcher_password(secret, salt=salt, iterations=iteration_count),
+    }
+    return save_launcher_auth_config(payload)

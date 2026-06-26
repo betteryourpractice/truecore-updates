@@ -4,10 +4,10 @@ import json
 import os
 from copy import deepcopy
 
-from TrueCore.utils.runtime_info import runtime_data_path
+from TrueCore.utils.runtime_info import office_runtime_data_path
 
 
-INSTALL_PROFILE_PATH = runtime_data_path("dev_system", "install_profile.json")
+INSTALL_PROFILE_PATH = office_runtime_data_path("install_profile.json")
 
 PRODUCTION_CHANNEL = "production"
 DEV_CHANNEL = "dev"
