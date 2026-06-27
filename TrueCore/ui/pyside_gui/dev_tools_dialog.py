@@ -60,7 +60,6 @@ from TrueCore.ui.pyside_gui.dev_tools_lab_logic import (
     packet_profile_status_palette as packet_profile_status_palette_impl,
 )
 from TrueCore.ui.pyside_gui.dev_tools_packet_logic import (
-    PACKET_LIBRARY_DIR as PACKET_LIBRARY_DIR_IMPL,
     WORDING_FACT_LABELS,
     WORDING_REVIEW_DECISIONS,
     WORDING_STATUS_COLORS,
@@ -103,8 +102,6 @@ from TrueCore.ui.pyside_gui.dev_tools_profiles import (
     compiled_packet_filename,
     default_title_for_profile,
     describe_packet_export_context,
-    get_packet_export_group,
-    get_patient_packet_position,
     is_clinical_documentation_profile,
     is_consult_request_profile,
     is_lomn_profile,
@@ -134,53 +131,6 @@ from TrueCore.utils.runtime_info import runtime_data_path
 
 
 DEV_TOOLS_CONFIG_PATH = DEFAULT_DEV_TOOLS_CONFIG_PATH
-PACKET_LIBRARY_DIR = PACKET_LIBRARY_DIR_IMPL
-
-
-def discover_legacy_reference_entries(path):
-    normalized = str(path or "").strip()
-    if not normalized:
-        return []
-    if os.path.isfile(normalized):
-        extension = os.path.splitext(normalized)[1].lower()
-        if extension in {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}:
-            return [{"kind": "image", "path": normalized, "label": os.path.basename(normalized)}]
-        return []
-    if not os.path.isdir(normalized):
-        return []
-
-    entries = []
-    launcher_window = os.path.join(normalized, "launcher", "launcher_window.py")
-    gui_window = os.path.join(normalized, "ui", "pyside_gui", "main_window.py")
-    assets_dir = os.path.join(normalized, "ui", "pyside_gui", "assets")
-    if os.path.exists(launcher_window):
-        entries.append(
-            {
-                "kind": "launcher_preview",
-                "path": launcher_window,
-                "label": "Legacy launcher preview",
-            }
-        )
-    if os.path.exists(gui_window):
-        entries.append(
-            {
-                "kind": "gui_preview",
-                "path": gui_window,
-                "label": "Legacy GUI preview",
-            }
-        )
-    if os.path.isdir(assets_dir):
-        for name in ("launcher_background.png", "truecore_logo.png"):
-            asset_path = os.path.join(assets_dir, name)
-            if os.path.exists(asset_path):
-                entries.append(
-                    {
-                        "kind": "image",
-                        "path": asset_path,
-                        "label": name,
-                    }
-                )
-    return entries
 def _first_nonempty_text(*values):
     for value in values:
         text = str(value or "").strip()
@@ -1998,11 +1948,11 @@ def build_packet_lab_html(payload):
 
 
 def ensure_packet_library_dir():
-    return ensure_packet_library_dir_impl(packet_library_dir=PACKET_LIBRARY_DIR)
+    return ensure_packet_library_dir_impl()
 
 
 def packet_library_record_path(draft_id):
-    return packet_library_record_path_impl(draft_id, packet_library_dir=PACKET_LIBRARY_DIR)
+    return packet_library_record_path_impl(draft_id)
 
 
 def generate_packet_library_draft_id():
@@ -2049,16 +1999,15 @@ def build_packet_library_production_metrics(payload):
 def list_packet_library_records():
     return list_packet_library_records_impl(
         normalize_packet_builder_payload_fn=normalize_packet_builder_payload,
-        packet_library_dir=PACKET_LIBRARY_DIR,
     )
 
 
 def save_packet_library_record(record):
-    return save_packet_library_record_impl(record, packet_library_dir=PACKET_LIBRARY_DIR)
+    return save_packet_library_record_impl(record)
 
 
 def delete_packet_library_record(draft_id):
-    delete_packet_library_record_impl(draft_id, packet_library_dir=PACKET_LIBRARY_DIR)
+    delete_packet_library_record_impl(draft_id)
 
 
 def find_word_executable():
