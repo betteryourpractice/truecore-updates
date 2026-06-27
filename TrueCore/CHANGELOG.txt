@@ -862,12 +862,3 @@ CHANGES
 
 * Office setup gating, credential hardening, and manager console polish
 
-
-
-VERSION: dv2.3
-DATE: 2026-06-26
-
-CHANGES
-
-* Refactor dev tools packet studio modules and compatibility wrappers
-
