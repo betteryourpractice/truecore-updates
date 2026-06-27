@@ -42,6 +42,7 @@ DEFAULT_DEV_TOOLS_CONFIG_PATH = runtime_data_path("dev_system", "dev_tools_confi
 
 def default_dev_tools_config():
     return {
+        "legacy_gallery_paths": [],
         "packet_builder_export_dir": default_export_dir(),
         "va_form_10172_template_path": default_va_form_10172_template_path(),
     }
@@ -55,7 +56,18 @@ def normalize_dev_tools_config(
     default_va_form_10172_template_path_fn=default_va_form_10172_template_path,
 ):
     payload = deep_merge(default_config or default_dev_tools_config(), data or {})
-    payload.pop("legacy_gallery_paths", None)
+    legacy_paths = []
+    seen_paths = set()
+    for raw_path in list(payload.get("legacy_gallery_paths") or []):
+        normalized = str(raw_path or "").strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        legacy_paths.append(normalized)
+    payload["legacy_gallery_paths"] = legacy_paths
     export_dir = str(payload.get("packet_builder_export_dir") or "").strip() or default_export_dir_fn()
     payload["packet_builder_export_dir"] = export_dir
     template_path = str(payload.get("va_form_10172_template_path") or "").strip()
