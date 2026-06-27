@@ -70,6 +70,7 @@ LAUNCHER_RELEASE_INFO_PATH = os.path.join(ASSETS_DIR, "launcher_release_info.jso
 PRODUCTION_RELEASE_CHANNEL_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version.json"
 DEV_RELEASE_CHANNEL_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version-dev.json"
 PUBLIC_DEV_CHANNEL_ENABLED = False
+PUBLIC_SOURCE_REPO_URL = "https://github.com/betteryourpractice/truecore-updates"
 DIST_ROOT = os.path.join(ROOT_DIR, "dist")
 
 GUI_DIR = os.path.join(CORE_DIR, "ui", "pyside_gui")
@@ -416,6 +417,40 @@ def run_git_command(args, *, cwd=None):
     return subprocess.call(args, cwd=cwd or ROOT_DIR)
 
 
+def normalize_git_remote_url(url):
+    normalized = str(url or "").strip()
+    if not normalized:
+        return ""
+    normalized = normalized.replace("\\", "/")
+    if normalized.lower().startswith("git@github.com:"):
+        normalized = f"https://github.com/{normalized.split(':', 1)[1]}"
+    if normalized.lower().endswith(".git"):
+        normalized = normalized[:-4]
+    return normalized.rstrip("/").lower()
+
+
+def get_git_remote_url(remote_name="origin", *, cwd=None):
+    result = subprocess.run(
+        ["git", "remote", "get-url", remote_name],
+        cwd=cwd or ROOT_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return (result.stdout or "").strip() or None
+
+
+def should_publish_current_source_repo(build_channel, *, cwd=None):
+    if build_channel != "dev":
+        return True
+
+    origin_url = normalize_git_remote_url(get_git_remote_url(cwd=cwd))
+    public_origin = normalize_git_remote_url(PUBLIC_SOURCE_REPO_URL)
+    return bool(origin_url and origin_url != public_origin)
+
+
 def has_git_changes(*, cwd=None):
     result = subprocess.run(
         ["git", "status", "--porcelain"],
@@ -526,28 +561,39 @@ def publish_release_changes(version_label, notes, *, build_channel, private_dev_
 
     print("\nPreparing Git publish...\n")
 
-    add_result = run_git_command(["git", "add", "-A"])
-    if add_result != 0:
-        print("ERROR: git add failed.")
-        return False
+    source_publish_allowed = should_publish_current_source_repo(build_channel)
 
-    if not has_git_changes():
-        print("No git changes detected after build. Nothing to commit.\n")
+    if source_publish_allowed:
+        add_result = run_git_command(["git", "add", "-A"])
+        if add_result != 0:
+            print("ERROR: git add failed.")
+            return False
+
+        if not has_git_changes():
+            print("No git changes detected after build. Nothing to commit.\n")
+        else:
+            commit_result = run_git_command(["git", "commit", "-m", commit_message])
+            if commit_result != 0:
+                print("ERROR: git commit failed.")
+                return False
+
+            push_result = run_git_command(["git", "push"])
+            if push_result != 0:
+                print("ERROR: git push failed.")
+                return False
+
+        release_commit = read_git_head()
+        if not release_commit:
+            print("ERROR: failed to resolve release commit after publish.")
+            return False
     else:
-        commit_result = run_git_command(["git", "commit", "-m", commit_message])
-        if commit_result != 0:
-            print("ERROR: git commit failed.")
-            return False
-
-        push_result = run_git_command(["git", "push"])
-        if push_result != 0:
-            print("ERROR: git push failed.")
-            return False
-
-    release_commit = read_git_head()
-    if not release_commit:
-        print("ERROR: failed to resolve release commit after publish.")
-        return False
+        release_commit = read_git_head() or "HEAD"
+        origin_url = normalize_git_remote_url(get_git_remote_url() or "")
+        print(
+            "Skipping source repo commit/push for this dev publish because the current "
+            f"origin points to the public office repo ({origin_url or 'unknown origin'}).\n"
+            "Dev publish will sync only the private dev channel manifest and release tag."
+        )
 
     if build_channel == "production":
         if not sync_git_release_tag(version_label, commit_ref=release_commit):
