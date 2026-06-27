@@ -295,8 +295,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         title_block = QVBoxLayout()
 
-        header_title = "TRUECORE DEV WORKSPACE" if (self.developer_tools_enabled or self.machine_role == "dev") else "TRUECORE REVIEW WORKSPACE"
-        title = QLabel(header_title)
+        title = QLabel("TRUEVALOUR PACKET AUDITOR")
         title.setObjectName("appTitle")
 
         subtitle = QLabel(f"Powered by TrueCore Engine {format_version_display(self.version)}")
@@ -630,7 +629,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         if not self.developer_tools_enabled:
             return
 
-        from TrueCore.ui.pyside_gui.dev_tools_window import DevToolsDialog
+        from TrueCore.ui.pyside_gui.dev_tools_dialog import DevToolsDialog
 
         if self._dev_tools_dialog and self._dev_tools_dialog.isVisible():
             if self._dev_tools_dialog.isMinimized():
