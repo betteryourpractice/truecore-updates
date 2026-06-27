@@ -30,6 +30,10 @@ from TrueCore.dev.update_channel_manager import (
     write_manifest,
 )
 from TrueCore.utils.private_dev_channel import load_private_dev_channel_config, is_private_dev_channel_enabled
+from TrueCore.utils.release_lane_guard import (
+    evaluate_release_lane,
+    normalize_git_remote_url,
+)
 
 print("=====================================")
 print("        TRUECORE BUILD SYSTEM")
@@ -70,7 +74,6 @@ LAUNCHER_RELEASE_INFO_PATH = os.path.join(ASSETS_DIR, "launcher_release_info.jso
 PRODUCTION_RELEASE_CHANNEL_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version.json"
 DEV_RELEASE_CHANNEL_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version-dev.json"
 PUBLIC_DEV_CHANNEL_ENABLED = False
-PUBLIC_SOURCE_REPO_URL = "https://github.com/betteryourpractice/truecore-updates"
 DIST_ROOT = os.path.join(ROOT_DIR, "dist")
 
 GUI_DIR = os.path.join(CORE_DIR, "ui", "pyside_gui")
@@ -417,18 +420,6 @@ def run_git_command(args, *, cwd=None):
     return subprocess.call(args, cwd=cwd or ROOT_DIR)
 
 
-def normalize_git_remote_url(url):
-    normalized = str(url or "").strip()
-    if not normalized:
-        return ""
-    normalized = normalized.replace("\\", "/")
-    if normalized.lower().startswith("git@github.com:"):
-        normalized = f"https://github.com/{normalized.split(':', 1)[1]}"
-    if normalized.lower().endswith(".git"):
-        normalized = normalized[:-4]
-    return normalized.rstrip("/").lower()
-
-
 def get_git_remote_url(remote_name="origin", *, cwd=None):
     result = subprocess.run(
         ["git", "remote", "get-url", remote_name],
@@ -440,15 +431,6 @@ def get_git_remote_url(remote_name="origin", *, cwd=None):
     if result.returncode != 0:
         return None
     return (result.stdout or "").strip() or None
-
-
-def should_publish_current_source_repo(build_channel, *, cwd=None):
-    if build_channel != "dev":
-        return True
-
-    origin_url = normalize_git_remote_url(get_git_remote_url(cwd=cwd))
-    public_origin = normalize_git_remote_url(PUBLIC_SOURCE_REPO_URL)
-    return bool(origin_url and origin_url != public_origin)
 
 
 def has_git_changes(*, cwd=None):
@@ -561,13 +543,36 @@ def publish_release_changes(version_label, notes, *, build_channel, private_dev_
 
     print("\nPreparing Git publish...\n")
 
-    source_publish_allowed = should_publish_current_source_repo(build_channel)
+    lane_status = evaluate_release_lane(
+        build_channel,
+        get_git_remote_url(),
+        private_dev_config=private_dev_config,
+        public_dev_channel_enabled=PUBLIC_DEV_CHANNEL_ENABLED,
+    )
+    source_publish_allowed = bool(lane_status["source_publish_allowed"])
+
+    for warning in lane_status["warnings"]:
+        print(f"WARNING: {warning}")
+    for error in lane_status["errors"]:
+        print(f"ERROR: {error}")
+    if lane_status["errors"]:
+        return {
+            "success": False,
+            "source_pushed": False,
+            "private_dev_synced": False,
+            "public_tag_synced": False,
+        }
 
     if source_publish_allowed:
         add_result = run_git_command(["git", "add", "-A"])
         if add_result != 0:
             print("ERROR: git add failed.")
-            return False
+            return {
+                "success": False,
+                "source_pushed": False,
+                "private_dev_synced": False,
+                "public_tag_synced": False,
+            }
 
         if not has_git_changes():
             print("No git changes detected after build. Nothing to commit.\n")
@@ -575,17 +580,32 @@ def publish_release_changes(version_label, notes, *, build_channel, private_dev_
             commit_result = run_git_command(["git", "commit", "-m", commit_message])
             if commit_result != 0:
                 print("ERROR: git commit failed.")
-                return False
+                return {
+                    "success": False,
+                    "source_pushed": False,
+                    "private_dev_synced": False,
+                    "public_tag_synced": False,
+                }
 
             push_result = run_git_command(["git", "push"])
             if push_result != 0:
                 print("ERROR: git push failed.")
-                return False
+                return {
+                    "success": False,
+                    "source_pushed": False,
+                    "private_dev_synced": False,
+                    "public_tag_synced": False,
+                }
 
         release_commit = read_git_head()
         if not release_commit:
             print("ERROR: failed to resolve release commit after publish.")
-            return False
+            return {
+                "success": False,
+                "source_pushed": False,
+                "private_dev_synced": False,
+                "public_tag_synced": False,
+            }
     else:
         release_commit = read_git_head() or "HEAD"
         origin_url = normalize_git_remote_url(get_git_remote_url() or "")
@@ -595,9 +615,19 @@ def publish_release_changes(version_label, notes, *, build_channel, private_dev_
             "Dev publish will sync only the private dev channel manifest and release tag."
         )
 
+    source_pushed = source_publish_allowed
+    private_dev_synced = False
+    public_tag_synced = False
+
     if build_channel == "production":
         if not sync_git_release_tag(version_label, commit_ref=release_commit):
-            return False
+            return {
+                "success": False,
+                "source_pushed": source_pushed,
+                "private_dev_synced": False,
+                "public_tag_synced": False,
+            }
+        public_tag_synced = True
     elif build_channel == "dev":
         manifest_path = dev_manifest_path or VERSION_DEV_JSON_PATH
         if not sync_private_dev_manifest_repo(
@@ -606,10 +636,21 @@ def publish_release_changes(version_label, notes, *, build_channel, private_dev_
             private_dev_config=private_dev_config,
             manifest_source_path=manifest_path,
         ):
-            return False
+            return {
+                "success": False,
+                "source_pushed": source_pushed,
+                "private_dev_synced": False,
+                "public_tag_synced": False,
+            }
+        private_dev_synced = True
 
     print("\nGit publish completed successfully.\n")
-    return True
+    return {
+        "success": True,
+        "source_pushed": source_pushed,
+        "private_dev_synced": private_dev_synced,
+        "public_tag_synced": public_tag_synced,
+    }
 
 
 PORTABLE_VARIANT_FOLDERS = ("OFFICE", "DEVELOPMENT")
@@ -1269,10 +1310,15 @@ publish_choice = input(
     "\nCommit and push the current release changes to GitHub now? (y/N): "
 ).strip().lower()
 
-git_publish_succeeded = False
+git_publish_result = {
+    "success": False,
+    "source_pushed": False,
+    "private_dev_synced": False,
+    "public_tag_synced": False,
+}
 
 if publish_choice in {"y", "yes"}:
-    git_publish_succeeded = publish_release_changes(
+    git_publish_result = publish_release_changes(
         release_tag,
         notes,
         build_channel=build_channel,
@@ -1283,10 +1329,14 @@ else:
     print("\nGit publish skipped. Your build files remain local until you commit and push them.\n")
 
 print("Manual release follow-up:")
-if git_publish_succeeded:
+if git_publish_result["success"]:
     if build_channel == "dev" and not PUBLIC_DEV_CHANNEL_ENABLED:
-        print("1. Source changes were pushed.")
-        print("2. Private dev manifest repo and release tag were synced automatically.")
+        if git_publish_result["source_pushed"]:
+            print("1. Source changes were pushed.")
+            print("2. Private dev manifest repo and release tag were synced automatically.")
+        else:
+            print("1. Source changes were intentionally kept off the public office repo.")
+            print("2. Private dev manifest repo and release tag were synced automatically.")
         print(f"3. Dev tag/release name: {release_tag}")
         print(f"4. Engine package: {zip_path}")
         print(f"5. Launcher package: {launcher_zip_path}")
