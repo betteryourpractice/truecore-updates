@@ -59,6 +59,7 @@ from TrueCore.utils.runtime_info import resource_path, runtime_data_path
 DEV_TOOLS_CONFIG_PATH = runtime_data_path("dev_system", "dev_tools_config.json")
 PACKET_LIBRARY_DIR = runtime_data_path("dev_system", "packet_library")
 REFERRAL_REQUEST_PROFILE = "Community Care Referral Request"
+APPEAL_LETTER_PROFILE = "Community Care Appeal Letter"
 PATIENT_PACKET_PROFILE_ORDER = [
     "Submission Cover Sheet",
     "Virtual Consent Form",
@@ -72,6 +73,7 @@ PATIENT_PACKET_PROFILE_ORDER = [
 PACKET_BUILDER_PROFILES = [
     REFERRAL_REQUEST_PROFILE,
     *PATIENT_PACKET_PROFILE_ORDER,
+    APPEAL_LETTER_PROFILE,
 ]
 BUNDLE_EXPORT_EXTENSIONS = {
     "word": ["docx"],
@@ -102,6 +104,15 @@ WORDING_FACT_LABELS = {
     "secondary_diagnosis": "Secondary diagnosis",
     "icd_codes": "ICD-10 code",
     "requested_service": "Requested service",
+    "appeal_requested_service": "Denied service / request",
+    "appeal_denial_date": "Denial date",
+    "appeal_denial_source": "Denial source / reviewing office",
+    "appeal_denial_reason_1": "Denial reason / concern 1",
+    "appeal_denial_reason_2": "Denial reason / concern 2",
+    "appeal_referral_history": "Background and timeline",
+    "appeal_failed_conservative_care": "Failed conservative care history",
+    "appeal_functional_impairment": "Functional limitation",
+    "appeal_imaging_support": "Imaging support",
     "mri_date": "MRI date",
     "mri_findings": "MRI findings",
     "affected_levels": "Affected spinal level(s)",
@@ -300,8 +311,27 @@ def _wording_fact_text(packet, fact_key):
     if fact_key == "requested_service":
         return _first_nonempty_text(
             packet.get("requested_service"),
+            packet.get("appeal_denied_service"),
             packet.get("va10172_description_cpt_hcpcs_code"),
         )
+    if fact_key == "appeal_requested_service":
+        return _appeal_requested_service(packet)
+    if fact_key == "appeal_denial_date":
+        return str(packet.get("appeal_denial_date") or "").strip()
+    if fact_key == "appeal_denial_source":
+        return str(packet.get("appeal_denial_source") or packet.get("facility") or "").strip()
+    if fact_key == "appeal_denial_reason_1":
+        return str(packet.get("appeal_denial_reason_1") or "").strip()
+    if fact_key == "appeal_denial_reason_2":
+        return str(packet.get("appeal_denial_reason_2") or "").strip()
+    if fact_key == "appeal_referral_history":
+        return _appeal_case_timeline(packet)
+    if fact_key == "appeal_failed_conservative_care":
+        return _wording_fact_text(packet, "conservative_history")
+    if fact_key == "appeal_functional_impairment":
+        return _wording_fact_text(packet, "functional_impact")
+    if fact_key == "appeal_imaging_support":
+        return _wording_fact_text(packet, "mri_findings")
     if fact_key == "mri_date":
         return _first_nonempty_text(
             packet.get("master_mri_date"),
@@ -1396,6 +1426,273 @@ def _build_va_reason_for_request_suggestion(packet, raw_text):
     return _select_wording_blueprint(packet, "va_reason_for_request", scenarios)
 
 
+def _build_appeal_opening_request_suggestion(packet, raw_text):
+    service = _wording_fact_text(packet, "appeal_requested_service") or "the requested community care service"
+    diagnosis_with_levels = _diagnosis_with_levels_phrase(packet) or _diagnosis_phrase(packet) or "the documented condition"
+    denial_reference = _appeal_denial_reference(packet)
+    scenarios = [
+        _make_wording_scenario(
+            "Procedure-specific clinical reconsideration",
+            "Use when the appeal concerns a named intervention or defined treatment pathway.",
+            (
+                f"This letter respectfully requests clinical reconsideration of {denial_reference} for {service}. "
+                f"This appeal is submitted as a patient-specific medical necessity request, not as a generalized coverage challenge, and asks VA to review whether {service} remains clinically appropriate for the above-named Veteran in light of the documented {diagnosis_with_levels}, treatment history, and supporting records."
+            ),
+            enabled=_has_specific_requested_procedure(packet),
+        ),
+        _make_wording_scenario(
+            "Evidence-driven clinical appeal",
+            "Use when the appeal should identify the challenged decision, explain disagreement, and point to the record.",
+            (
+                f"This letter respectfully requests reconsideration of {denial_reference} regarding {service}. "
+                "The appeal identifies the decision being challenged, explains the basis for disagreement, and submits the Veteran's diagnosis, treatment history, functional limitations, and supporting medical records for patient-specific clinical review."
+            ),
+            enabled=True,
+        ),
+        _make_wording_scenario(
+            "Specialty pathway reconsideration",
+            "Use when the request should stay procedure-cautious and focused on access to appropriate specialty care.",
+            (
+                f"This letter respectfully requests reconsideration of {denial_reference} so the Veteran may obtain appropriate community care evaluation and treatment planning related to {diagnosis_with_levels}. "
+                "The request is limited to patient-specific review of the documented need for the requested care pathway and should not be read as a request for open-ended or unrelated services."
+            ),
+            enabled=not _has_specific_requested_procedure(packet),
+        ),
+    ]
+    return _select_wording_blueprint(packet, "appeal_opening_request", scenarios)
+
+
+def _build_appeal_clinical_necessity_suggestion(packet, raw_text):
+    service = _wording_fact_text(packet, "appeal_requested_service") or "the requested community care service"
+    diagnosis_with_levels = _diagnosis_with_levels_phrase(packet) or _diagnosis_phrase(packet) or "the documented condition"
+    symptom_sentence = _symptom_summary_sentence(packet)
+    conservative_sentence = _conservative_history_sentence(packet)
+    functional_sentence = _functional_impact_sentence(packet)
+    imaging_sentence = _imaging_correlation_sentence(packet)
+    scenarios = [
+        _make_wording_scenario(
+            "Imaging-supported clinical necessity",
+            "Use when MRI or other imaging correlation is one of the strongest facts in the record.",
+            " ".join(
+                part for part in [
+                    _ensure_sentence(f"The clinical record supports {service} for {diagnosis_with_levels}"),
+                    symptom_sentence,
+                    imaging_sentence,
+                    conservative_sentence,
+                    functional_sentence,
+                    _ensure_sentence("Taken together, the submitted diagnosis, imaging, failed conservative care, and persistent limitation support a patient-specific community care determination"),
+                ]
+                if part
+            ),
+            enabled=_has_imaging_correlation(packet),
+        ),
+        _make_wording_scenario(
+            "Failed conservative and interventional care basis",
+            "Use when prolonged conservative care or prior interventional history should anchor the appeal.",
+            " ".join(
+                part for part in [
+                    _ensure_sentence(f"The requested service remains medically reasonable for {diagnosis_with_levels} because symptoms have persisted despite an appropriately documented course of conservative care"),
+                    conservative_sentence,
+                    functional_sentence,
+                    _ensure_sentence("The absence of sustained relief with lower-intensity management supports further specialty community care review rather than indefinite continuation of ineffective care"),
+                ]
+                if part
+            ),
+            enabled=_duration_bucket(packet) in {"over_90_days", "over_6_months", "over_12_months"} or _has_failed_esi_history(packet),
+        ),
+        _make_wording_scenario(
+            "Function-limiting clinical basis",
+            "Use when the strongest argument is the Veteran's day-to-day impairment.",
+            " ".join(
+                part for part in [
+                    _ensure_sentence(f"The record supports {service} because {diagnosis_with_levels} continues to produce meaningful functional limitation"),
+                    symptom_sentence,
+                    functional_sentence,
+                    conservative_sentence,
+                    _ensure_sentence("The requested review is grounded in the Veteran's current loss of function and the lack of sustained response to previously documented care"),
+                ]
+                if part
+            ),
+            enabled=bool(_wording_fact_text(packet, "appeal_functional_impairment")),
+        ),
+        _make_wording_scenario(
+            "High-quality default clinical basis",
+            "Use when a broad but denial-resistant clinical-necessity paragraph is needed.",
+            " ".join(
+                part for part in [
+                    _ensure_sentence(f"The requested service remains medically reasonable and necessary for the documented {diagnosis_with_levels}"),
+                    symptom_sentence,
+                    conservative_sentence,
+                    functional_sentence,
+                    imaging_sentence,
+                    _ensure_sentence("The submitted record supports a patient-specific community care determination based on diagnosis, failed conservative care, persistent symptoms, and documented impairment"),
+                ]
+                if part
+            ),
+            enabled=True,
+        ),
+    ]
+    return _select_wording_blueprint(packet, "appeal_clinical_necessity", scenarios)
+
+
+def _build_appeal_denial_rebuttal_1_suggestion(packet, raw_text):
+    category = _appeal_denial_reason_category(packet, 1)
+    diagnosis_with_levels = _diagnosis_with_levels_phrase(packet) or _diagnosis_phrase(packet) or "the documented condition"
+    service = _wording_fact_text(packet, "appeal_requested_service") or "the requested community care service"
+    conservative_sentence = _conservative_history_sentence(packet)
+    functional_sentence = _functional_impact_sentence(packet)
+    imaging_sentence = _imaging_correlation_sentence(packet)
+    scenarios = [
+        _make_wording_scenario(
+            "Investigational or non-established rebuttal",
+            "Use when the stated concern labels the service as investigational, experimental, or not established.",
+            " ".join(
+                part for part in [
+                    "This rationale should be reconsidered as a patient-specific clinical appeal rather than a generalized policy determination.",
+                    _ensure_sentence(f"The question presented is whether {service} is clinically appropriate for this Veteran with documented {diagnosis_with_levels}"),
+                    conservative_sentence,
+                    functional_sentence,
+                    imaging_sentence,
+                    _ensure_sentence("The submitted record supports individualized review of medical necessity based on the Veteran's actual diagnosis, prior treatment response, and current impairment"),
+                ]
+                if part
+            ),
+            enabled=category == "investigational",
+        ),
+        _make_wording_scenario(
+            "Medical-necessity rebuttal",
+            "Use when the denial says medical necessity was not established.",
+            " ".join(
+                part for part in [
+                    _ensure_sentence(f"The submitted record does support medical necessity for {service} related to {diagnosis_with_levels}"),
+                    conservative_sentence,
+                    functional_sentence,
+                    imaging_sentence,
+                    _ensure_sentence("The appeal therefore asks for reconsideration based on the complete clinical record rather than a conclusion that the request lacks documented necessity"),
+                ]
+                if part
+            ),
+            enabled=category == "medical_necessity",
+        ),
+        _make_wording_scenario(
+            "Administrative or documentation rebuttal",
+            "Use when the stated concern is routing, authorization, network, or incomplete paperwork rather than the clinical merits.",
+            " ".join(
+                part for part in [
+                    "If the concern is administrative rather than clinical, the appropriate remedy is to identify the missing routing, authorization, or documentation element so it can be corrected.",
+                    _ensure_sentence(f"The underlying medical record continues to support review of {service} for {diagnosis_with_levels}"),
+                    conservative_sentence,
+                    functional_sentence,
+                    _ensure_sentence("The request should not be denied on clinical grounds when the substantive record supports continued review and any remaining administrative deficiency can be cured"),
+                ]
+                if part
+            ),
+            enabled=category in {"administrative", "documentation"},
+        ),
+        _make_wording_scenario(
+            "Availability or access rebuttal",
+            "Use when the stated concern suggests the service is available elsewhere or community care is not needed.",
+            " ".join(
+                part for part in [
+                    "This rationale should be reconsidered in light of the Veteran's actual access and treatment circumstances.",
+                    _ensure_sentence(f"The appeal concerns a defined request for {service} related to {diagnosis_with_levels}"),
+                    conservative_sentence,
+                    functional_sentence,
+                    _ensure_sentence("The review should focus on whether the requested community care pathway is clinically appropriate for this Veteran under the documented circumstances, not on a generalized assumption regarding availability"),
+                ]
+                if part
+            ),
+            enabled=category == "availability",
+        ),
+        _make_wording_scenario(
+            "High-quality default rebuttal",
+            "Use when the denial concern should be answered with a general but firm patient-specific response.",
+            " ".join(
+                part for part in [
+                    _ensure_sentence(f"The stated denial concern should be reconsidered in light of the complete record supporting {service} for {diagnosis_with_levels}"),
+                    conservative_sentence,
+                    functional_sentence,
+                    imaging_sentence,
+                    _ensure_sentence("This appeal asks for a patient-specific determination based on the submitted medical record, rather than reliance on a generalized denial rationale"),
+                ]
+                if part
+            ),
+            enabled=True,
+        ),
+    ]
+    return _select_wording_blueprint(packet, "appeal_denial_rebuttal_1", scenarios)
+
+
+def _build_appeal_policy_support_suggestion(packet, raw_text):
+    service = _wording_fact_text(packet, "appeal_requested_service") or "the requested community care service"
+    denial_reasons = _appeal_denial_reasons(packet)
+    scenarios = [
+        _make_wording_scenario(
+            "Clinical appeal evidence standard",
+            "Use when the policy section should track VA's clinical appeal process and evidence expectations.",
+            (
+                "Under VA's Clinical Appeals process, the appeal should identify the decision being challenged, explain the basis for disagreement, and submit medical evidence supporting reconsideration. "
+                f"This appeal does so by challenging the denial of {service} and providing diagnosis, treatment history, functional limitation, and supporting records for review."
+            ),
+            enabled=True,
+        ),
+        _make_wording_scenario(
+            "Community care eligibility and authorization framing",
+            "Use when the section should emphasize the patient-specific community-care review standard.",
+            (
+                "Under 38 C.F.R. 17.4010 and 17.4020, community care review should address whether the Veteran qualifies for authorized non-VA care based on the actual clinical and access circumstances presented. "
+                "This appeal requests that the Veteran's record be reviewed on those patient-specific facts rather than on a generalized denial rationale."
+            ),
+            enabled=True,
+        ),
+        _make_wording_scenario(
+            "Denial-specific policy framing",
+            "Use when the policy section should explicitly answer the denial concern already stated in the packet.",
+            (
+                f"The denial rationale{f' ({denial_reasons})' if denial_reasons else ''} should be reviewed through the Clinical Appeals process using the submitted medical records and any supporting published evidence. "
+                "The governing question is whether the Veteran's specific record supports reconsideration of the requested care, not whether a broad policy statement can substitute for individualized review."
+            ),
+            enabled=bool(denial_reasons),
+        ),
+    ]
+    return _select_wording_blueprint(packet, "appeal_policy_support", scenarios)
+
+
+def _build_appeal_requested_relief_suggestion(packet, raw_text):
+    service = _wording_fact_text(packet, "appeal_requested_service") or "the requested community care service"
+    diagnosis_with_levels = _diagnosis_with_levels_phrase(packet) or _diagnosis_phrase(packet) or "the documented condition"
+    scenarios = [
+        _make_wording_scenario(
+            "Authorization and defined scope requested",
+            "Use when the appeal should directly request reversal and a defined authorized episode of care.",
+            (
+                f"Please reverse the denial and authorize {service} for the above-named Veteran if clinically confirmed. "
+                "Please also confirm in writing the approved scope of care, authorized provider, authorization number, and applicable date range so treatment can proceed without additional administrative delay."
+            ),
+            enabled=_has_specific_requested_procedure(packet),
+        ),
+        _make_wording_scenario(
+            "Specialty review and treatment pathway requested",
+            "Use when the request should remain procedure-cautious but still ask for action.",
+            (
+                f"Please reconsider the denial and authorize the requested community care evaluation and treatment pathway related to {diagnosis_with_levels}. "
+                "If any part of the request remains unclear, please identify the specific clinical or administrative deficiency so it can be addressed promptly."
+            ),
+            enabled=not _has_specific_requested_procedure(packet),
+        ),
+        _make_wording_scenario(
+            "Reverse or issue detailed rationale",
+            "Use when the appeal should request either authorization or a precise patient-specific denial explanation.",
+            (
+                f"Please either authorize {service} based on the submitted record or issue a patient-specific written determination explaining the basis for denial, the records reviewed, and the exact evidence required to cure any remaining deficiency. "
+                "That clarification is necessary so the Veteran and treating office can respond to the actual basis for the decision."
+            ),
+            enabled=True,
+        ),
+    ]
+    return _select_wording_blueprint(packet, "appeal_requested_relief", scenarios)
+
+
 WORDING_ASSIST_SPECS = {
     "va_form_10_10172": [
         {
@@ -1512,6 +1809,43 @@ WORDING_ASSIST_SPECS = {
             "builder": _build_clinical_narrative_suggestion,
         },
     ],
+    "appeal": [
+        {
+            "key": "appeal_opening_request",
+            "label": "Opening Request",
+            "field_name": "appeal_opening_request",
+            "required_facts": ["appeal_requested_service"],
+            "builder": _build_appeal_opening_request_suggestion,
+        },
+        {
+            "key": "appeal_clinical_necessity",
+            "label": "Clinical Basis and Medical Necessity",
+            "field_name": "appeal_clinical_necessity",
+            "required_facts": ["diagnosis", "appeal_requested_service", "appeal_failed_conservative_care", "appeal_functional_impairment"],
+            "builder": _build_appeal_clinical_necessity_suggestion,
+        },
+        {
+            "key": "appeal_denial_rebuttal_1",
+            "label": "Response to Denial Grounds 1",
+            "field_name": "appeal_denial_rebuttal_1",
+            "required_facts": ["appeal_denial_reason_1", "diagnosis", "appeal_requested_service"],
+            "builder": _build_appeal_denial_rebuttal_1_suggestion,
+        },
+        {
+            "key": "appeal_policy_support",
+            "label": "Policy and Appeal Support",
+            "field_name": "appeal_policy_support",
+            "required_facts": ["appeal_requested_service"],
+            "builder": _build_appeal_policy_support_suggestion,
+        },
+        {
+            "key": "appeal_requested_relief",
+            "label": "Requested Determination",
+            "field_name": "appeal_requested_relief",
+            "required_facts": ["appeal_requested_service"],
+            "builder": _build_appeal_requested_relief_suggestion,
+        },
+    ],
 }
 
 
@@ -1526,6 +1860,8 @@ def wording_assist_specs_for_profile(profile_name):
         return WORDING_ASSIST_SPECS["seoc"]
     if is_clinical_documentation_profile(profile_name):
         return WORDING_ASSIST_SPECS["clinical"]
+    if is_appeal_letter_profile(profile_name):
+        return WORDING_ASSIST_SPECS["appeal"]
     return []
 
 
@@ -1734,7 +2070,51 @@ def _default_va_form_10172_template_path():
 DEFAULT_DEV_TOOLS_CONFIG = {
     "legacy_gallery_paths": [],
     "packet_builder_export_dir": _default_export_dir(),
+    "source_profile_library_dir": _default_export_dir(),
     "va_form_10172_template_path": _default_va_form_10172_template_path(),
+    "packet_builder_reference_profiles": {
+        "va_sources": [],
+        "community_destinations": [],
+    },
+}
+
+PACKET_SOURCE_PROFILE_SPECS = {
+    "va_sources": {
+        "title": "VA Referring Source",
+        "empty_label": "No saved VA referring source profiles yet.",
+        "fields": [
+            ("facility", "VA Referring Facility / Medical Center"),
+            ("va10172_va_facility_address", "VA Form 10-10172 Facility Address"),
+        ],
+    },
+    "community_destinations": {
+        "title": "Community Care Destination",
+        "empty_label": "No saved Community Care destination profiles yet.",
+        "fields": [
+            ("provider", "Community Care Treating Provider"),
+            ("community_facility", "Community Care Practice / Facility"),
+            ("master_provider_credentials", "Community Care Provider Credentials"),
+            ("master_provider_specialty", "Community Care Provider Specialty"),
+            ("master_provider_npi", "Community Care Provider NPI"),
+            ("master_practice_name", "Community Care Practice Name"),
+            ("master_provider_phone", "Community Care Practice Phone"),
+            ("master_provider_fax", "Community Care Practice Fax"),
+            ("master_provider_email", "Community Care Secure Email"),
+            ("master_provider_address", "Community Care Practice Address"),
+            ("group_npi", "Referral Request Group NPI"),
+            ("fax_number", "Referral Request Fax Number"),
+            ("liaison_contact_info", "Referral Request Liaison Contact"),
+        ],
+    },
+    "pcp_pcm_profiles": {
+        "title": "PCP / PCM",
+        "empty_label": "No saved PCP / PCM profiles yet.",
+        "fields": [
+            ("pcp_pcm_name", "PCP / PCM Name"),
+            ("pcp_pcm_phone", "PCP / PCM Phone"),
+            ("pcp_pcm_fax", "PCP / PCM Fax"),
+        ],
+    },
 }
 
 PACKET_WIDGET_BINDINGS = {
@@ -1766,6 +2146,35 @@ PACKET_WIDGET_BINDINGS = {
     "master_affected_levels": ("master_affected_levels_input", "text"),
     "clinical_summary": ("clinical_summary_input", "toPlainText"),
     "packet_notes": ("packet_notes_input", "toPlainText"),
+    "appeal_letter_date": ("appeal_letter_date_input", "text"),
+    "appeal_to_name": ("appeal_to_name_input", "text"),
+    "appeal_to_title": ("appeal_to_title_input", "text"),
+    "appeal_to_office": ("appeal_to_office_input", "text"),
+    "appeal_to_address": ("appeal_to_address_input", "toPlainText"),
+    "appeal_from_name": ("appeal_from_name_input", "text"),
+    "appeal_from_title": ("appeal_from_title_input", "text"),
+    "appeal_from_organization": ("appeal_from_organization_input", "text"),
+    "appeal_from_address": ("appeal_from_address_input", "toPlainText"),
+    "appeal_from_phone": ("appeal_from_phone_input", "text"),
+    "appeal_from_fax": ("appeal_from_fax_input", "text"),
+    "appeal_from_email": ("appeal_from_email_input", "text"),
+    "appeal_from_npi": ("appeal_from_npi_input", "text"),
+    "appeal_subject_line": ("appeal_subject_line_input", "text"),
+    "appeal_denied_service": ("appeal_denied_service_input", "text"),
+    "appeal_denial_date": ("appeal_denial_date_input", "text"),
+    "appeal_denial_source": ("appeal_denial_source_input", "text"),
+    "appeal_opening_request": ("appeal_opening_request_input", "toPlainText"),
+    "appeal_case_timeline": ("appeal_case_timeline_input", "toPlainText"),
+    "appeal_clinical_necessity": ("appeal_clinical_necessity_input", "toPlainText"),
+    "appeal_denial_reason_1": ("appeal_denial_reason_1_input", "toPlainText"),
+    "appeal_denial_rebuttal_1": ("appeal_denial_rebuttal_1_input", "toPlainText"),
+    "appeal_denial_reason_2": ("appeal_denial_reason_2_input", "toPlainText"),
+    "appeal_denial_rebuttal_2": ("appeal_denial_rebuttal_2_input", "toPlainText"),
+    "appeal_policy_support": ("appeal_policy_support_input", "toPlainText"),
+    "appeal_medical_literature_support": ("appeal_medical_literature_support_input", "toPlainText"),
+    "appeal_requested_relief": ("appeal_requested_relief_input", "toPlainText"),
+    "appeal_exhibits": ("appeal_exhibits_input", "toPlainText"),
+    "appeal_closing_contact": ("appeal_closing_contact_input", "toPlainText"),
     "scenario_pathology_pattern": ("scenario_pathology_pattern_input", "text"),
     "scenario_conservative_duration": ("scenario_conservative_duration_input", "text"),
     "scenario_prior_esi_response": ("scenario_prior_esi_response_input", "text"),
@@ -1997,11 +2406,68 @@ def normalize_dev_tools_config(data=None):
     payload["legacy_gallery_paths"] = paths
     export_dir = str(payload.get("packet_builder_export_dir") or "").strip() or _default_export_dir()
     payload["packet_builder_export_dir"] = export_dir
+    source_profile_library_dir = str(payload.get("source_profile_library_dir") or "").strip() or export_dir
+    payload["source_profile_library_dir"] = source_profile_library_dir
     template_path = str(payload.get("va_form_10172_template_path") or "").strip()
     if not template_path:
         template_path = _default_va_form_10172_template_path()
     payload["va_form_10172_template_path"] = template_path
+    payload["packet_builder_reference_profiles"] = normalize_packet_builder_reference_profiles(
+        payload.get("packet_builder_reference_profiles")
+    )
     return payload
+
+
+def _normalize_reference_profile_text(value):
+    return str(value or "").strip()
+
+
+def _generate_reference_profile_id(profile_type, label):
+    seed = f"{profile_type}|{label}|{datetime.now().isoformat(timespec='microseconds')}"
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
+
+
+def _default_reference_profile_label(profile_type, values):
+    if profile_type == "va_sources":
+        return _normalize_reference_profile_text(values.get("facility")) or "VA Referring Source"
+    if profile_type == "pcp_pcm_profiles":
+        parts = [
+            _normalize_reference_profile_text(values.get("pcp_pcm_name")),
+            _normalize_reference_profile_text(values.get("pcp_pcm_phone")),
+        ]
+        return " | ".join(part for part in parts if part) or "PCP / PCM"
+    parts = [
+        _normalize_reference_profile_text(values.get("community_facility") or values.get("master_practice_name")),
+        _normalize_reference_profile_text(values.get("provider")),
+    ]
+    return " | ".join(part for part in parts if part) or "Community Care Destination"
+
+
+def normalize_packet_builder_reference_profiles(data=None):
+    source = dict(data or {})
+    normalized = {key: [] for key in PACKET_SOURCE_PROFILE_SPECS}
+    for profile_type, spec in PACKET_SOURCE_PROFILE_SPECS.items():
+        seen_ids = set()
+        for raw_entry in source.get(profile_type) or []:
+            entry = dict(raw_entry or {})
+            values = {
+                field_name: _normalize_reference_profile_text(entry.get(field_name))
+                for field_name, _label in spec["fields"]
+            }
+            label = _normalize_reference_profile_text(entry.get("label")) or _default_reference_profile_label(profile_type, values)
+            profile_id = _normalize_reference_profile_text(entry.get("profile_id")) or _generate_reference_profile_id(profile_type, label)
+            if profile_id in seen_ids:
+                profile_id = _generate_reference_profile_id(profile_type, f"{label}:{len(seen_ids)}")
+            seen_ids.add(profile_id)
+            normalized[profile_type].append(
+                {
+                    "profile_id": profile_id,
+                    "label": label,
+                    "updated_at": _normalize_reference_profile_text(entry.get("updated_at")) or None,
+                    **values,
+                }
+            )
+    return normalized
 
 
 def load_dev_tools_config():
@@ -2063,6 +2529,8 @@ def describe_packet_export_context(profile_name):
         position = get_patient_packet_position(profile_name)
         total = len(PATIENT_PACKET_PROFILE_ORDER)
         return f"Patient packet component: item {position} of {total}. Exports as part of the ordered patient packet bundle."
+    if is_appeal_letter_profile(profile_name):
+        return "Standalone export: Community Care Appeal Letter (post-denial / reconsideration document)."
     return "Standalone builder profile."
 
 
@@ -2264,6 +2732,122 @@ def _any_present(packet, field_names):
     return any(_has_meaningful_value(packet.get(field_name)) for field_name in field_names or [])
 
 
+def _appeal_requested_service(packet):
+    return str(packet.get("appeal_denied_service") or packet.get("requested_service") or "").strip()
+
+
+def _appeal_sender_name(packet):
+    return str(packet.get("appeal_from_name") or packet.get("provider") or packet.get("ordering_doctor") or "").strip()
+
+
+def _appeal_sender_title(packet):
+    return str(packet.get("appeal_from_title") or packet.get("provider_specialty") or packet.get("master_provider_specialty") or "").strip()
+
+
+def _appeal_sender_organization(packet):
+    return str(
+        packet.get("appeal_from_organization")
+        or packet.get("practice_name")
+        or packet.get("community_facility")
+        or packet.get("master_practice_name")
+        or ""
+    ).strip()
+
+
+def _appeal_sender_address(packet):
+    return str(packet.get("appeal_from_address") or packet.get("provider_address") or packet.get("master_provider_address") or "").strip()
+
+
+def _appeal_sender_phone(packet):
+    return str(packet.get("appeal_from_phone") or packet.get("provider_phone") or packet.get("master_provider_phone") or "").strip()
+
+
+def _appeal_sender_fax(packet):
+    return str(packet.get("appeal_from_fax") or packet.get("provider_fax") or packet.get("master_provider_fax") or "").strip()
+
+
+def _appeal_sender_email(packet):
+    return str(packet.get("appeal_from_email") or packet.get("provider_email") or packet.get("master_provider_email") or "").strip()
+
+
+def _appeal_sender_npi(packet):
+    return str(packet.get("appeal_from_npi") or packet.get("provider_npi") or packet.get("master_provider_npi") or "").strip()
+
+
+def _appeal_recipient_office(packet):
+    explicit = str(packet.get("appeal_to_office") or "").strip()
+    if explicit:
+        return explicit
+    facility = str(packet.get("facility") or "").strip()
+    if facility:
+        return f"Department of Veterans Affairs\nCommunity Care Office\n{facility}"
+    return "Department of Veterans Affairs\nCommunity Care Office"
+
+
+def _appeal_subject_line(packet):
+    explicit = str(packet.get("appeal_subject_line") or "").strip()
+    if explicit:
+        return explicit
+    service = _appeal_requested_service(packet)
+    if service:
+        return f"Appeal for reconsideration of denied request for {service}"
+    return "Appeal for reconsideration of denied community care request"
+
+
+def _appeal_case_timeline(packet):
+    explicit = str(packet.get("appeal_case_timeline") or "").strip()
+    if explicit:
+        return explicit
+    service = _appeal_requested_service(packet)
+    denial_date = str(packet.get("appeal_denial_date") or "").strip()
+    denial_source = str(packet.get("appeal_denial_source") or packet.get("facility") or "VA Community Care").strip()
+    if service and denial_date:
+        return (
+            f"The community care request for {service} was denied or not authorized on {denial_date} by "
+            f"{denial_source}. This appeal asks for reconsideration based on the clinical record and supporting "
+            "documentation submitted with the packet."
+        )
+    return ""
+
+
+def _appeal_denial_reasons(packet):
+    return _human_join([
+        str(packet.get("appeal_denial_reason_1") or "").strip(),
+        str(packet.get("appeal_denial_reason_2") or "").strip(),
+    ])
+
+
+def _appeal_denial_reference(packet):
+    denial_date = _wording_fact_text(packet, "appeal_denial_date")
+    denial_source = _wording_fact_text(packet, "appeal_denial_source")
+    if denial_date and denial_source:
+        return f"the denial dated {denial_date} issued by {denial_source}"
+    if denial_date:
+        return f"the denial dated {denial_date}"
+    if denial_source:
+        return f"the denial issued by {denial_source}"
+    return "the denial or non-authorization at issue"
+
+
+def _appeal_denial_reason_category(packet, ordinal=1):
+    reason_text = _clean_lower_text(packet.get(f"appeal_denial_reason_{ordinal}") or "")
+    if not reason_text:
+        return ""
+    if _text_contains_any(reason_text, "medical necessity", "not medically necessary", "not necessary"):
+        return "medical_necessity"
+    if _text_contains_any(reason_text, "investigational", "experimental", "unproven"):
+        return "investigational"
+    if _text_contains_any(reason_text, "incomplete", "missing", "documentation", "records not provided", "insufficient records"):
+        return "documentation"
+    if _text_contains_any(reason_text, "network", "out of network", "provider", "routing", "authorization", "referral"):
+        return "administrative"
+    if _text_contains_any(reason_text, "available", "availability", "access", "wait time", "driving time"):
+        return "availability"
+    if _text_contains_any(reason_text, "covered", "coverage", "policy", "benefit", "excluded"):
+        return "coverage"
+    return "generic"
+
+
 def _any_checked(packet, field_names):
     return any(bool(packet.get(field_name)) for field_name in field_names or [])
 
@@ -2308,6 +2892,28 @@ def build_profile_current_form_checks(profile_name, packet):
             ("Group NPI", _has_meaningful_value(packet.get("group_npi"))),
             ("Fax Number", _has_meaningful_value(packet.get("fax_number"))),
             ("Liaison Contact", _has_meaningful_value(packet.get("liaison_contact_info"))),
+        ]
+    if is_appeal_letter_profile(profile_name):
+        return [
+            ("Packet Title", _has_meaningful_value(packet.get("packet_title"))),
+            ("Appeal Date", _has_meaningful_value(packet.get("appeal_letter_date"))),
+            ("Recipient / Reviewing Office", _has_meaningful_value(packet.get("appeal_to_office")) or _has_meaningful_value(packet.get("facility"))),
+            ("Sender / Treating Office", _has_meaningful_value(_appeal_sender_name(packet)) or _has_meaningful_value(_appeal_sender_organization(packet))),
+            ("Sender Contact", any([
+                _has_meaningful_value(_appeal_sender_phone(packet)),
+                _has_meaningful_value(_appeal_sender_fax(packet)),
+                _has_meaningful_value(_appeal_sender_email(packet)),
+            ])),
+            ("Subject Line", _has_meaningful_value(_appeal_subject_line(packet))),
+            ("Denied Service / Request", _has_meaningful_value(_appeal_requested_service(packet))),
+            ("Denial Date or Source", _has_meaningful_value(packet.get("appeal_denial_date")) or _has_meaningful_value(packet.get("appeal_denial_source"))),
+            ("Opening Request", _has_meaningful_value(packet.get("appeal_opening_request"))),
+            ("Case Timeline", _has_meaningful_value(packet.get("appeal_case_timeline")) or _has_meaningful_value(_appeal_case_timeline(packet))),
+            ("Clinical Necessity / Medical Basis", _has_meaningful_value(packet.get("appeal_clinical_necessity"))),
+            ("Policy / Appeal Support", _has_meaningful_value(packet.get("appeal_policy_support"))),
+            ("Requested Relief", _has_meaningful_value(packet.get("appeal_requested_relief"))),
+            ("Supporting Exhibits", _has_meaningful_value(packet.get("appeal_exhibits"))),
+            ("Closing Contact Statement", _has_meaningful_value(packet.get("appeal_closing_contact"))),
         ]
     if is_submission_cover_profile(profile_name):
         return [
@@ -2535,76 +3141,133 @@ def build_profile_current_form_checks(profile_name, packet):
 
 
 def build_packet_inconsistency_messages(packet):
-    profile_name = str(packet.get("packet_profile") or "").strip()
-    messages = []
+    return [record.get("message") or "" for record in build_packet_inconsistency_records(packet) if record.get("message")]
 
-    def add_conflict(label, left_value, right_value, mode="text", allow_contains=False):
+
+def _inconsistency_owner_label(owner_key):
+    return {
+        "veteran_identifiers": "Veteran / VA Identifiers",
+        "va_source": "VA Referring Source",
+        "community_care": "Community Care Destination",
+        "pcp_pcm": "PCP / PCM",
+        "clinical_baseline": "Shared Clinical Baseline",
+    }.get(str(owner_key or "").strip(), "Shared Packet Header")
+
+
+def _default_inconsistency_resolution_hint(owner_key):
+    return {
+        "veteran_identifiers": "Usually keep the shared Veteran / VA identifier value for the packet and update the form-specific copy.",
+        "va_source": "Usually keep the shared VA referring source value and update the form-specific copy unless this packet intentionally uses a different VA routing entry.",
+        "community_care": "Usually keep the shared Community Care destination value and update the form-specific copy unless this packet intentionally refers to a different outside specialist.",
+        "pcp_pcm": "Usually keep the shared PCP / PCM value and update the form-specific copy unless the form intentionally requires a different primary care office.",
+        "clinical_baseline": "Usually keep the shared clinical baseline value and update the form-specific copy unless the form is intentionally narrowing the wording while staying clinically aligned.",
+    }.get(str(owner_key or "").strip(), "Usually keep the shared packet value and update the form-specific copy unless this packet intentionally needs a different entry.")
+
+
+def _format_inconsistency_message(label, owner_key, left_value, right_value, resolution_hint=""):
+    owner_label = _inconsistency_owner_label(owner_key)
+    hint = str(resolution_hint or "").strip() or _default_inconsistency_resolution_hint(owner_key)
+    return (
+        f"{label} is inconsistent. Owner: {owner_label}. {hint} "
+        f"Shared value '{str(left_value).strip()}' does not match this form's value '{str(right_value).strip()}'."
+    )
+
+
+def build_packet_inconsistency_records(packet):
+    profile_name = str(packet.get("packet_profile") or "").strip()
+    records = []
+
+    def add_conflict(label, left_value, right_value, owner_key="shared_packet_header", mode="text", allow_contains=False, resolution_hint=""):
         if _values_conflict(left_value, right_value, mode=mode, allow_contains=allow_contains):
-            messages.append(
-                f"{label} is inconsistent. Shared value '{str(left_value).strip()}' does not match this form's value '{str(right_value).strip()}'."
+            records.append(
+                {
+                    "label": label,
+                    "owner_key": owner_key,
+                    "owner_label": _inconsistency_owner_label(owner_key),
+                    "shared_value": str(left_value).strip(),
+                    "form_value": str(right_value).strip(),
+                    "resolution_hint": str(resolution_hint or "").strip() or _default_inconsistency_resolution_hint(owner_key),
+                    "message": _format_inconsistency_message(label, owner_key, left_value, right_value, resolution_hint=resolution_hint),
+                }
             )
 
     if is_submission_cover_profile(profile_name):
-        add_conflict("Primary diagnosis code", packet.get("icd_codes"), packet.get("primary_diagnosis_code"), mode="icd_first")
+        add_conflict("Primary diagnosis code", packet.get("icd_codes"), packet.get("primary_diagnosis_code"), owner_key="clinical_baseline", mode="icd_first")
 
     if is_seoc_request_profile(profile_name):
-        add_conflict("VA Medical Center", packet.get("facility"), packet.get("va_medical_center_name"))
-        add_conflict("Episode diagnosis", packet.get("diagnosis"), packet.get("episode_diagnosis"), allow_contains=True)
-        add_conflict("Episode ICD-10", packet.get("icd_codes"), packet.get("episode_icd_code"), mode="icd_first")
-        add_conflict("Last four SSN", packet.get("ssn"), packet.get("last_four_ssn"), mode="last_four")
-        add_conflict("Community Care treating provider NPI", packet.get("master_provider_npi"), packet.get("provider_npi"))
-        add_conflict("Community Care practice name", packet.get("master_practice_name"), packet.get("practice_name"), allow_contains=True)
-        add_conflict("Community Care practice phone", packet.get("master_provider_phone"), packet.get("provider_phone"))
-        add_conflict("Community Care practice fax", packet.get("master_provider_fax"), packet.get("provider_fax"))
+        add_conflict("VA Medical Center", packet.get("facility"), packet.get("va_medical_center_name"), owner_key="va_source")
+        add_conflict("Episode diagnosis", packet.get("diagnosis"), packet.get("episode_diagnosis"), owner_key="clinical_baseline", allow_contains=True)
+        add_conflict("Episode ICD-10", packet.get("icd_codes"), packet.get("episode_icd_code"), owner_key="clinical_baseline", mode="icd_first")
+        add_conflict("Last four SSN", packet.get("ssn"), packet.get("last_four_ssn"), owner_key="veteran_identifiers", mode="last_four")
+        add_conflict("Community Care treating provider NPI", packet.get("master_provider_npi"), packet.get("provider_npi"), owner_key="community_care")
+        add_conflict("Community Care practice name", packet.get("master_practice_name"), packet.get("practice_name"), owner_key="community_care", allow_contains=True)
+        add_conflict("Community Care practice phone", packet.get("master_provider_phone"), packet.get("provider_phone"), owner_key="community_care")
+        add_conflict("Community Care practice fax", packet.get("master_provider_fax"), packet.get("provider_fax"), owner_key="community_care")
 
     if is_consult_request_profile(profile_name):
-        add_conflict("VA claim number", packet.get("authorization_number"), packet.get("consult_va_claim_number"))
-        add_conflict("VA referring / ordering provider", packet.get("ordering_doctor"), packet.get("consult_referring_va_provider"), allow_contains=True)
-        add_conflict("Primary diagnosis", packet.get("diagnosis"), packet.get("consult_primary_diagnosis"), allow_contains=True)
-        add_conflict("Secondary diagnosis", packet.get("secondary_diagnosis"), packet.get("consult_secondary_diagnosis"), allow_contains=True)
-        add_conflict("VA Medical Center", packet.get("facility"), packet.get("va_medical_center_name"))
-        add_conflict("MRI date", packet.get("master_mri_date"), packet.get("consult_mri_date"))
-        add_conflict("MRI findings", packet.get("master_mri_findings"), packet.get("consult_mri_findings"), allow_contains=True)
-        add_conflict("Community Care treating provider NPI", packet.get("master_provider_npi"), packet.get("provider_npi"))
-        add_conflict("Community Care practice name", packet.get("master_practice_name"), packet.get("practice_name"), allow_contains=True)
-        add_conflict("Community Care practice address", packet.get("master_provider_address"), packet.get("provider_address"), allow_contains=True)
-        add_conflict("Community Care practice phone", packet.get("master_provider_phone"), packet.get("provider_phone"))
-        add_conflict("Community Care practice fax", packet.get("master_provider_fax"), packet.get("provider_fax"))
-        add_conflict("Community Care secure email", packet.get("master_provider_email"), packet.get("provider_email"))
+        add_conflict("VA claim number", packet.get("authorization_number"), packet.get("consult_va_claim_number"), owner_key="veteran_identifiers")
+        add_conflict(
+            "VA referring / ordering provider",
+            packet.get("ordering_doctor"),
+            packet.get("consult_referring_va_provider"),
+            owner_key="va_source",
+            allow_contains=True,
+            resolution_hint="This consult field should usually mirror the VA referring provider, not the outside specialist.",
+        )
+        add_conflict("Primary diagnosis", packet.get("diagnosis"), packet.get("consult_primary_diagnosis"), owner_key="clinical_baseline", allow_contains=True)
+        add_conflict("Secondary diagnosis", packet.get("secondary_diagnosis"), packet.get("consult_secondary_diagnosis"), owner_key="clinical_baseline", allow_contains=True)
+        add_conflict("VA Medical Center", packet.get("facility"), packet.get("va_medical_center_name"), owner_key="va_source")
+        add_conflict("MRI date", packet.get("master_mri_date"), packet.get("consult_mri_date"), owner_key="clinical_baseline")
+        add_conflict("MRI findings", packet.get("master_mri_findings"), packet.get("consult_mri_findings"), owner_key="clinical_baseline", allow_contains=True)
+        add_conflict("Community Care treating provider NPI", packet.get("master_provider_npi"), packet.get("provider_npi"), owner_key="community_care")
+        add_conflict("Community Care practice name", packet.get("master_practice_name"), packet.get("practice_name"), owner_key="community_care", allow_contains=True)
+        add_conflict("Community Care practice address", packet.get("master_provider_address"), packet.get("provider_address"), owner_key="community_care", allow_contains=True)
+        add_conflict("Community Care practice phone", packet.get("master_provider_phone"), packet.get("provider_phone"), owner_key="community_care")
+        add_conflict("Community Care practice fax", packet.get("master_provider_fax"), packet.get("provider_fax"), owner_key="community_care")
+        add_conflict("Community Care secure email", packet.get("master_provider_email"), packet.get("provider_email"), owner_key="community_care")
 
     if is_lomn_profile(profile_name):
-        add_conflict("VA claim number", packet.get("authorization_number"), packet.get("lmn_va_claim_number"))
-        add_conflict("Primary diagnosis", packet.get("diagnosis"), packet.get("lmn_primary_diagnosis"), allow_contains=True)
-        add_conflict("Secondary diagnosis", packet.get("secondary_diagnosis"), packet.get("lmn_secondary_diagnosis"), allow_contains=True)
-        add_conflict("MRI date", packet.get("master_mri_date"), packet.get("lmn_mri_date"))
-        add_conflict("MRI findings", packet.get("master_mri_findings"), packet.get("lmn_mri_findings"), allow_contains=True)
-        add_conflict("Community Care treating provider NPI", packet.get("master_provider_npi"), packet.get("provider_npi"))
-        add_conflict("Community Care practice name", packet.get("master_practice_name"), packet.get("practice_name"), allow_contains=True)
-        add_conflict("Community Care practice phone", packet.get("master_provider_phone"), packet.get("provider_phone"))
-        add_conflict("Community Care practice fax", packet.get("master_provider_fax"), packet.get("provider_fax"))
+        add_conflict("VA claim number", packet.get("authorization_number"), packet.get("lmn_va_claim_number"), owner_key="veteran_identifiers")
+        add_conflict("Primary diagnosis", packet.get("diagnosis"), packet.get("lmn_primary_diagnosis"), owner_key="clinical_baseline", allow_contains=True)
+        add_conflict("Secondary diagnosis", packet.get("secondary_diagnosis"), packet.get("lmn_secondary_diagnosis"), owner_key="clinical_baseline", allow_contains=True)
+        add_conflict("MRI date", packet.get("master_mri_date"), packet.get("lmn_mri_date"), owner_key="clinical_baseline")
+        add_conflict("MRI findings", packet.get("master_mri_findings"), packet.get("lmn_mri_findings"), owner_key="clinical_baseline", allow_contains=True)
+        add_conflict("Community Care treating provider NPI", packet.get("master_provider_npi"), packet.get("provider_npi"), owner_key="community_care")
+        add_conflict("Community Care practice name", packet.get("master_practice_name"), packet.get("practice_name"), owner_key="community_care", allow_contains=True)
+        add_conflict("Community Care practice phone", packet.get("master_provider_phone"), packet.get("provider_phone"), owner_key="community_care")
+        add_conflict("Community Care practice fax", packet.get("master_provider_fax"), packet.get("provider_fax"), owner_key="community_care")
 
     if is_clinical_documentation_profile(profile_name):
-        add_conflict("Primary diagnosis", packet.get("diagnosis"), packet.get("clinical_doc_primary_diagnosis"), allow_contains=True)
-        add_conflict("Secondary diagnosis", packet.get("secondary_diagnosis"), packet.get("clinical_doc_secondary_diagnosis"), allow_contains=True)
-        add_conflict("MRI date", packet.get("master_mri_date"), packet.get("clinical_doc_mri_date"))
-        add_conflict("Affected spinal levels", packet.get("master_affected_levels"), packet.get("clinical_doc_affected_levels"), allow_contains=True)
+        add_conflict("Primary diagnosis", packet.get("diagnosis"), packet.get("clinical_doc_primary_diagnosis"), owner_key="clinical_baseline", allow_contains=True)
+        add_conflict("Secondary diagnosis", packet.get("secondary_diagnosis"), packet.get("clinical_doc_secondary_diagnosis"), owner_key="clinical_baseline", allow_contains=True)
+        add_conflict("MRI date", packet.get("master_mri_date"), packet.get("clinical_doc_mri_date"), owner_key="clinical_baseline")
+        add_conflict("Affected spinal levels", packet.get("master_affected_levels"), packet.get("clinical_doc_affected_levels"), owner_key="clinical_baseline", allow_contains=True)
 
     if is_va_10172_profile(profile_name):
         add_conflict(
             "10-10172 CCN ordering provider name",
             packet.get("provider") or packet.get("ordering_doctor"),
             packet.get("va10172_ordering_provider_name_printed"),
+            owner_key="community_care",
             allow_contains=True,
+            resolution_hint="For VA Form 10-10172, this field should usually stay tied to the Community Care ordering / treating office rather than the VA referring clinician.",
         )
-        add_conflict("10-10172 ordering provider NPI", packet.get("master_provider_npi"), packet.get("va10172_ordering_provider_npi"))
-        add_conflict("10-10172 ordering provider phone", packet.get("master_provider_phone"), packet.get("va10172_ordering_provider_phone"))
-        add_conflict("10-10172 ordering provider fax", packet.get("master_provider_fax"), packet.get("va10172_ordering_provider_fax"))
-        add_conflict("10-10172 ordering provider secure email", packet.get("master_provider_email"), packet.get("va10172_ordering_provider_secure_email"))
-        add_conflict("10-10172 ordering provider office address", packet.get("master_provider_address"), packet.get("va10172_ordering_provider_office_address"), allow_contains=True)
-        add_conflict("Diagnosis description", packet.get("diagnosis"), packet.get("va10172_diagnosis_description"), allow_contains=True)
-        add_conflict("Requested CPT / HCPCS", packet.get("master_requested_cpt_code"), packet.get("va10172_requested_cpt_hcpcs_code"))
+        add_conflict("10-10172 ordering provider NPI", packet.get("master_provider_npi"), packet.get("va10172_ordering_provider_npi"), owner_key="community_care")
+        add_conflict("10-10172 ordering provider phone", packet.get("master_provider_phone"), packet.get("va10172_ordering_provider_phone"), owner_key="community_care")
+        add_conflict("10-10172 ordering provider fax", packet.get("master_provider_fax"), packet.get("va10172_ordering_provider_fax"), owner_key="community_care")
+        add_conflict("10-10172 ordering provider secure email", packet.get("master_provider_email"), packet.get("va10172_ordering_provider_secure_email"), owner_key="community_care")
+        add_conflict("10-10172 ordering provider office address", packet.get("master_provider_address"), packet.get("va10172_ordering_provider_office_address"), owner_key="community_care", allow_contains=True)
+        add_conflict(
+            "Diagnosis description",
+            packet.get("diagnosis"),
+            packet.get("va10172_diagnosis_description"),
+            owner_key="clinical_baseline",
+            allow_contains=True,
+            resolution_hint="This field can be narrower than the packet diagnosis, but it should still stay clinically aligned with the shared diagnosis baseline.",
+        )
+        add_conflict("Requested CPT / HCPCS", packet.get("master_requested_cpt_code"), packet.get("va10172_requested_cpt_hcpcs_code"), owner_key="clinical_baseline")
 
-    return messages
+    return records
 
 
 def _has_meaningful_value(value):
@@ -3717,6 +4380,1363 @@ class MultiSelectPromptField(QWidget):
         self._refresh_summary()
 
 
+WIZARD_SCENARIO_FIELD_SPECS = [
+    (
+        "scenario_pathology_pattern",
+        "wizard_scenario_pathology_pattern",
+        "Primary Pathology Pattern",
+        "Primary Pathology Pattern",
+        ["Discogenic / Annular", "Radicular", "Disc Displacement / Herniation", "Multilevel"],
+    ),
+    (
+        "scenario_conservative_duration",
+        "wizard_scenario_conservative_duration",
+        "Conservative Care Duration",
+        "Conservative Care Duration",
+        ["Over 90 Days", "Over 6 Months", "Over 12 Months"],
+    ),
+    (
+        "scenario_prior_esi_response",
+        "wizard_scenario_prior_esi_response",
+        "Prior ESI Response",
+        "Prior ESI Response",
+        ["None / Not Documented", "Temporary Relief", "Partial Relief", "No Relief"],
+    ),
+    (
+        "scenario_functional_emphasis",
+        "wizard_scenario_functional_emphasis",
+        "Functional Emphasis",
+        "Functional Emphasis",
+        ["Sleep Disruption", "Work Capacity", "Sitting / Standing Tolerance", "Daily Activities"],
+    ),
+    (
+        "scenario_request_framing",
+        "wizard_scenario_request_framing",
+        "Request Framing",
+        "Request Framing",
+        ["Procedure-Neutral Evaluation", "Defined Interventional Pathway", "Specific Requested Procedure"],
+    ),
+    (
+        "scenario_symptom_pattern",
+        "wizard_scenario_symptom_pattern",
+        "Symptom Pattern",
+        "Symptom Pattern",
+        ["Axial Lumbar Pain", "Discogenic Pattern", "Radicular Symptoms", "Activity-Related Exacerbation", "Position Intolerance"],
+    ),
+    (
+        "scenario_conservative_modalities",
+        "wizard_scenario_conservative_modalities",
+        "Conservative Modalities Tried",
+        "Conservative Modalities Already Tried",
+        ["Physical Therapy", "Home Exercise Program", "NSAIDs / Analgesics", "Activity Modification", "Prior ESI / Interventional"],
+    ),
+    (
+        "scenario_review_concern",
+        "wizard_scenario_review_concern",
+        "Primary Review Concern",
+        "Primary Review Concern",
+        ["Scope Must Stay Limited", "Medical Necessity Emphasis", "Imaging Correlation Emphasis", "Failed Conservative Care Emphasis"],
+    ),
+    (
+        "scenario_treatment_goals",
+        "wizard_scenario_treatment_goals",
+        "Treatment Goals",
+        "Treatment Goals To Emphasize",
+        ["Pain Reduction", "Functional Improvement", "Reduce Analgesics", "Avoid Surgery", "Prevent Progression"],
+    ),
+]
+
+
+def _dedupe_preserve_order(items):
+    ordered = []
+    seen = set()
+    for item in items or []:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        key = re.sub(r"\s+", " ", text).strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(text)
+    return ordered
+
+
+def build_wizard_scenario_recommendations(payload):
+    packet = normalize_packet_builder_payload(payload)
+    profile_name = str(packet.get("packet_profile") or "").strip()
+    combined_text = " | ".join(
+        part
+        for part in [
+            packet.get("diagnosis"),
+            packet.get("secondary_diagnosis"),
+            packet.get("requested_service"),
+            packet.get("master_mri_findings"),
+            packet.get("master_affected_levels"),
+            packet.get("clinical_summary"),
+            packet.get("clinical_doc_functional_impact"),
+            packet.get("consult_conservative_duration"),
+            packet.get("lmn_conservative_duration"),
+            packet.get("clinical_doc_conservative_duration"),
+        ]
+        if str(part or "").strip()
+    )
+    lower_text = _clean_lower_text(combined_text)
+
+    recommendations = {}
+
+    pathology = []
+    if _has_annular_pattern(packet):
+        pathology.append("Discogenic / Annular")
+    if _has_radicular_pattern(packet):
+        pathology.append("Radicular")
+    if _has_disc_displacement_pattern(packet):
+        pathology.append("Disc Displacement / Herniation")
+    if _has_multilevel_pattern(packet):
+        pathology.append("Multilevel")
+    if pathology:
+        recommendations["scenario_pathology_pattern"] = _dedupe_preserve_order(pathology)
+
+    duration_bucket = _duration_bucket(packet)
+    duration_map = {
+        "over_90_days": "Over 90 Days",
+        "over_6_months": "Over 6 Months",
+        "over_12_months": "Over 12 Months",
+    }
+    if duration_bucket in duration_map:
+        recommendations["scenario_conservative_duration"] = [duration_map[duration_bucket]]
+
+    prior_esi = []
+    if "temporary relief" in lower_text:
+        prior_esi.append("Temporary Relief")
+    elif "partial relief" in lower_text:
+        prior_esi.append("Partial Relief")
+    elif "no durable relief" in lower_text or "no relief" in lower_text:
+        prior_esi.append("No Relief")
+    elif (
+        "not tried" in lower_text
+        or "none documented" in lower_text
+        or "no prior esi" in lower_text
+        or "without prior esi" in lower_text
+    ):
+        prior_esi.append("None / Not Documented")
+    if prior_esi:
+        recommendations["scenario_prior_esi_response"] = _dedupe_preserve_order(prior_esi)
+
+    functional = []
+    if _has_sleep_limitation(packet):
+        functional.append("Sleep Disruption")
+    if _has_occupational_limitation(packet):
+        functional.append("Work Capacity")
+    if _has_position_tolerance_limitation(packet):
+        functional.append("Sitting / Standing Tolerance")
+    if str(packet.get("clinical_doc_functional_impact") or "").strip() or _text_contains_any(lower_text, "daily activit", "household", "ambulation"):
+        functional.append("Daily Activities")
+    if functional:
+        recommendations["scenario_functional_emphasis"] = _dedupe_preserve_order(functional)
+
+    request_framing = []
+    requested_service = _wording_fact_text(packet, "requested_service")
+    if _has_specific_requested_procedure(packet):
+        request_framing.append("Specific Requested Procedure")
+        if not is_referral_request_profile(profile_name):
+            request_framing.append("Defined Interventional Pathway")
+    elif requested_service:
+        if is_referral_request_profile(profile_name):
+            request_framing.append("Procedure-Neutral Evaluation")
+        else:
+            request_framing.append("Defined Interventional Pathway")
+    elif is_referral_request_profile(profile_name):
+        request_framing.append("Procedure-Neutral Evaluation")
+    if request_framing:
+        recommendations["scenario_request_framing"] = _dedupe_preserve_order(request_framing)
+
+    symptom_pattern = []
+    if _text_contains_any(lower_text, "axial") or _text_contains_any(packet.get("diagnosis"), "lumbar pain", "low back pain"):
+        symptom_pattern.append("Axial Lumbar Pain")
+    if _has_annular_pattern(packet):
+        symptom_pattern.append("Discogenic Pattern")
+    if _has_radicular_pattern(packet):
+        symptom_pattern.append("Radicular Symptoms")
+    if _text_contains_any(lower_text, "activity related", "activity-related", "exacerbat", "worse with activity", "bending", "lifting", "walking"):
+        symptom_pattern.append("Activity-Related Exacerbation")
+    if _has_position_tolerance_limitation(packet):
+        symptom_pattern.append("Position Intolerance")
+    if symptom_pattern:
+        recommendations["scenario_symptom_pattern"] = _dedupe_preserve_order(symptom_pattern)
+
+    conservative_modalities = []
+    if _has_failed_pt_history(packet):
+        conservative_modalities.append("Physical Therapy")
+    if _text_contains_any(lower_text, "home exercise"):
+        conservative_modalities.append("Home Exercise Program")
+    if _has_medication_history(packet):
+        conservative_modalities.append("NSAIDs / Analgesics")
+    if _text_contains_any(lower_text, "activity modification"):
+        conservative_modalities.append("Activity Modification")
+    if _has_failed_esi_history(packet):
+        conservative_modalities.append("Prior ESI / Interventional")
+    if conservative_modalities:
+        recommendations["scenario_conservative_modalities"] = _dedupe_preserve_order(conservative_modalities)
+
+    review_concern = []
+    if _has_specific_requested_procedure(packet) or is_seoc_request_profile(profile_name):
+        review_concern.append("Scope Must Stay Limited")
+    if _wording_fact_text(packet, "diagnosis") and requested_service:
+        review_concern.append("Medical Necessity Emphasis")
+    if _has_imaging_correlation(packet):
+        review_concern.append("Imaging Correlation Emphasis")
+    if _wording_fact_text(packet, "conservative_history") or conservative_modalities:
+        review_concern.append("Failed Conservative Care Emphasis")
+    if review_concern:
+        recommendations["scenario_review_concern"] = _dedupe_preserve_order(review_concern)
+
+    treatment_goals = []
+    if _wording_fact_text(packet, "diagnosis") or requested_service:
+        treatment_goals.extend(["Pain Reduction", "Functional Improvement"])
+    if _text_contains_any(lower_text, "analgesic", "opioid", "medication"):
+        treatment_goals.append("Reduce Analgesics")
+    if _text_contains_any(lower_text, "surgery", "surgical"):
+        treatment_goals.append("Avoid Surgery")
+    if _text_contains_any(lower_text, "progression", "worsen", "worsening", "degenerat"):
+        treatment_goals.append("Prevent Progression")
+    if treatment_goals:
+        recommendations["scenario_treatment_goals"] = _dedupe_preserve_order(treatment_goals)
+
+    return recommendations
+
+
+def _wizard_blueprint_profiles(profile_name):
+    normalized = str(profile_name or "").strip()
+    if normalized and normalized in PATIENT_PACKET_PROFILE_ORDER:
+        return [
+            candidate
+            for candidate in PATIENT_PACKET_PROFILE_ORDER
+            if wording_assist_specs_for_profile(candidate)
+        ]
+    if wording_assist_specs_for_profile(normalized):
+        return [normalized]
+    return []
+
+
+def build_wizard_fact_signals(payload):
+    packet = normalize_packet_builder_payload(payload)
+    lower_text = _clean_lower_text(
+        " | ".join(
+            part
+            for part in [
+                packet.get("diagnosis"),
+                packet.get("secondary_diagnosis"),
+                packet.get("requested_service"),
+                packet.get("master_mri_findings"),
+                packet.get("master_affected_levels"),
+                packet.get("clinical_summary"),
+                packet.get("clinical_doc_functional_impact"),
+                packet.get("consult_conservative_duration"),
+                packet.get("lmn_conservative_duration"),
+                packet.get("clinical_doc_conservative_duration"),
+            ]
+            if str(part or "").strip()
+        )
+    )
+    signals = []
+    if _first_nonempty_text(packet.get("patient_name"), packet.get("date_of_birth"), packet.get("authorization_number")):
+        signals.append("Veteran identifiers are already staged, so the wizard can keep the packet tied to one case from the start.")
+    if _wording_fact_text(packet, "diagnosis"):
+        if _wording_fact_text(packet, "icd_codes"):
+            signals.append("Diagnosis and ICD coding are both present, which helps the medical-necessity language stay anchored instead of generic.")
+        else:
+            signals.append("A primary diagnosis is already staged, which unlocks diagnosis-based wording families.")
+    if _wording_fact_text(packet, "requested_service"):
+        signals.append("The requested service is defined, so the request-framing prompts can stay narrow instead of drifting into open-ended care.")
+    if _wording_fact_text(packet, "mri_findings"):
+        imaging_line = "MRI findings are present"
+        if _wording_fact_text(packet, "affected_levels"):
+            imaging_line += " with affected levels noted"
+        signals.append(imaging_line + ", which supports the imaging-correlation blueprint families.")
+    duration_bucket = _duration_bucket(packet)
+    if duration_bucket == "over_12_months":
+        signals.append("The staged conservative-care duration reads as longer than 12 months, which points the wizard toward chronic-care and failed-conservative-treatment language.")
+    elif duration_bucket == "over_6_months":
+        signals.append("The staged conservative-care duration reads as longer than 6 months, which supports a sustained-symptom clinical basis.")
+    elif duration_bucket == "over_90_days":
+        signals.append("The staged conservative-care duration already clears the 90-day threshold, which supports denial-sensitive conservative-care wording.")
+    if _has_failed_pt_history(packet) or _has_medication_history(packet) or _has_failed_esi_history(packet) or _text_contains_any(lower_text, "activity modification", "home exercise"):
+        signals.append("The packet facts already show conservative treatment history, so the wizard can lean into documented care failure instead of placeholder treatment language.")
+    if _wording_fact_text(packet, "functional_impact"):
+        signals.append("Functional limitation detail is present, which gives the wizard a stronger basis for functional-impact and risk-if-delayed wording.")
+    recommendations = build_wizard_scenario_recommendations(packet)
+    if recommendations:
+        steer = []
+        for key in (
+            "scenario_pathology_pattern",
+            "scenario_conservative_duration",
+            "scenario_request_framing",
+            "scenario_review_concern",
+        ):
+            steer.extend(recommendations.get(key) or [])
+        steer = _dedupe_preserve_order(steer)
+        if steer:
+            signals.append("Current packet facts would steer prompts toward: " + ", ".join(steer[:5]) + ".")
+    return signals
+
+
+def build_wizard_blueprint_plan(base_payload):
+    packet = normalize_packet_builder_payload(base_payload)
+    blueprint_rows = {}
+    for profile_name in _wizard_blueprint_profiles(packet.get("packet_profile")):
+        profile_payload = build_profile_export_payload(packet, profile_name)
+        profile_title = default_title_for_profile(profile_name) or profile_name
+        for entry in build_wording_assist_entries(profile_payload):
+            label = str(entry.get("scenario_label") or "").strip()
+            if not label:
+                continue
+            row = blueprint_rows.setdefault(
+                label,
+                {
+                    "label": label,
+                    "use_when": "",
+                    "profiles": [],
+                    "fields": [],
+                    "missing_facts": [],
+                    "review_fields": 0,
+                },
+            )
+            use_when = str(entry.get("scenario_use_when") or "").strip()
+            if use_when and not row["use_when"]:
+                row["use_when"] = use_when
+            if profile_title not in row["profiles"]:
+                row["profiles"].append(profile_title)
+            if entry["label"] not in row["fields"]:
+                row["fields"].append(entry["label"])
+            for fact in entry.get("missing_facts") or []:
+                if fact not in row["missing_facts"]:
+                    row["missing_facts"].append(fact)
+            if entry.get("status_key") == "needs_review":
+                row["review_fields"] += 1
+    return sorted(
+        blueprint_rows.values(),
+        key=lambda row: (-len(row["fields"]), -len(row["profiles"]), row["label"].lower()),
+    )
+
+
+def _wizard_profile_priority(profile_name):
+    if is_clinical_documentation_profile(profile_name):
+        return 5
+    if is_consult_request_profile(profile_name):
+        return 4
+    if is_lomn_profile(profile_name):
+        return 4
+    if is_seoc_request_profile(profile_name):
+        return 3
+    if is_va_10172_profile(profile_name):
+        return 3
+    return 1
+
+
+def _wizard_profile_action_reason(profile_name, ready_count, review_count, missing_facts, blueprints):
+    if is_clinical_documentation_profile(profile_name):
+        if missing_facts:
+            return "Best place to strengthen the packet backbone before the downstream request forms."
+        return "Best first drafting move when you want stronger downstream support for consult, SEOC, and LOMN wording."
+    if review_count and ready_count:
+        return f"{ready_count} denial-sensitive wording field(s) are already fact-supported and ready for review."
+    if blueprints and not missing_facts:
+        return "Core facts are already strong enough for blueprint-driven drafting on this form."
+    if missing_facts:
+        return "Still needs a few shared packet facts before this form will draft cleanly."
+    return "Use this form after the shared packet facts are staged."
+
+
+def build_wizard_form_worklist(base_payload):
+    packet = normalize_packet_builder_payload(base_payload)
+    rows = []
+    for profile_name in _wizard_blueprint_profiles(packet.get("packet_profile")):
+        profile_payload = build_profile_export_payload(packet, profile_name)
+        entries = build_wording_assist_entries(profile_payload)
+        if not entries:
+            continue
+        ready_entries = [entry for entry in entries if not entry.get("missing_facts")]
+        review_entries = [entry for entry in entries if entry.get("status_key") == "needs_review" and not entry.get("missing_facts")]
+        missing_facts = []
+        for entry in entries:
+            for fact in entry.get("missing_facts") or []:
+                if fact not in missing_facts:
+                    missing_facts.append(fact)
+        blueprints = _dedupe_preserve_order(
+            [entry.get("scenario_label") for entry in entries if str(entry.get("scenario_label") or "").strip()]
+        )
+        score = (
+            _wizard_profile_priority(profile_name) * 100
+            + len(ready_entries) * 20
+            + len(review_entries) * 10
+            - len(missing_facts) * 8
+        )
+        rows.append(
+            {
+                "profile_name": profile_name,
+                "title": default_title_for_profile(profile_name) or profile_name,
+                "ready_count": len(ready_entries),
+                "review_count": len(review_entries),
+                "missing_facts": missing_facts,
+                "blueprints": blueprints,
+                "top_fields": [entry.get("label") for entry in entries[:3]],
+                "score": score,
+                "reason": _wizard_profile_action_reason(
+                    profile_name,
+                    len(ready_entries),
+                    len(review_entries),
+                    missing_facts,
+                    blueprints,
+                ),
+            }
+        )
+    return sorted(rows, key=lambda row: (-row["score"], row["title"].lower()))
+
+
+def build_wizard_field_worklist(base_payload):
+    packet = normalize_packet_builder_payload(base_payload)
+    rows = []
+    for profile_name in _wizard_blueprint_profiles(packet.get("packet_profile")):
+        profile_payload = build_profile_export_payload(packet, profile_name)
+        profile_title = default_title_for_profile(profile_name) or profile_name
+        for entry in build_wording_assist_entries(profile_payload):
+            score = (
+                _wizard_profile_priority(profile_name) * 100
+                + (30 if not entry.get("missing_facts") else 0)
+                + (20 if entry.get("status_key") == "needs_review" else 0)
+                + (10 if str(entry.get("scenario_label") or "").strip() else 0)
+                - len(entry.get("missing_facts") or []) * 6
+            )
+            rows.append(
+                {
+                    "profile_title": profile_title,
+                    "field_label": str(entry.get("label") or "").strip(),
+                    "status_key": str(entry.get("status_key") or "").strip(),
+                    "missing_facts": list(entry.get("missing_facts") or []),
+                    "blueprint": str(entry.get("scenario_label") or "").strip(),
+                    "use_when": str(entry.get("scenario_use_when") or "").strip(),
+                    "score": score,
+                }
+            )
+    return sorted(rows, key=lambda row: (-row["score"], row["profile_title"].lower(), row["field_label"].lower()))
+
+
+def build_wizard_weak_fact_summary(base_payload):
+    packet = normalize_packet_builder_payload(base_payload)
+    fact_rows = {}
+    for profile_name in _wizard_blueprint_profiles(packet.get("packet_profile")):
+        profile_payload = build_profile_export_payload(packet, profile_name)
+        profile_title = default_title_for_profile(profile_name) or profile_name
+        for entry in build_wording_assist_entries(profile_payload):
+            for fact in entry.get("missing_facts") or []:
+                row = fact_rows.setdefault(
+                    fact,
+                    {
+                        "label": fact,
+                        "count": 0,
+                        "profiles": [],
+                        "fields": [],
+                    },
+                )
+                row["count"] += 1
+                if profile_title not in row["profiles"]:
+                    row["profiles"].append(profile_title)
+                field_label = str(entry.get("label") or "").strip()
+                if field_label and field_label not in row["fields"]:
+                    row["fields"].append(field_label)
+    return sorted(
+        fact_rows.values(),
+        key=lambda row: (-row["count"], -len(row["profiles"]), row["label"].lower()),
+    )
+
+
+class PacketStartWizardDialog(QDialog):
+    def __init__(self, profile_store=None, starting_profile="", parent=None):
+        super().__init__(parent)
+        self._profile_store = normalize_packet_builder_reference_profiles(profile_store or {})
+        self._start_blank = False
+        self._steps = [
+            ("Step 1 of 5", "Choose Starting Form", "Select the form you want to open first. Bundle export can still create the full packet later."),
+            ("Step 2 of 5", "Choose Saved Profiles", "Apply any saved VA, Community Care, or PCP / PCM profiles now so the intake starts prefilled."),
+            ("Step 3 of 5", "Enter Core Packet Facts", "Capture the veteran basics and the key clinical facts you usually know before drafting."),
+            ("Step 4 of 5", "Steer Scenario Prompts", "Use the wizard's prompt recommendations to steer the right wording blueprint family before you enter the form workspace."),
+            ("Step 5 of 5", "Review Launch Plan", "Confirm what the wizard is staging, which wording blueprints are likely to engage, and where the user should start drafting first."),
+        ]
+
+        self.setWindowTitle("Start New Packet")
+        self.setModal(True)
+        self.resize(820, 760)
+        self.setStyleSheet(
+            """
+            QDialog { background:#0F1823; color:#E5E7EB; }
+            QLabel { color:#E5E7EB; }
+            QLineEdit, QComboBox, QTextEdit {
+                background:#111A25; border:1px solid #253243; border-radius:8px; color:#DCE6F2; padding:8px;
+            }
+            QLineEdit:focus, QComboBox:focus, QTextEdit:focus {
+                border:1px solid #69BCFF;
+            }
+            QComboBox QAbstractItemView {
+                background:#111A25; color:#DCE6F2; border:1px solid #34506B;
+                selection-background-color:#223246; selection-color:#FFFFFF; outline:0;
+            }
+            QGroupBox {
+                background-color:#0F1823; border:1px solid #243446; border-radius:10px; margin-top:10px; padding-top:14px;
+            }
+            QGroupBox:title {
+                subcontrol-origin: margin; left: 12px; padding: 0 4px;
+            }
+            QPushButton {
+                background-color:#1D2A3A; color:#FFFFFF; border:1px solid #34506B; border-radius:8px;
+                padding:6px 14px; font-size:13px; font-weight:600;
+            }
+            QPushButton:hover { background-color:#223246; }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        self.step_badge = QLabel("")
+        self.step_badge.setStyleSheet("color:#69BCFF; font-size:12px; font-weight:700; text-transform:uppercase;")
+        layout.addWidget(self.step_badge)
+
+        self.step_title_label = QLabel("")
+        self.step_title_label.setStyleSheet("font-size:22px; font-weight:700; color:#FFFFFF;")
+        self.step_title_label.setWordWrap(True)
+        layout.addWidget(self.step_title_label)
+
+        self.step_help_label = QLabel("")
+        self.step_help_label.setWordWrap(True)
+        self.step_help_label.setStyleSheet("color:#BFD0E3;")
+        layout.addWidget(self.step_help_label)
+
+        self.stack = QStackedWidget()
+        self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.stack, stretch=1)
+
+        self.stack.addWidget(self._wrap_wizard_page(self._build_start_form_page(starting_profile)))
+        self.stack.addWidget(self._wrap_wizard_page(self._build_saved_profiles_page()))
+        self.stack.addWidget(self._wrap_wizard_page(self._build_core_facts_page()))
+        self.stack.addWidget(self._wrap_wizard_page(self._build_scenario_page()))
+        self.stack.addWidget(self._wrap_wizard_page(self._build_review_page()))
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(8)
+        self.start_blank_button = QPushButton("Start Blank Instead")
+        self.start_blank_button.clicked.connect(self._accept_blank)
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self._go_back)
+        self.next_button = QPushButton("Next")
+        self.next_button.clicked.connect(self._go_next)
+        self.create_button = QPushButton("Create Packet")
+        self.create_button.clicked.connect(self.accept)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(self.start_blank_button, 0)
+        button_row.addStretch(1)
+        button_row.addWidget(self.cancel_button)
+        button_row.addWidget(self.back_button)
+        button_row.addWidget(self.next_button)
+        button_row.addWidget(self.create_button)
+        layout.addLayout(button_row)
+
+        self.stack.currentChanged.connect(self._refresh_navigation)
+        self._connect_live_refresh()
+        self._refresh_scenario_guidance()
+        self._refresh_review_summary()
+        self._refresh_navigation()
+
+    def _wizard_group(self, title):
+        group = QGroupBox(title)
+        group.setStyleSheet("QGroupBox { font-weight:700; color:#E5E7EB; }")
+        return group
+
+    def _wrap_wizard_page(self, page):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background:#0F1823; border:none; }")
+        page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        scroll.setWidget(page)
+        return scroll
+
+    def _build_start_form_page(self, starting_profile):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        group = self._wizard_group("Starting Form")
+        form = QFormLayout(group)
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(8)
+
+        self.packet_profile_combo = QComboBox()
+        for profile_name in PACKET_BUILDER_PROFILES:
+            self.packet_profile_combo.addItem(profile_name, profile_name)
+        start_profile = str(starting_profile or "").strip() or PACKET_BUILDER_PROFILES[0]
+        start_index = self.packet_profile_combo.findData(start_profile)
+        self.packet_profile_combo.setCurrentIndex(start_index if start_index >= 0 else 0)
+        form.addRow("Open This Form First", self.packet_profile_combo)
+
+        note = QLabel(
+            "Tip: choose Submission Cover Sheet or Community Care Referral Request when you want the cleanest start. "
+            "Choose another form if you are resuming work from a particular document."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#8FA6C1;")
+        form.addRow(note)
+        layout.addWidget(group)
+        layout.addStretch(1)
+        return page
+
+    def _build_profile_selector_row(self, profile_type):
+        widget = QWidget()
+        row = QVBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+
+        combo = QComboBox()
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        setattr(self, f"wizard_{profile_type}_combo", combo)
+        combo.currentIndexChanged.connect(lambda _=0, key=profile_type: self._refresh_profile_note(key))
+        row.addWidget(combo)
+
+        note = QLabel("")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#8FA6C1; font-size:12px;")
+        setattr(self, f"wizard_{profile_type}_note", note)
+        row.addWidget(note)
+        return widget
+
+    def _build_saved_profiles_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        group = self._wizard_group("Reusable Profiles")
+        form = QFormLayout(group)
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+
+        form.addRow("VA Referring Source", self._build_profile_selector_row("va_sources"))
+        form.addRow("Community Care Destination", self._build_profile_selector_row("community_destinations"))
+        form.addRow("PCP / PCM", self._build_profile_selector_row("pcp_pcm_profiles"))
+        layout.addWidget(group)
+        layout.addStretch(1)
+        self._populate_profile_combos()
+        return page
+
+    def _build_core_facts_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        veteran_group = self._wizard_group("Veteran / Referral Basics")
+        veteran_form = QFormLayout(veteran_group)
+        veteran_form.setLabelAlignment(Qt.AlignLeft)
+        veteran_form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        veteran_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        veteran_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        veteran_form.setHorizontalSpacing(14)
+        veteran_form.setVerticalSpacing(8)
+
+        self.wizard_patient_name_input = QLineEdit()
+        self.wizard_patient_name_input.setPlaceholderText("Veteran full legal name")
+        veteran_form.addRow("Veteran Name", self.wizard_patient_name_input)
+        self.wizard_dob_input = QLineEdit()
+        self.wizard_dob_input.setPlaceholderText("MM/DD/YYYY")
+        veteran_form.addRow("Date of Birth", self.wizard_dob_input)
+        self.wizard_auth_input = QLineEdit()
+        self.wizard_auth_input.setPlaceholderText("VA authorization or referral number")
+        veteran_form.addRow("VA Authorization Number", self.wizard_auth_input)
+        self.wizard_icn_input = QLineEdit()
+        self.wizard_icn_input.setPlaceholderText("VA ICN if known")
+        veteran_form.addRow("VA ICN", self.wizard_icn_input)
+        layout.addWidget(veteran_group)
+
+        clinical_group = self._wizard_group("Core Clinical Facts")
+        clinical_form = QFormLayout(clinical_group)
+        clinical_form.setLabelAlignment(Qt.AlignLeft)
+        clinical_form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        clinical_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        clinical_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        clinical_form.setHorizontalSpacing(14)
+        clinical_form.setVerticalSpacing(8)
+
+        self.wizard_requested_service_input = QLineEdit()
+        self.wizard_requested_service_input.setPlaceholderText("Requested service")
+        clinical_form.addRow("Requested Service", self.wizard_requested_service_input)
+        self.wizard_diagnosis_input = QLineEdit()
+        self.wizard_diagnosis_input.setPlaceholderText("Primary diagnosis")
+        clinical_form.addRow("Primary Diagnosis", self.wizard_diagnosis_input)
+        self.wizard_secondary_diagnosis_input = QLineEdit()
+        self.wizard_secondary_diagnosis_input.setPlaceholderText("Secondary diagnosis")
+        clinical_form.addRow("Secondary Diagnosis", self.wizard_secondary_diagnosis_input)
+        self.wizard_icd_codes_input = QLineEdit()
+        self.wizard_icd_codes_input.setPlaceholderText("ICD-10 codes")
+        clinical_form.addRow("ICD Codes", self.wizard_icd_codes_input)
+        self.wizard_mri_date_input = QLineEdit()
+        self.wizard_mri_date_input.setPlaceholderText("MM/DD/YYYY")
+        clinical_form.addRow("MRI Date", self.wizard_mri_date_input)
+        self.wizard_mri_findings_input = QLineEdit()
+        self.wizard_mri_findings_input.setPlaceholderText("MRI findings")
+        clinical_form.addRow("MRI Findings", self.wizard_mri_findings_input)
+        self.wizard_affected_levels_input = QLineEdit()
+        self.wizard_affected_levels_input.setPlaceholderText("Affected spinal levels")
+        clinical_form.addRow("Affected Levels", self.wizard_affected_levels_input)
+        self.wizard_conservative_duration_input = QLineEdit()
+        self.wizard_conservative_duration_input.setPlaceholderText("90 days, 6 months, 12 months, 1 year")
+        clinical_form.addRow("Conservative Care Duration", self.wizard_conservative_duration_input)
+        self.wizard_clinical_summary_input = QTextEdit()
+        self.wizard_clinical_summary_input.setMinimumHeight(90)
+        self.wizard_clinical_summary_input.setPlaceholderText("Short clinical summary or symptom statement")
+        clinical_form.addRow("Clinical Summary / Symptoms", self.wizard_clinical_summary_input)
+        self.wizard_functional_impact_input = QTextEdit()
+        self.wizard_functional_impact_input.setMinimumHeight(90)
+        self.wizard_functional_impact_input.setPlaceholderText("Sleep, sitting, standing, work, household tasks, walking tolerance")
+        clinical_form.addRow("Functional Impact", self.wizard_functional_impact_input)
+        layout.addWidget(clinical_group)
+        return page
+
+    def _build_scenario_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        group = self._wizard_group("Scenario Prompts")
+        form = QFormLayout(group)
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(8)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(8)
+        self.wizard_recommend_prompts_button = QPushButton("Recommend Prompts")
+        self.wizard_recommend_prompts_button.clicked.connect(self.apply_wizard_recommended_prompts)
+        self.wizard_clear_prompts_button = QPushButton("Reset All To Auto")
+        self.wizard_clear_prompts_button.clicked.connect(self.reset_wizard_prompts_to_auto)
+        button_row.addWidget(self.wizard_recommend_prompts_button, 0)
+        button_row.addWidget(self.wizard_clear_prompts_button, 0)
+        button_row.addStretch(1)
+        form.addRow(button_row)
+
+        self.wizard_scenario_guidance_label = QLabel("")
+        self.wizard_scenario_guidance_label.setWordWrap(True)
+        self.wizard_scenario_guidance_label.setStyleSheet("color:#8FA6C1;")
+        form.addRow(self.wizard_scenario_guidance_label)
+
+        for field_name, attr_name, row_label, title, options in WIZARD_SCENARIO_FIELD_SPECS:
+            widget = MultiSelectPromptField(title, options)
+            setattr(self, attr_name, widget)
+            form.addRow(row_label, widget)
+
+        note = QLabel(
+            "Leave any prompt on Auto if you do not want it to steer the wording engine yet. "
+            "Recommend Prompts is not random: it reads the staged diagnosis, requested service, MRI findings, symptom summary, duration, functional impact, and profile context to seed the most likely blueprint families."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#8FA6C1;")
+        form.addRow(note)
+        layout.addWidget(group)
+        layout.addStretch(1)
+        return page
+
+    def _build_review_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        group = self._wizard_group("Launch Summary")
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(12, 14, 12, 12)
+        group_layout.setSpacing(10)
+
+        self.wizard_review_intro_label = QLabel(
+            "Wizard v2 summarizes the packet start, the likely wording-assist blueprint families, and the first drafting move for the selected form."
+        )
+        self.wizard_review_intro_label.setWordWrap(True)
+        self.wizard_review_intro_label.setStyleSheet("color:#8FA6C1;")
+        group_layout.addWidget(self.wizard_review_intro_label)
+
+        self.wizard_review_summary_view = QTextEdit()
+        self.wizard_review_summary_view.setReadOnly(True)
+        self.wizard_review_summary_view.setMinimumHeight(360)
+        self.wizard_review_summary_view.setStyleSheet(
+            "background:#111A25; border:1px solid #253243; border-radius:8px; color:#DCE6F2; padding:8px;"
+        )
+        group_layout.addWidget(self.wizard_review_summary_view, stretch=1)
+
+        self.wizard_review_guidance_label = QLabel("")
+        self.wizard_review_guidance_label.setWordWrap(True)
+        self.wizard_review_guidance_label.setStyleSheet("color:#BFD0E3;")
+        group_layout.addWidget(self.wizard_review_guidance_label)
+
+        layout.addWidget(group, stretch=1)
+        return page
+
+    def _profile_entry(self, profile_type, profile_id):
+        normalized_id = str(profile_id or "").strip()
+        if not normalized_id:
+            return None
+        for entry in self._profile_store.get(profile_type) or []:
+            if str(entry.get("profile_id") or "").strip() == normalized_id:
+                return dict(entry)
+        return None
+
+    def _profile_description(self, profile_type, entry):
+        spec = PACKET_SOURCE_PROFILE_SPECS.get(profile_type, {})
+        if not entry:
+            return spec.get("empty_label") or "No saved profiles yet."
+        if profile_type == "va_sources":
+            parts = [f"Facility: {entry.get('facility') or 'Pending'}"]
+            return " | ".join(parts)
+        if profile_type == "pcp_pcm_profiles":
+            parts = [f"Name: {entry.get('pcp_pcm_name') or 'Pending'}"]
+            if entry.get("pcp_pcm_phone"):
+                parts.append(f"Phone: {entry.get('pcp_pcm_phone')}")
+            if entry.get("pcp_pcm_fax"):
+                parts.append(f"Fax: {entry.get('pcp_pcm_fax')}")
+            return " | ".join(parts)
+        parts = [
+            f"Practice: {entry.get('community_facility') or entry.get('master_practice_name') or 'Pending'}",
+            f"Provider: {entry.get('provider') or 'Pending'}",
+        ]
+        return " | ".join(parts)
+
+    def _populate_profile_combos(self):
+        for profile_type, spec in PACKET_SOURCE_PROFILE_SPECS.items():
+            combo = getattr(self, f"wizard_{profile_type}_combo", None)
+            note = getattr(self, f"wizard_{profile_type}_note", None)
+            if combo is None or note is None:
+                continue
+            combo.clear()
+            combo.addItem(f"(No saved {spec['title'].lower()} selected)", "")
+            for entry in self._profile_store.get(profile_type) or []:
+                combo.addItem(str(entry.get("label") or spec["title"]), str(entry.get("profile_id") or ""))
+            note.setText(self._profile_description(profile_type, None))
+
+    def _refresh_profile_note(self, profile_type):
+        combo = getattr(self, f"wizard_{profile_type}_combo", None)
+        note = getattr(self, f"wizard_{profile_type}_note", None)
+        if combo is None or note is None:
+            return
+        note.setText(self._profile_description(profile_type, self._profile_entry(profile_type, combo.currentData())))
+
+    def _connect_live_refresh(self):
+        widgets = [
+            self.packet_profile_combo,
+            self.wizard_va_sources_combo,
+            self.wizard_community_destinations_combo,
+            self.wizard_pcp_pcm_profiles_combo,
+            self.wizard_patient_name_input,
+            self.wizard_dob_input,
+            self.wizard_auth_input,
+            self.wizard_icn_input,
+            self.wizard_requested_service_input,
+            self.wizard_diagnosis_input,
+            self.wizard_secondary_diagnosis_input,
+            self.wizard_icd_codes_input,
+            self.wizard_mri_date_input,
+            self.wizard_mri_findings_input,
+            self.wizard_affected_levels_input,
+            self.wizard_conservative_duration_input,
+            self.wizard_clinical_summary_input,
+            self.wizard_functional_impact_input,
+        ]
+        for _field_name, attr_name, _row_label, _title, _options in WIZARD_SCENARIO_FIELD_SPECS:
+            widgets.append(getattr(self, attr_name))
+        for widget in widgets:
+            signal = None
+            if hasattr(widget, "textChanged"):
+                signal = widget.textChanged
+            elif hasattr(widget, "currentIndexChanged"):
+                signal = widget.currentIndexChanged
+            if signal is not None:
+                signal.connect(lambda *_: self._on_wizard_inputs_changed())
+
+    def _on_wizard_inputs_changed(self):
+        self._refresh_scenario_guidance()
+        self._refresh_review_summary()
+
+    def _wizard_payload_base(self):
+        payload = default_packet_builder_payload()
+        payload["packet_profile"] = str(self.packet_profile_combo.currentData() or self.packet_profile_combo.currentText() or payload["packet_profile"]).strip()
+
+        selected_profile_ids = {
+            "va_sources": str(getattr(self, "wizard_va_sources_combo").currentData() or "").strip(),
+            "community_destinations": str(getattr(self, "wizard_community_destinations_combo").currentData() or "").strip(),
+            "pcp_pcm_profiles": str(getattr(self, "wizard_pcp_pcm_profiles_combo").currentData() or "").strip(),
+        }
+        payload["selected_va_source_profile_id"] = selected_profile_ids["va_sources"]
+        payload["selected_community_destination_profile_id"] = selected_profile_ids["community_destinations"]
+        payload["selected_pcp_pcm_profile_id"] = selected_profile_ids["pcp_pcm_profiles"]
+
+        for profile_type, profile_id in selected_profile_ids.items():
+            entry = self._profile_entry(profile_type, profile_id)
+            if not entry:
+                continue
+            for field_name, _label in PACKET_SOURCE_PROFILE_SPECS.get(profile_type, {}).get("fields", []):
+                payload[field_name] = str(entry.get(field_name) or "").strip()
+
+        conservative_duration = self.wizard_conservative_duration_input.text().strip()
+        payload.update(
+            {
+                "patient_name": self.wizard_patient_name_input.text().strip(),
+                "date_of_birth": self.wizard_dob_input.text().strip(),
+                "authorization_number": self.wizard_auth_input.text().strip(),
+                "va_icn": self.wizard_icn_input.text().strip(),
+                "requested_service": self.wizard_requested_service_input.text().strip(),
+                "diagnosis": self.wizard_diagnosis_input.text().strip(),
+                "secondary_diagnosis": self.wizard_secondary_diagnosis_input.text().strip(),
+                "icd_codes": self.wizard_icd_codes_input.text().strip(),
+                "master_mri_date": self.wizard_mri_date_input.text().strip(),
+                "master_mri_findings": self.wizard_mri_findings_input.text().strip(),
+                "master_affected_levels": self.wizard_affected_levels_input.text().strip(),
+                "clinical_summary": self.wizard_clinical_summary_input.toPlainText().strip(),
+                "clinical_doc_functional_impact": self.wizard_functional_impact_input.toPlainText().strip(),
+                "consult_conservative_duration": conservative_duration,
+                "lmn_conservative_duration": conservative_duration,
+                "clinical_doc_conservative_duration": conservative_duration,
+            }
+        )
+        return payload
+
+    def _wizard_payload_preview(self, include_current_prompts=True):
+        payload = dict(self._wizard_payload_base())
+        for field_name, attr_name, _row_label, _title, _options in WIZARD_SCENARIO_FIELD_SPECS:
+            payload[field_name] = getattr(self, attr_name).text().strip() if include_current_prompts else "Auto"
+        return normalize_packet_builder_payload(payload)
+
+    def _set_wizard_prompt_value(self, field_name, labels):
+        attr_name = next((attr for name, attr, _row, _title, _options in WIZARD_SCENARIO_FIELD_SPECS if name == field_name), "")
+        if not attr_name:
+            return
+        widget = getattr(self, attr_name, None)
+        if widget is None:
+            return
+        widget.setText(" | ".join(_dedupe_preserve_order(labels or [])) if labels else "Auto")
+
+    def apply_wizard_recommended_prompts(self):
+        recommendations = build_wizard_scenario_recommendations(self._wizard_payload_preview(include_current_prompts=False))
+        if not recommendations:
+            QMessageBox.information(
+                self,
+                "Not Enough Facts Yet",
+                "Enter a few more core packet facts first so the wizard can recommend scenario prompts with confidence.",
+            )
+            return
+        for field_name, labels in recommendations.items():
+            self._set_wizard_prompt_value(field_name, labels)
+        self._refresh_scenario_guidance()
+        self._refresh_review_summary()
+
+    def reset_wizard_prompts_to_auto(self):
+        for field_name, _attr_name, _row_label, _title, _options in WIZARD_SCENARIO_FIELD_SPECS:
+            self._set_wizard_prompt_value(field_name, [])
+        self._refresh_scenario_guidance()
+        self._refresh_review_summary()
+
+    def _refresh_scenario_guidance(self):
+        if not hasattr(self, "wizard_scenario_guidance_label"):
+            return
+        recommendations = build_wizard_scenario_recommendations(self._wizard_payload_preview(include_current_prompts=False))
+        if not recommendations:
+            self.wizard_scenario_guidance_label.setText(
+                "Add diagnosis, requested service, MRI findings, symptoms, duration, or functional impact to unlock smarter prompt recommendations."
+            )
+            return
+        lines = []
+        for field_name, _attr_name, row_label, _title, _options in WIZARD_SCENARIO_FIELD_SPECS:
+            labels = recommendations.get(field_name) or []
+            if labels:
+                lines.append(f"{row_label}: {', '.join(labels)}")
+        self.wizard_scenario_guidance_label.setText(
+            "Wizard recommendation based on current facts:\n" + "\n".join(lines[:5])
+        )
+
+    def _profile_summary_line(self, profile_type):
+        spec = PACKET_SOURCE_PROFILE_SPECS.get(profile_type, {})
+        combo = getattr(self, f"wizard_{profile_type}_combo", None)
+        entry = self._profile_entry(profile_type, combo.currentData() if combo is not None else "")
+        if not entry:
+            return f"{spec.get('title')}: none selected"
+        return f"{spec.get('title')}: {entry.get('label') or spec.get('title')}"
+
+    def _recommended_starting_tip(self, payload):
+        profile_name = str(payload.get("packet_profile") or "").strip()
+        if is_referral_request_profile(profile_name):
+            return "Start with the referral language and routing facts first. Keep the request evaluation-focused unless the packet already has a defined procedural request."
+        if is_submission_cover_profile(profile_name):
+            return "Start by confirming the shared identifiers and included-document checklist, then move into the patient-packet forms."
+        if is_va_10172_profile(profile_name):
+            return "Start with the routing/admin fields and make sure the reason-for-request language matches the diagnosis, imaging, and requested service already staged here."
+        if is_seoc_request_profile(profile_name):
+            return "Start by locking down the SEOC scope, duration, and exclusion language so the episode stays narrow and review-safe."
+        if is_consult_request_profile(profile_name):
+            return "Start with the consult reason, requested services, and conservative-care pathway, then review Wording Assist before export."
+        if is_lomn_profile(profile_name):
+            return "Start with the clinical basis, conservative-care failure, and medical-necessity statements, then use Wording Assist to tighten the denial-sensitive wording."
+        if is_clinical_documentation_profile(profile_name):
+            return "Start with functional impact, conservative care, imaging correlation, and treatment plan details so the downstream forms inherit stronger support."
+        return "Start with the highest-confidence shared facts first, then move into form-specific reasoning and Wording Assist review."
+
+    def _refresh_review_summary(self):
+        if not hasattr(self, "wizard_review_summary_view"):
+            return
+        payload = self._wizard_payload_preview(include_current_prompts=True)
+        blueprint_plan = build_wizard_blueprint_plan(payload)
+        fact_signals = build_wizard_fact_signals(payload)
+        form_worklist = build_wizard_form_worklist(payload)
+        field_worklist = build_wizard_field_worklist(payload)
+        weak_fact_rows = build_wizard_weak_fact_summary(payload)
+        missing_core_facts = []
+        for label, value in [
+            ("Veteran Name", payload.get("patient_name")),
+            ("Requested Service", payload.get("requested_service")),
+            ("Primary Diagnosis", payload.get("diagnosis")),
+            ("ICD-10 Codes", payload.get("icd_codes")),
+            ("MRI Findings", payload.get("master_mri_findings")),
+            ("Clinical Summary", payload.get("clinical_summary")),
+            ("Conservative Care Duration", payload.get("consult_conservative_duration")),
+            ("Functional Impact", payload.get("clinical_doc_functional_impact")),
+        ]:
+            if not str(value or "").strip():
+                missing_core_facts.append(label)
+
+        scenario_lines = []
+        for field_name, attr_name, row_label, _title, _options in WIZARD_SCENARIO_FIELD_SPECS:
+            value = getattr(self, attr_name).text().strip()
+            if value and value.lower() != "auto":
+                scenario_lines.append(f"<li><strong>{html.escape(row_label)}:</strong> {html.escape(value)}</li>")
+
+        summary_html = [
+            "<div style='font-family:Segoe UI; color:#E5E7EB; line-height:1.45;'>",
+            f"<div style='font-size:18px; font-weight:700; color:#FFFFFF;'>{html.escape(str(payload.get('packet_profile') or 'Packet Start'))}</div>",
+            f"<div style='margin-top:4px; color:#8FA6C1;'>{html.escape(describe_packet_export_context(payload.get('packet_profile')))}</div>",
+            "<div style='margin-top:14px; font-weight:700; color:#FFFFFF;'>Selected Reusable Profiles</div>",
+            "<ul style='margin:6px 0 0 18px;'>",
+            f"<li>{html.escape(self._profile_summary_line('va_sources'))}</li>",
+            f"<li>{html.escape(self._profile_summary_line('community_destinations'))}</li>",
+            f"<li>{html.escape(self._profile_summary_line('pcp_pcm_profiles'))}</li>",
+            "</ul>",
+            "<div style='margin-top:14px; font-weight:700; color:#FFFFFF;'>Core Facts Staged</div>",
+            "<ul style='margin:6px 0 0 18px;'>",
+            f"<li><strong>Veteran:</strong> {html.escape(str(payload.get('patient_name') or 'Pending'))}</li>",
+            f"<li><strong>Diagnosis:</strong> {html.escape(str(payload.get('diagnosis') or 'Pending'))}</li>",
+            f"<li><strong>Requested Service:</strong> {html.escape(str(payload.get('requested_service') or 'Pending'))}</li>",
+            f"<li><strong>MRI:</strong> {html.escape(_first_nonempty_text(payload.get('master_mri_date'), payload.get('master_mri_findings')) or 'Pending')}</li>",
+            f"<li><strong>Conservative Duration:</strong> {html.escape(str(payload.get('consult_conservative_duration') or 'Pending'))}</li>",
+            f"<li><strong>Functional Impact:</strong> {html.escape(str(payload.get('clinical_doc_functional_impact') or 'Pending'))}</li>",
+            "</ul>",
+            "<div style='margin-top:14px; font-weight:700; color:#FFFFFF;'>Scenario Steering</div>",
+        ]
+        if scenario_lines:
+            summary_html.extend(["<ul style='margin:6px 0 0 18px;'>", *scenario_lines, "</ul>"])
+        else:
+            summary_html.append("<div style='margin-top:6px; color:#8FA6C1;'>No scenario prompts selected yet. Use Recommend Prompts if you want the wizard to seed them.</div>")
+        summary_html.append("<div style='margin-top:14px; font-weight:700; color:#FFFFFF;'>Why The Wizard Is Steering This Packet</div>")
+        if fact_signals:
+            summary_html.extend(
+                [
+                    "<ul style='margin:6px 0 0 18px;'>",
+                    *[f"<li>{html.escape(line)}</li>" for line in fact_signals[:6]],
+                    "</ul>",
+                ]
+            )
+        else:
+            summary_html.append("<div style='margin-top:6px; color:#8FA6C1;'>Add diagnosis, service, imaging, or functional facts to give the wizard a stronger basis for recommendations.</div>")
+        summary_html.append("<div style='margin-top:14px; font-weight:700; color:#FFFFFF;'>Packet-Wide Blueprint Outlook</div>")
+        if blueprint_plan:
+            for row in blueprint_plan[:5]:
+                summary_html.append(
+                    "<div style='margin-top:8px; padding:9px 10px; background:#111A25; border:1px solid #243446; border-radius:8px;'>"
+                    f"<div style='font-weight:700; color:#EAF2FF;'>{html.escape(row['label'])}</div>"
+                    f"<div style='margin-top:4px; color:#BFD0E3;'><strong>Use when:</strong> {html.escape(row['use_when'] or 'Matched to the current packet facts and selected prompts.')}</div>"
+                    f"<div style='margin-top:4px; color:#BFD0E3;'><strong>Forms touched:</strong> {html.escape(_human_join(row['profiles']) or 'Current packet forms')}</div>"
+                    f"<div style='margin-top:4px; color:#BFD0E3;'><strong>Wording fields:</strong> {html.escape(_human_join(row['fields']) or 'Form wording sections')}</div>"
+                    + (
+                        f"<div style='margin-top:4px; color:#8FA6C1;'><strong>Still relies on:</strong> {html.escape(_human_join(row['missing_facts'][:4]))}</div>"
+                        if row["missing_facts"] else
+                        "<div style='margin-top:4px; color:#8FA6C1;'>All core facts needed for this blueprint family are already staged.</div>"
+                    )
+                    + "</div>"
+                )
+        else:
+            summary_html.append("<div style='margin-top:6px; color:#8FA6C1;'>No denial-sensitive blueprint families are predicted yet. That is normal for referral-only or intake-only starts.</div>")
+        summary_html.append("<div style='margin-top:14px; font-weight:700; color:#FFFFFF;'>Recommended Drafting Order</div>")
+        if form_worklist:
+            summary_html.extend(["<ol style='margin:6px 0 0 20px; padding-left:16px;'>"])
+            for row in form_worklist[:4]:
+                summary_html.append(
+                    "<li style='margin-top:8px;'>"
+                    f"<strong>{html.escape(row['title'])}</strong>"
+                    f"<div style='margin-top:4px; color:#BFD0E3;'>{html.escape(row['reason'])}</div>"
+                    + (
+                        f"<div style='margin-top:4px; color:#8FA6C1;'><strong>Likely blueprint families:</strong> {html.escape(_human_join(row['blueprints']) or 'Not predicted yet')}</div>"
+                        if row["blueprints"] else
+                        ""
+                    )
+                    + (
+                        f"<div style='margin-top:4px; color:#8FA6C1;'><strong>Facts still thin:</strong> {html.escape(_human_join(row['missing_facts'][:4]))}</div>"
+                        if row["missing_facts"] else
+                        "<div style='margin-top:4px; color:#8FA6C1;'>This form is already fact-supported enough to draft now.</div>"
+                    )
+                    + "</li>"
+                )
+            summary_html.append("</ol>")
+        else:
+            summary_html.append("<div style='margin-top:6px; color:#8FA6C1;'>The current packet start does not include denial-sensitive wording forms yet.</div>")
+        summary_html.append("<div style='margin-top:14px; font-weight:700; color:#FFFFFF;'>Highest-Leverage Wording Fields</div>")
+        if field_worklist:
+            summary_html.extend(["<ul style='margin:6px 0 0 18px;'>"])
+            for row in field_worklist[:6]:
+                detail_parts = [row["profile_title"]]
+                if row["blueprint"]:
+                    detail_parts.append(row["blueprint"])
+                if row["status_key"] == "needs_review" and not row["missing_facts"]:
+                    detail_parts.append("ready for wording review")
+                elif row["missing_facts"]:
+                    detail_parts.append("needs more facts")
+                summary_html.append(
+                    "<li style='margin-top:6px;'>"
+                    f"<strong>{html.escape(row['field_label'])}</strong> "
+                    f"<span style='color:#8FA6C1;'>({html.escape(' | '.join(detail_parts))})</span>"
+                    + (
+                        f"<div style='margin-top:2px; color:#BFD0E3;'>Needs: {html.escape(_human_join(row['missing_facts'][:4]))}</div>"
+                        if row["missing_facts"] else
+                        (f"<div style='margin-top:2px; color:#BFD0E3;'>{html.escape(row['use_when'])}</div>" if row["use_when"] else "")
+                    )
+                    + "</li>"
+                )
+            summary_html.append("</ul>")
+        else:
+            summary_html.append("<div style='margin-top:6px; color:#8FA6C1;'>No wording fields are in play yet for this packet start.</div>")
+        summary_html.append("<div style='margin-top:14px; font-weight:700; color:#FFFFFF;'>Facts Still Weak Across The Packet</div>")
+        if weak_fact_rows:
+            summary_html.extend(["<ul style='margin:6px 0 0 18px;'>"])
+            for row in weak_fact_rows[:6]:
+                summary_html.append(
+                    "<li style='margin-top:6px;'>"
+                    f"<strong>{html.escape(row['label'])}</strong> "
+                    f"<span style='color:#8FA6C1;'>(blocking {int(row['count'])} wording section(s))</span>"
+                    f"<div style='margin-top:2px; color:#BFD0E3;'>Affects: {html.escape(_human_join(row['profiles'][:3]) or 'Current packet forms')}</div>"
+                    + (
+                        f"<div style='margin-top:2px; color:#8FA6C1;'>Fields touched: {html.escape(_human_join(row['fields'][:4]))}</div>"
+                        if row["fields"] else
+                        ""
+                    )
+                    + "</li>"
+                )
+            summary_html.append("</ul>")
+        elif missing_core_facts:
+            summary_html.extend(
+                [
+                    "<ul style='margin:6px 0 0 18px;'>",
+                    *[f"<li>{html.escape(label)}</li>" for label in missing_core_facts[:6]],
+                    "</ul>",
+                ]
+            )
+        else:
+            summary_html.append("<div style='margin-top:6px; color:#8FA6C1;'>No broad fact gaps are currently holding the packet back.</div>")
+        summary_html.append("</div>")
+        self.wizard_review_summary_view.setHtml("".join(summary_html))
+        self.wizard_review_guidance_label.setText(self._recommended_starting_tip(payload))
+
+    def _refresh_navigation(self):
+        index = self.stack.currentIndex()
+        total = len(self._steps)
+        step_badge, title, help_text = self._steps[index]
+        self.step_badge.setText(step_badge)
+        self.step_title_label.setText(title)
+        self.step_help_label.setText(help_text)
+        self.back_button.setEnabled(index > 0)
+        self.next_button.setVisible(index < total - 1)
+        self.create_button.setVisible(index == total - 1)
+        if index == total - 1:
+            self._refresh_review_summary()
+
+    def _go_back(self):
+        self.stack.setCurrentIndex(max(0, self.stack.currentIndex() - 1))
+
+    def _go_next(self):
+        self.stack.setCurrentIndex(min(self.stack.count() - 1, self.stack.currentIndex() + 1))
+
+    def _accept_blank(self):
+        self._start_blank = True
+        self.accept()
+
+    def start_blank_requested(self):
+        return bool(self._start_blank)
+
+    def build_payload(self):
+        return self._wizard_payload_preview(include_current_prompts=True)
+
+
+class SourceProfileEditorDialog(QDialog):
+    def __init__(self, profile_type, entry=None, intake_defaults=None, parent=None):
+        super().__init__(parent)
+        self.profile_type = str(profile_type or "").strip()
+        self.spec = dict(PACKET_SOURCE_PROFILE_SPECS.get(self.profile_type) or {})
+        self.entry = dict(entry or {})
+        self.intake_defaults = {
+            field_name: str(value or "").strip()
+            for field_name, value in dict(intake_defaults or {}).items()
+        }
+        self._field_widgets = {}
+
+        profile_title = self.spec.get("title") or "Profile"
+        self.setWindowTitle(f"{'Edit' if self.entry else 'Add'} {profile_title}")
+        self.setModal(True)
+        self.resize(640, 720)
+        self.setStyleSheet(
+            """
+            QDialog { background:#0F1823; color:#E5E7EB; }
+            QLabel { color:#E5E7EB; }
+            QLineEdit, QTextEdit, QComboBox {
+                background:#111A25; border:1px solid #253243; border-radius:8px; color:#DCE6F2; padding:8px;
+            }
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus { border:1px solid #69BCFF; }
+            QScrollArea, QScrollArea > QWidget > QWidget { background:#0F1823; border:none; }
+            QPushButton {
+                background-color:#1D2A3A; color:#FFFFFF; border:1px solid #34506B; border-radius:8px;
+                padding:6px 14px; font-size:13px; font-weight:600;
+            }
+            QPushButton:hover { background-color:#223246; }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel(f"{'Edit' if self.entry else 'Add'} {profile_title}")
+        title.setStyleSheet("font-size:20px; font-weight:700; color:#FFFFFF;")
+        layout.addWidget(title)
+
+        help_label = QLabel(
+            "Build this reusable profile directly here. Use current intake values only if the packet below already contains the office or provider details you want to save."
+        )
+        help_label.setWordWrap(True)
+        help_label.setStyleSheet("color:#BFD0E3;")
+        layout.addWidget(help_label)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        layout.addWidget(scroll, stretch=1)
+
+        content = QWidget()
+        form = QFormLayout(content)
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+        scroll.setWidget(content)
+
+        self.label_input = QLineEdit()
+        self.label_input.setPlaceholderText(f"{profile_title} name")
+        self.label_input.setText(str(self.entry.get("label") or "").strip())
+        form.addRow("Profile Name", self.label_input)
+
+        for field_name, field_label in self.spec.get("fields", []):
+            widget = self._make_profile_field_widget(field_name)
+            self._field_widgets[field_name] = widget
+            existing_value = str(self.entry.get(field_name) or "").strip()
+            if isinstance(widget, QTextEdit):
+                widget.setPlainText(existing_value)
+            else:
+                widget.setText(existing_value)
+            form.addRow(field_label, widget)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(8)
+        self.pull_intake_button = QPushButton("Use Current Intake Values")
+        self.pull_intake_button.clicked.connect(self._apply_intake_defaults)
+        button_row.addWidget(self.pull_intake_button, 0)
+        button_row.addStretch(1)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        save_button = QPushButton("Save Profile")
+        save_button.clicked.connect(self._accept_if_valid)
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(save_button)
+        layout.addLayout(button_row)
+
+    def _make_profile_field_widget(self, field_name):
+        if field_name in {"master_provider_address", "va10172_va_facility_address", "liaison_contact_info"}:
+            widget = QTextEdit()
+            widget.setMinimumHeight(84)
+            return widget
+        return QLineEdit()
+
+    def _apply_intake_defaults(self):
+        for field_name, widget in self._field_widgets.items():
+            value = str(self.intake_defaults.get(field_name) or "").strip()
+            if isinstance(widget, QTextEdit):
+                widget.setPlainText(value)
+            else:
+                widget.setText(value)
+        if not self.label_input.text().strip():
+            self.label_input.setText(_default_reference_profile_label(self.profile_type, self.profile_values()))
+
+    def profile_values(self):
+        values = {}
+        for field_name, widget in self._field_widgets.items():
+            if isinstance(widget, QTextEdit):
+                values[field_name] = widget.toPlainText().strip()
+            else:
+                values[field_name] = widget.text().strip()
+        return values
+
+    def profile_record(self):
+        values = self.profile_values()
+        label = self.label_input.text().strip() or _default_reference_profile_label(self.profile_type, values)
+        return {
+            "profile_id": str(self.entry.get("profile_id") or "").strip(),
+            "label": label,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            **values,
+        }
+
+    def _accept_if_valid(self):
+        values = self.profile_values()
+        if not any(str(value or "").strip() for value in values.values()):
+            QMessageBox.information(
+                self,
+                "Nothing To Save",
+                f"Enter at least one {self.spec.get('title', 'profile').lower()} value before saving this reusable profile.",
+            )
+            return
+        self.accept()
+
+
 class AutoSizingPlainTextEdit(QPlainTextEdit):
     def __init__(self, minimum_height=140, parent=None):
         super().__init__(parent)
@@ -3813,6 +5833,9 @@ def default_packet_builder_payload():
     return {
         "packet_title": "",
         "packet_profile": PACKET_BUILDER_PROFILES[0],
+        "selected_va_source_profile_id": "",
+        "selected_community_destination_profile_id": "",
+        "selected_pcp_pcm_profile_id": "",
         "patient_name": "",
         "date_of_birth": "",
         "authorization_number": "",
@@ -3826,6 +5849,76 @@ def default_packet_builder_payload():
         "icd_codes": "",
         "clinical_summary": "",
         "packet_notes": "",
+        "appeal_letter_date": "",
+        "appeal_to_name": "",
+        "appeal_to_title": "",
+        "appeal_to_office": "",
+        "appeal_to_address": "",
+        "appeal_from_name": "",
+        "appeal_from_title": "",
+        "appeal_from_organization": "",
+        "appeal_from_address": "",
+        "appeal_from_phone": "",
+        "appeal_from_fax": "",
+        "appeal_from_email": "",
+        "appeal_from_npi": "",
+        "appeal_subject_line": "Clinical appeal and request for reconsideration of denied community care authorization",
+        "appeal_denied_service": "",
+        "appeal_denial_date": "",
+        "appeal_denial_source": "",
+        "appeal_opening_request": (
+            "This letter respectfully requests clinical reconsideration of the denial or non-authorization of the "
+            "requested community care service for the above-named Veteran. This appeal is submitted as a patient-specific "
+            "medical necessity request, not as a request for VA to adopt a broad coverage policy. The question presented "
+            "is whether this Veteran, in light of the documented diagnosis, failed conservative care, functional "
+            "impairment, referral history, and imaging correlation where applicable, should be authorized for an "
+            "appropriate community care evaluation and treatment pathway."
+        ),
+        "appeal_case_timeline": "",
+        "appeal_clinical_necessity": (
+            "The requested service remains medically reasonable and necessary based on the documented diagnosis, "
+            "persistent symptoms, prolonged failure of conservative and interventional care where applicable, "
+            "documented functional limitation, and the clinical record submitted for review. This appeal asks VA "
+            "to consider whether a clinically rational, lower-invasive community care evaluation and treatment option "
+            "should be available before the Veteran is left only with ongoing disability, uncontrolled pain management, "
+            "or substantially more invasive intervention."
+        ),
+        "appeal_denial_reason_1": "",
+        "appeal_denial_rebuttal_1": "",
+        "appeal_denial_reason_2": "",
+        "appeal_denial_rebuttal_2": "",
+        "appeal_policy_support": (
+            "Under 38 C.F.R. 17.4010 and 17.4020, review of this request should address whether the required "
+            "service is unavailable within VA, whether access or appropriateness concerns support community care, "
+            "and whether the requested episode of care is clinically necessary and in the Veteran's best medical interest. "
+            "Current VA Community Care and Clinical Appeals guidance also allows the requester to identify the decision "
+            "being challenged, explain the basis for disagreement, and submit medical records and published studies "
+            "for review. This appeal therefore asks for a patient-specific clinical determination based on the Veteran's "
+            "actual record rather than a generalized denial rationale."
+        ),
+        "appeal_medical_literature_support": "",
+        "appeal_requested_relief": (
+            "Please reverse the denial and authorize the requested community care evaluation and treatment pathway if "
+            "clinically confirmed.\n"
+            "Please confirm in writing the approved scope of care, authorized provider, authorization number, and date range.\n"
+            "If the denial is upheld, please issue a patient-specific clinical appeal determination identifying the basis "
+            "for denial, the records reviewed, and the specific evidence needed to cure the denial."
+        ),
+        "appeal_exhibits": (
+            "Exhibit A - Denial notice or adverse determination\n"
+            "Exhibit B - Original VA referral, authorization, and routing history\n"
+            "Exhibit C - Treating or referring provider medical necessity statement\n"
+            "Exhibit D - Imaging reports and relevant clinical notes\n"
+            "Exhibit E - Failed conservative care and prior treatment history\n"
+            "Exhibit F - Veteran statement describing symptoms and functional limitations\n"
+            "Exhibit G - Published literature or policy materials relied upon\n"
+            "Exhibit H - Provider credentials, network status, or coding support\n"
+            "Exhibit I - Any relevant informed-consent or risk/alternative summary"
+        ),
+        "appeal_closing_contact": (
+            "Please contact the treating office directly if any additional medical records, referral history, physician "
+            "clarification, imaging support, or literature support are needed to complete this clinical appeal review."
+        ),
         "scenario_pathology_pattern": "Auto",
         "scenario_conservative_duration": "Auto",
         "scenario_prior_esi_response": "Auto",
@@ -4048,6 +6141,14 @@ def is_referral_request_profile(profile_name):
     return str(profile_name or "").strip().lower() == "community care referral request"
 
 
+def is_appeal_letter_profile(profile_name):
+    normalized = str(profile_name or "").strip().lower()
+    return normalized in {
+        "community care appeal letter",
+        "appeal letter",
+    }
+
+
 def is_virtual_consent_profile(profile_name):
     return str(profile_name or "").strip().lower() == "virtual consent form"
 
@@ -4103,6 +6204,8 @@ def is_va_10172_profile(profile_name):
 def default_title_for_profile(profile_name):
     if is_referral_request_profile(profile_name):
         return "Community Care Referral Request"
+    if is_appeal_letter_profile(profile_name):
+        return "COMMUNITY CARE APPEAL LETTER"
     if is_virtual_consent_profile(profile_name):
         return "TELEHEALTH VIRTUAL CONSENT FORM"
     if is_submission_cover_profile(profile_name):
@@ -4277,6 +6380,8 @@ def build_packet_builder_document_markup(payload):
 
     if is_referral_request_profile(packet.get("packet_profile")):
         return build_referral_request_preview_html(packet)
+    if is_appeal_letter_profile(packet.get("packet_profile")):
+        return build_appeal_letter_preview_html(packet)
     if is_virtual_consent_profile(packet.get("packet_profile")):
         return build_virtual_consent_preview_html(packet)
     if is_submission_cover_profile(packet.get("packet_profile")):
@@ -4331,7 +6436,7 @@ def build_packet_builder_inconsistency_banner(payload):
     return (
         "<div style='margin-bottom:14px; padding:10px 12px; background:#FFF7ED; border:1px solid #F1C996; color:#7C3400; font-size:11pt; line-height:1.35;'>"
         "<div style='font-weight:700;'>Consistency Warning</div>"
-        "<div style='margin-top:4px;'>Some repeated values on this form do not match the shared packet header.</div>"
+        "<div style='margin-top:4px;'>Some repeated values on this form do not match the shared packet facts. Each warning shows which source usually owns the field.</div>"
         f"<ul style='margin:6px 0 0 18px; padding:0;'>{items}</ul>"
         "</div>"
     )
@@ -4385,6 +6490,147 @@ def build_referral_request_preview_html(packet):
         "<div style='margin-top:18px; font-size:11pt; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; color:#1F3A5F;'>Veteran Liaison Contact</div>"
         f"<div style='margin-top:8px;'>{contact_info}</div>"
         "</div>"
+    )
+
+
+def build_appeal_letter_preview_html(packet):
+    def filled(value, blank_length):
+        raw = str(value or "").strip()
+        return html.escape(raw) if raw else "_" * blank_length
+
+    def block_text(value, blank_length=52):
+        raw = str(value or "").strip()
+        return html.escape(raw).replace("\n", "<br/>") if raw else "_" * blank_length
+
+    def lines_html(values, fallback):
+        cleaned = []
+        for value in values:
+            raw = str(value or "").strip()
+            if not raw:
+                continue
+            cleaned.append(html.escape(raw).replace("\n", "<br/>"))
+        if not cleaned:
+            cleaned = [html.escape(str(fallback or "").strip()).replace("\n", "<br/>")]
+        return "<br/>".join(cleaned)
+
+    def bullet_lines(text_value, fallback):
+        lines = [line.strip() for line in str(text_value or "").splitlines() if line.strip()]
+        if not lines:
+            lines = [fallback]
+        return "".join(f"<div style='margin-top:4px;'>- {html.escape(line)}</div>" for line in lines)
+
+    title = html.escape(packet.get("packet_title") or "COMMUNITY CARE APPEAL LETTER")
+    appeal_date = filled(packet.get("appeal_letter_date"), 14)
+    recipient_name = str(packet.get("appeal_to_name") or "").strip()
+    recipient_title = str(packet.get("appeal_to_title") or "").strip()
+    recipient_office = _appeal_recipient_office(packet)
+    recipient_address = str(packet.get("appeal_to_address") or "").strip()
+    sender_name = _appeal_sender_name(packet)
+    sender_title = _appeal_sender_title(packet)
+    sender_org = _appeal_sender_organization(packet)
+    sender_address = _appeal_sender_address(packet)
+    sender_phone = _appeal_sender_phone(packet)
+    sender_fax = _appeal_sender_fax(packet)
+    sender_email = _appeal_sender_email(packet)
+    sender_npi = _appeal_sender_npi(packet)
+    subject_line = _appeal_subject_line(packet)
+    service_subtitle = str(packet.get("appeal_denied_service") or packet.get("requested_service") or "").strip()
+    denied_service = filled(_appeal_requested_service(packet), 34)
+    denial_date = filled(packet.get("appeal_denial_date"), 16)
+    denial_source = filled(packet.get("appeal_denial_source") or packet.get("facility"), 26)
+    veteran_name = filled(packet.get("patient_name"), 24)
+    dob = filled(packet.get("date_of_birth"), 14)
+    auth_number = filled(packet.get("authorization_number"), 16)
+    diagnosis = filled(packet.get("diagnosis"), 28)
+    icd_codes = filled(packet.get("icd_codes"), 18)
+    opening_request = block_text(packet.get("appeal_opening_request"))
+    case_timeline = block_text(_appeal_case_timeline(packet))
+    clinical_necessity = block_text(packet.get("appeal_clinical_necessity"))
+    denial_reason_1 = block_text(packet.get("appeal_denial_reason_1"), 34)
+    denial_rebuttal_1 = block_text(packet.get("appeal_denial_rebuttal_1"), 34)
+    denial_reason_2 = block_text(packet.get("appeal_denial_reason_2"), 34)
+    denial_rebuttal_2 = block_text(packet.get("appeal_denial_rebuttal_2"), 34)
+    policy_support = block_text(packet.get("appeal_policy_support"))
+    medical_literature_support = block_text(packet.get("appeal_medical_literature_support"))
+    requested_relief = block_text(packet.get("appeal_requested_relief"))
+    exhibits = bullet_lines(packet.get("appeal_exhibits"), "Supporting exhibits pending")
+    closing_contact = block_text(packet.get("appeal_closing_contact"))
+    salutation = f"Dear {html.escape(recipient_name)}:" if recipient_name else "To Whom It May Concern:"
+
+    sender_contact_lines = []
+    if sender_phone:
+        sender_contact_lines.append(f"Phone: {html.escape(sender_phone)}")
+    if sender_fax:
+        sender_contact_lines.append(f"Fax: {html.escape(sender_fax)}")
+    if sender_email:
+        sender_contact_lines.append(f"Email: {html.escape(sender_email)}")
+    if sender_npi:
+        sender_contact_lines.append(f"NPI: {html.escape(sender_npi)}")
+
+    return (
+        "<div style='font-family:Calibri, Arial, sans-serif; color:#111827; line-height:1.55;'>"
+        f"<div style='text-align:center; font-size:19pt; font-weight:700; letter-spacing:0.2px;'>{title}</div>"
+        + (
+            f"<div style='text-align:center; font-size:12.5pt; font-weight:700; color:#1F3A5F; margin-top:6px;'>{html.escape(service_subtitle)}</div>"
+            if service_subtitle else
+            ""
+        )
+        + f"<div style='margin-top:18px;'>{appeal_date}</div>"
+        + f"<div style='margin-top:16px;'>{lines_html([recipient_name, recipient_title, recipient_office, recipient_address], recipient_office)}</div>"
+        + "<div style='margin-top:14px; font-weight:700;'>RE: "
+        + html.escape(subject_line)
+        + "</div>"
+        + "<div style='margin-top:8px; padding-left:2px;'>"
+        + f"<div><strong>Veteran:</strong> {veteran_name} &nbsp;&nbsp; <strong>DOB:</strong> {dob}</div>"
+        + f"<div style='margin-top:3px;'><strong>VA Authorization / Claim:</strong> {auth_number}</div>"
+        + f"<div style='margin-top:3px;'><strong>Requested Service:</strong> {denied_service}</div>"
+        + f"<div style='margin-top:3px;'><strong>Denied / Deferred On:</strong> {denial_date} &nbsp;&nbsp; <strong>Reviewing Office:</strong> {denial_source}</div>"
+        + f"<div style='margin-top:3px;'><strong>Diagnosis:</strong> {diagnosis}"
+        + (f" &nbsp;&nbsp; <strong>ICD-10:</strong> {icd_codes}" if str(packet.get("icd_codes") or "").strip() else "")
+        + "</div>"
+        + "</div>"
+        + f"<div style='margin-top:14px; font-weight:700;'>{salutation}</div>"
+        + "<div style='margin-top:14px; font-weight:700;'>I. Summary of the Appeal</div>"
+        + f"<div style='margin-top:6px;'>{opening_request}</div>"
+        + "<div style='margin-top:14px; font-weight:700;'>II. Patient-Specific Clinical Necessity</div>"
+        + f"<div style='margin-top:6px;'>{clinical_necessity}</div>"
+        + "<div style='margin-top:14px; font-weight:700;'>III. Referral and Community Care Authority</div>"
+        + f"<div style='margin-top:6px;'>{case_timeline}</div>"
+        + "<div style='margin-top:14px; font-weight:700;'>IV. Response to Denial Grounds</div>"
+        + "<div style='margin-top:6px; padding-left:12px; border-left:3px solid #D5DCE5;'>"
+        + f"<div><strong>Denial reason or concern 1:</strong> {denial_reason_1}</div>"
+        + f"<div style='margin-top:6px;'><strong>Response:</strong> {denial_rebuttal_1}</div>"
+        + "</div>"
+        + (
+            "<div style='margin-top:10px; padding-left:12px; border-left:3px solid #D5DCE5;'>"
+            + f"<div><strong>Denial reason or concern 2:</strong> {denial_reason_2}</div>"
+            + f"<div style='margin-top:6px;'><strong>Response:</strong> {denial_rebuttal_2}</div>"
+            + "</div>"
+            if str(packet.get("appeal_denial_reason_2") or "").strip() or str(packet.get("appeal_denial_rebuttal_2") or "").strip()
+            else ""
+        )
+        + "<div style='margin-top:14px; font-weight:700;'>Policy and Appeal Support</div>"
+        + f"<div style='margin-top:6px;'>{policy_support}</div>"
+        + (
+            "<div style='margin-top:14px; font-weight:700;'>V. Scientific Evidence Summary</div>"
+            + f"<div style='margin-top:6px;'>{medical_literature_support}</div>"
+            if str(packet.get("appeal_medical_literature_support") or "").strip()
+            else ""
+        )
+        + "<div style='margin-top:14px; font-weight:700;'>VI. Requested Determination</div>"
+        + f"<div style='margin-top:6px;'>{requested_relief}</div>"
+        + "<div style='margin-top:14px; font-weight:700;'>Exhibit Checklist for Submission</div>"
+        + f"<div style='margin-top:6px;'>{exhibits}</div>"
+        + "<div style='margin-top:14px; font-weight:700;'>Closing Contact Statement</div>"
+        + f"<div style='margin-top:6px;'>{closing_contact}</div>"
+        + "<div style='margin-top:18px;'>Respectfully,</div>"
+        + f"<div style='margin-top:10px;'>{lines_html([sender_name, sender_title, sender_org, sender_address], sender_name or sender_org or 'Treating Office')}</div>"
+        + (
+            f"<div style='margin-top:4px;'>{'<br/>'.join(sender_contact_lines)}</div>"
+            if sender_contact_lines else
+            ""
+        )
+        + "</div>"
     )
 
 
@@ -5676,6 +7922,7 @@ class PacketBuilderTab(QWidget):
         self._export_worker = None
         self._export_controls = []
         self._signature_images = {}
+        self._profile_combo_refresh_active = False
         self._preview_refresh_timer = QTimer(self)
         self._preview_refresh_timer.setSingleShot(True)
         self._preview_refresh_timer.setInterval(120)
@@ -5766,6 +8013,13 @@ class PacketBuilderTab(QWidget):
         intake_layout.setSpacing(12)
         self.packet_intake_page = intake_page
 
+        profile_page = QWidget()
+        profile_page.setStyleSheet("background:#0F1823;")
+        profile_layout = QVBoxLayout(profile_page)
+        profile_layout.setContentsMargins(12, 12, 12, 12)
+        profile_layout.setSpacing(12)
+        self.packet_profile_library_page = profile_page
+
         workspace_page = QWidget()
         workspace_page.setStyleSheet("background:#0F1823;")
         workspace_layout = QVBoxLayout(workspace_page)
@@ -5774,8 +8028,35 @@ class PacketBuilderTab(QWidget):
         self.packet_workspace_page = workspace_page
 
         editor_tabs.addTab(intake_page, "Packet Intake")
+        editor_tabs.addTab(profile_page, "Profile Library")
         editor_tabs.addTab(workspace_page, "Form Workspace")
         editor_tabs.setCurrentWidget(workspace_page)
+
+        packet_start_group = QGroupBox("Packet Start")
+        packet_start_group.setStyleSheet("QGroupBox { font-weight:700; color:#E5E7EB; }")
+        packet_start_layout = QVBoxLayout(packet_start_group)
+        packet_start_layout.setContentsMargins(12, 14, 12, 12)
+        packet_start_layout.setSpacing(10)
+
+        packet_start_help = QLabel(
+            "Recommended workflow: start new packets with the wizard first, then use Packet Intake for direct editing or cleanup. "
+            "Manual intake below stays available for users who prefer to work without the guided start."
+        )
+        packet_start_help.setWordWrap(True)
+        packet_start_help.setStyleSheet("color:#8FA6C1;")
+        packet_start_layout.addWidget(packet_start_help)
+
+        packet_start_button_row = QHBoxLayout()
+        packet_start_button_row.setContentsMargins(0, 0, 0, 0)
+        packet_start_button_row.setSpacing(8)
+        self.packet_start_wizard_button = QPushButton("Start Packet Wizard")
+        self._style_builder_button(self.packet_start_wizard_button)
+        self.packet_start_wizard_button.setMaximumWidth(220)
+        self.packet_start_wizard_button.clicked.connect(self.start_new_packet)
+        packet_start_button_row.addWidget(self.packet_start_wizard_button, 0, Qt.AlignLeft)
+        packet_start_button_row.addStretch(1)
+        packet_start_layout.addLayout(packet_start_button_row)
+        intake_layout.addWidget(packet_start_group)
 
         current_form_group = QGroupBox("Current Form")
         current_form_group.setStyleSheet("QGroupBox { font-weight:700; color:#E5E7EB; }")
@@ -5804,6 +8085,100 @@ class PacketBuilderTab(QWidget):
         self.packet_title_input = self._make_line_edit("Packet title")
         current_form_layout.addRow("Packet Title", self.packet_title_input)
         workspace_layout.addWidget(current_form_group)
+
+        source_profiles_summary_group = QGroupBox("Saved Source Profiles")
+        source_profiles_summary_group.setStyleSheet("QGroupBox { font-weight:700; color:#E5E7EB; }")
+        source_profiles_summary_form = QFormLayout(source_profiles_summary_group)
+        self._configure_form_layout(source_profiles_summary_form)
+
+        source_profiles_summary_help = QLabel(
+            "Manage reusable VA, Community Care, and PCP / PCM records in the Profile Library tab. This intake page stays focused on the current packet while the library keeps reusable office data organized."
+        )
+        source_profiles_summary_help.setWordWrap(True)
+        source_profiles_summary_help.setStyleSheet("color:#8FA6C1;")
+        source_profiles_summary_form.addRow(source_profiles_summary_help)
+
+        self.va_sources_summary_label = QLabel("")
+        self.va_sources_summary_label.setWordWrap(True)
+        self.va_sources_summary_label.setStyleSheet("color:#C8D8E8;")
+        source_profiles_summary_form.addRow("VA Referring Source", self.va_sources_summary_label)
+
+        self.community_destinations_summary_label = QLabel("")
+        self.community_destinations_summary_label.setWordWrap(True)
+        self.community_destinations_summary_label.setStyleSheet("color:#C8D8E8;")
+        source_profiles_summary_form.addRow("Community Care Destination", self.community_destinations_summary_label)
+
+        self.pcp_pcm_profiles_summary_label = QLabel("")
+        self.pcp_pcm_profiles_summary_label.setWordWrap(True)
+        self.pcp_pcm_profiles_summary_label.setStyleSheet("color:#C8D8E8;")
+        source_profiles_summary_form.addRow("PCP / PCM", self.pcp_pcm_profiles_summary_label)
+
+        profile_library_button_row = QHBoxLayout()
+        profile_library_button_row.setContentsMargins(0, 0, 0, 0)
+        profile_library_button_row.setSpacing(8)
+        open_profile_library_button = QPushButton("Open Profile Library")
+        self._style_builder_button(open_profile_library_button)
+        open_profile_library_button.setMaximumWidth(200)
+        open_profile_library_button.clicked.connect(self.open_profile_library_tab)
+        profile_library_button_row.addWidget(open_profile_library_button, 0, Qt.AlignLeft)
+        profile_library_button_row.addStretch(1)
+        source_profiles_summary_form.addRow(profile_library_button_row)
+        intake_layout.addWidget(source_profiles_summary_group)
+
+        library_tools_group = QGroupBox("Profile Library Tools")
+        library_tools_group.setStyleSheet("QGroupBox { font-weight:700; color:#E5E7EB; }")
+        library_tools_layout = QVBoxLayout(library_tools_group)
+        library_tools_layout.setContentsMargins(12, 14, 12, 12)
+        library_tools_layout.setSpacing(10)
+
+        library_tools_help = QLabel(
+            "Save reusable referral sources here once, then apply them to any packet or starter wizard later. Import and export lets offices move source libraries between machines without rebuilding them manually."
+        )
+        library_tools_help.setWordWrap(True)
+        library_tools_help.setStyleSheet("color:#8FA6C1;")
+        library_tools_layout.addWidget(library_tools_help)
+
+        self.source_profile_library_dir_value = QLabel(
+            self.config.get("source_profile_library_dir") or self.config.get("packet_builder_export_dir") or _default_export_dir()
+        )
+        self.source_profile_library_dir_value.setWordWrap(True)
+        self.source_profile_library_dir_value.setStyleSheet("color:#8FA6C1;")
+        choose_profile_library_dir_button = QPushButton("Choose Folder")
+        self._style_builder_button(choose_profile_library_dir_button)
+        choose_profile_library_dir_button.setMaximumWidth(150)
+        choose_profile_library_dir_button.clicked.connect(self.choose_source_profile_library_dir)
+        library_tools_layout.addWidget(QLabel("Library Folder"))
+        profile_library_path_row = QHBoxLayout()
+        profile_library_path_row.setContentsMargins(0, 0, 0, 0)
+        profile_library_path_row.setSpacing(10)
+        profile_library_path_row.addWidget(self.source_profile_library_dir_value, stretch=1)
+        profile_library_path_row.addWidget(choose_profile_library_dir_button, 0, Qt.AlignRight)
+        library_tools_layout.addLayout(profile_library_path_row)
+
+        library_tools_button_row = QHBoxLayout()
+        library_tools_button_row.setContentsMargins(0, 0, 0, 0)
+        library_tools_button_row.setSpacing(8)
+        import_profiles_button = QPushButton("Import Library")
+        self._style_builder_button(import_profiles_button)
+        import_profiles_button.clicked.connect(self.import_source_profile_library)
+        export_profiles_button = QPushButton("Export Library")
+        self._style_builder_button(export_profiles_button)
+        export_profiles_button.clicked.connect(self.export_source_profile_library)
+        library_tools_button_row.addWidget(import_profiles_button, 0)
+        library_tools_button_row.addWidget(export_profiles_button, 0)
+        library_tools_button_row.addStretch(1)
+        library_tools_layout.addLayout(library_tools_button_row)
+
+        self.profile_library_counts_label = QLabel("")
+        self.profile_library_counts_label.setWordWrap(True)
+        self.profile_library_counts_label.setStyleSheet("color:#6F88A4; font-size:12px;")
+        library_tools_layout.addWidget(self.profile_library_counts_label)
+        profile_layout.addWidget(library_tools_group)
+
+        profile_layout.addWidget(self._build_source_profile_manager_group("va_sources"))
+        profile_layout.addWidget(self._build_source_profile_manager_group("community_destinations"))
+        profile_layout.addWidget(self._build_source_profile_manager_group("pcp_pcm_profiles"))
+        profile_layout.addStretch(1)
 
         details_group = QGroupBox("Packet Intake")
         details_group.setStyleSheet("QGroupBox { font-weight:700; color:#E5E7EB; }")
@@ -6054,6 +8429,140 @@ class PacketBuilderTab(QWidget):
         referral_form.addRow("Liaison Contact", self.liaison_contact_input)
 
         workspace_layout.addWidget(self.referral_group)
+
+        self.appeal_letter_group = QGroupBox("Community Care Appeal Letter")
+        self.appeal_letter_group.setStyleSheet("QGroupBox { font-weight:700; color:#E5E7EB; }")
+        appeal_form = QFormLayout(self.appeal_letter_group)
+        self._configure_form_layout(appeal_form)
+
+        appeal_help = QLabel(
+            "Use this profile to draft a formal denial reconsideration or clinical appeal letter. "
+            "The shared packet intake still feeds the Veteran, VA, and Community Care facts; this form "
+            "captures the appeal-specific narrative, policy basis, and requested relief. This profile exports "
+            "as a standalone appeal document and is not bundled into the standard patient packet."
+        )
+        appeal_help.setWordWrap(True)
+        appeal_help.setStyleSheet("color:#8FA6C1;")
+        appeal_form.addRow(appeal_help)
+
+        self.appeal_letter_date_input = self._make_line_edit("MM/DD/YYYY")
+        appeal_form.addRow("Appeal Date", self.appeal_letter_date_input)
+
+        appeal_recipient_label = QLabel("VA Reviewing Office / Recipient")
+        appeal_recipient_label.setStyleSheet("color:#C8D8E8; font-weight:700; padding-top:6px;")
+        appeal_form.addRow(appeal_recipient_label)
+        self.appeal_to_name_input = self._make_line_edit("Recipient name, if known")
+        appeal_form.addRow("Reviewing Contact Name", self.appeal_to_name_input)
+        self.appeal_to_title_input = self._make_line_edit("Recipient title")
+        appeal_form.addRow("Reviewing Contact Title", self.appeal_to_title_input)
+        self.appeal_to_office_input = self._make_line_edit("VA Community Care Office / VISN / department")
+        appeal_form.addRow("VA Reviewing Office / Department", self.appeal_to_office_input)
+        self.appeal_to_address_input = QTextEdit()
+        self.appeal_to_address_input.setMinimumHeight(72)
+        self.appeal_to_address_input.setPlaceholderText("VA reviewing office mailing address")
+        self.appeal_to_address_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("VA Reviewing Address", self.appeal_to_address_input)
+
+        appeal_sender_label = QLabel("Sending Office / Treating Office")
+        appeal_sender_label.setStyleSheet("color:#C8D8E8; font-weight:700; padding-top:6px;")
+        appeal_form.addRow(appeal_sender_label)
+        self.appeal_from_name_input = self._make_line_edit("Sender name")
+        appeal_form.addRow("Sender Name", self.appeal_from_name_input)
+        self.appeal_from_title_input = self._make_line_edit("Sender title / credentials")
+        appeal_form.addRow("Sender Title", self.appeal_from_title_input)
+        self.appeal_from_organization_input = self._make_line_edit("Sending organization / practice")
+        appeal_form.addRow("Sending Organization / Practice", self.appeal_from_organization_input)
+        self.appeal_from_address_input = QTextEdit()
+        self.appeal_from_address_input.setMinimumHeight(72)
+        self.appeal_from_address_input.setPlaceholderText("Sending office address")
+        self.appeal_from_address_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("Sending Office Address", self.appeal_from_address_input)
+        self.appeal_from_phone_input = self._make_line_edit("Phone")
+        appeal_form.addRow("Sending Office Phone", self.appeal_from_phone_input)
+        self.appeal_from_fax_input = self._make_line_edit("Fax")
+        appeal_form.addRow("Sending Office Fax", self.appeal_from_fax_input)
+        self.appeal_from_email_input = self._make_line_edit("Secure email")
+        appeal_form.addRow("Sending Office Secure Email", self.appeal_from_email_input)
+        self.appeal_from_npi_input = self._make_line_edit("NPI")
+        appeal_form.addRow("Sending Office / Treating NPI", self.appeal_from_npi_input)
+
+        appeal_subject_label = QLabel("Subject and Decision Facts")
+        appeal_subject_label.setStyleSheet("color:#C8D8E8; font-weight:700; padding-top:6px;")
+        appeal_form.addRow(appeal_subject_label)
+        self.appeal_subject_line_input = self._make_line_edit("Appeal subject line")
+        appeal_form.addRow("Subject Line", self.appeal_subject_line_input)
+        self.appeal_denied_service_input = self._make_line_edit("Denied or deferred requested service")
+        appeal_form.addRow("Denied Service / Request", self.appeal_denied_service_input)
+        self.appeal_denial_date_input = self._make_line_edit("MM/DD/YYYY")
+        appeal_form.addRow("Denial Date", self.appeal_denial_date_input)
+        self.appeal_denial_source_input = self._make_line_edit("Denial by / reviewing source")
+        appeal_form.addRow("Denial By / Reviewing Source", self.appeal_denial_source_input)
+
+        appeal_narrative_label = QLabel("Appeal Narrative")
+        appeal_narrative_label.setStyleSheet("color:#C8D8E8; font-weight:700; padding-top:6px;")
+        appeal_form.addRow(appeal_narrative_label)
+        self.appeal_opening_request_input = QTextEdit()
+        self.appeal_opening_request_input.setMinimumHeight(90)
+        self.appeal_opening_request_input.setPlaceholderText("State the reconsideration request clearly and professionally")
+        self.appeal_opening_request_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("Opening Request", self.appeal_opening_request_input)
+        self.appeal_case_timeline_input = QTextEdit()
+        self.appeal_case_timeline_input.setMinimumHeight(90)
+        self.appeal_case_timeline_input.setPlaceholderText("Summarize the referral / denial timeline")
+        self.appeal_case_timeline_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("Background and Timeline", self.appeal_case_timeline_input)
+        self.appeal_clinical_necessity_input = QTextEdit()
+        self.appeal_clinical_necessity_input.setMinimumHeight(110)
+        self.appeal_clinical_necessity_input.setPlaceholderText("Document the medical necessity and clinical basis for reconsideration")
+        self.appeal_clinical_necessity_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("Clinical Basis and Medical Necessity", self.appeal_clinical_necessity_input)
+        self.appeal_denial_reason_1_input = QTextEdit()
+        self.appeal_denial_reason_1_input.setMinimumHeight(70)
+        self.appeal_denial_reason_1_input.setPlaceholderText("Summarize the first stated denial reason or concern")
+        self.appeal_denial_reason_1_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("Denial Reason / Concern 1", self.appeal_denial_reason_1_input)
+        self.appeal_denial_rebuttal_1_input = QTextEdit()
+        self.appeal_denial_rebuttal_1_input.setMinimumHeight(88)
+        self.appeal_denial_rebuttal_1_input.setPlaceholderText("Respond to the first denial reason with clinical and administrative support")
+        self.appeal_denial_rebuttal_1_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("Response to Reason / Concern 1", self.appeal_denial_rebuttal_1_input)
+        self.appeal_denial_reason_2_input = QTextEdit()
+        self.appeal_denial_reason_2_input.setMinimumHeight(70)
+        self.appeal_denial_reason_2_input.setPlaceholderText("Optional second denial reason or concern")
+        self.appeal_denial_reason_2_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("Denial Reason / Concern 2", self.appeal_denial_reason_2_input)
+        self.appeal_denial_rebuttal_2_input = QTextEdit()
+        self.appeal_denial_rebuttal_2_input.setMinimumHeight(88)
+        self.appeal_denial_rebuttal_2_input.setPlaceholderText("Optional response to the second denial reason")
+        self.appeal_denial_rebuttal_2_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("Response to Reason / Concern 2", self.appeal_denial_rebuttal_2_input)
+        self.appeal_policy_support_input = QTextEdit()
+        self.appeal_policy_support_input.setMinimumHeight(110)
+        self.appeal_policy_support_input.setPlaceholderText("State the policy or appeal basis supporting reconsideration")
+        self.appeal_policy_support_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("Policy / Appeal Support", self.appeal_policy_support_input)
+        self.appeal_medical_literature_support_input = QTextEdit()
+        self.appeal_medical_literature_support_input.setMinimumHeight(90)
+        self.appeal_medical_literature_support_input.setPlaceholderText("Optional literature, studies, or evidence summary")
+        self.appeal_medical_literature_support_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("Medical Literature Support", self.appeal_medical_literature_support_input)
+        self.appeal_requested_relief_input = QTextEdit()
+        self.appeal_requested_relief_input.setMinimumHeight(88)
+        self.appeal_requested_relief_input.setPlaceholderText("State the action requested from the reviewer")
+        self.appeal_requested_relief_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("Requested Relief", self.appeal_requested_relief_input)
+        self.appeal_exhibits_input = QTextEdit()
+        self.appeal_exhibits_input.setMinimumHeight(110)
+        self.appeal_exhibits_input.setPlaceholderText("List the supporting documents attached to the appeal")
+        self.appeal_exhibits_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("Supporting Exhibits", self.appeal_exhibits_input)
+        self.appeal_closing_contact_input = QTextEdit()
+        self.appeal_closing_contact_input.setMinimumHeight(76)
+        self.appeal_closing_contact_input.setPlaceholderText("State who can provide additional records or clarification")
+        self.appeal_closing_contact_input.textChanged.connect(self.refresh_preview)
+        appeal_form.addRow("Closing Contact Statement", self.appeal_closing_contact_input)
+
+        workspace_layout.addWidget(self.appeal_letter_group)
 
         self.virtual_consent_group = QGroupBox("Virtual Consent Form")
         self.virtual_consent_group.setStyleSheet("QGroupBox { font-weight:700; color:#E5E7EB; }")
@@ -6694,7 +9203,7 @@ class PacketBuilderTab(QWidget):
         action_row = QGridLayout()
         action_row.setHorizontalSpacing(10)
         action_row.setVerticalSpacing(10)
-        self.new_packet_button = QPushButton("New Packet")
+        self.new_packet_button = QPushButton("Start Packet Wizard")
         self._style_builder_button(self.new_packet_button)
         self.new_packet_button.clicked.connect(self.start_new_packet)
         self.save_to_library_button = QPushButton("Save To Library")
@@ -6956,6 +9465,7 @@ class PacketBuilderTab(QWidget):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([760, 760])
 
+        self._refresh_source_profile_selectors()
         self.packet_title_input.setText("Community Care Referral Request")
         self._builder_ready = True
         self.on_profile_changed(self.profile_combo.currentText())
@@ -7073,6 +9583,753 @@ class PacketBuilderTab(QWidget):
             f"background-color:{background}; color:#FFFFFF; border:1px solid {border}; border-radius:8px; "
             "padding:4px 10px; font-size:12px; font-weight:600; }"
             f"QPushButton:hover {{ background-color:{hover}; }}"
+        )
+
+    def _style_profile_action_button(self, button, destructive=False):
+        background = "#1D2A3A"
+        border = "#34506B"
+        hover = "#223246"
+        if destructive:
+            background = "#4A1F1F"
+            border = "#934141"
+            hover = "#5A2626"
+        button.setFixedHeight(32)
+        button.setMinimumWidth(126)
+        button.setMaximumWidth(164)
+        button.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        button.setStyleSheet(
+            "QPushButton {"
+            f"background-color:{background}; color:#FFFFFF; border:1px solid {border}; border-radius:8px; "
+            "padding:4px 10px; font-size:12px; font-weight:600; }"
+            f"QPushButton:hover {{ background-color:{hover}; }}"
+        )
+
+    def _source_profile_combo_attr(self, profile_type):
+        return f"{profile_type}_combo"
+
+    def _source_profile_note_attr(self, profile_type):
+        return f"{profile_type}_note_label"
+
+    def _source_profile_summary_attr(self, profile_type):
+        return f"{profile_type}_summary_label"
+
+    def _source_profile_filter_attr(self, profile_type):
+        return f"{profile_type}_filter_input"
+
+    def _source_profile_filter_summary_attr(self, profile_type):
+        return f"{profile_type}_filter_summary_label"
+
+    def _build_source_profile_manager_group(self, profile_type):
+        spec = PACKET_SOURCE_PROFILE_SPECS.get(profile_type, {})
+        group = QGroupBox(spec.get("title") or "Saved Source Profile")
+        group.setStyleSheet("QGroupBox { font-weight:700; color:#E5E7EB; }")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(12, 14, 12, 12)
+        layout.setSpacing(10)
+
+        description = QLabel(
+            {
+                "va_sources": "Store VA facility details that repeat across packets, then apply them back into intake when needed.",
+                "community_destinations": "Save referred-to specialists, practice details, and referral contact data so new packets start cleaner.",
+                "pcp_pcm_profiles": "Keep the Veteran's PCP / PCM office details reusable for forms that specifically require them.",
+            }.get(profile_type, "Save reusable source details here for later packet starts.")
+        )
+        description.setWordWrap(True)
+        description.setStyleSheet("color:#8FA6C1;")
+        layout.addWidget(description)
+
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setSpacing(8)
+        filter_input = QLineEdit()
+        filter_input.setPlaceholderText("Search saved profiles")
+        filter_input.textChanged.connect(lambda _text="", key=profile_type: self._on_source_profile_filter_changed(key))
+        setattr(self, self._source_profile_filter_attr(profile_type), filter_input)
+        filter_row.addWidget(filter_input, stretch=1)
+        filter_summary = QLabel("")
+        filter_summary.setWordWrap(True)
+        filter_summary.setStyleSheet("color:#6F88A4; font-size:12px;")
+        setattr(self, self._source_profile_filter_summary_attr(profile_type), filter_summary)
+        filter_row.addWidget(filter_summary, 0, Qt.AlignRight)
+        layout.addLayout(filter_row)
+
+        layout.addWidget(self._build_source_profile_selector_row(profile_type))
+        return group
+
+    def _build_source_profile_selector_row(self, profile_type):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        combo_row = QHBoxLayout()
+        combo_row.setContentsMargins(0, 0, 0, 0)
+        combo_row.setSpacing(8)
+        combo = QComboBox()
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        combo.currentIndexChanged.connect(lambda _=0, key=profile_type: self._on_source_profile_selection_changed(key))
+        setattr(self, self._source_profile_combo_attr(profile_type), combo)
+        combo_row.addWidget(combo, stretch=1)
+
+        apply_button = QPushButton("Apply")
+        self._style_profile_action_button(apply_button)
+        apply_button.clicked.connect(lambda _=False, key=profile_type: self.apply_selected_source_profile(key))
+        combo_row.addWidget(apply_button, 0, Qt.AlignRight)
+        layout.addLayout(combo_row)
+
+        note_label = QLabel("")
+        note_label.setWordWrap(True)
+        note_label.setStyleSheet("color:#8FA6C1; font-size:12px;")
+        setattr(self, self._source_profile_note_attr(profile_type), note_label)
+        layout.addWidget(note_label)
+
+        helper_label = QLabel("Use Add New for a reusable office record, or Save From Intake when the current packet already contains the right details.")
+        helper_label.setWordWrap(True)
+        helper_label.setStyleSheet("color:#6F88A4; font-size:12px;")
+        layout.addWidget(helper_label)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(8)
+        add_button = QPushButton("Add New")
+        self._style_profile_action_button(add_button)
+        add_button.clicked.connect(lambda _=False, key=profile_type: self.add_manual_source_profile(key))
+        edit_button = QPushButton("Edit Selected")
+        self._style_profile_action_button(edit_button)
+        edit_button.clicked.connect(lambda _=False, key=profile_type: self.edit_selected_source_profile(key))
+        save_button = QPushButton("Save From Intake")
+        self._style_profile_action_button(save_button)
+        save_button.clicked.connect(lambda _=False, key=profile_type: self.save_current_source_profile_as_new(key))
+        update_button = QPushButton("Update From Intake")
+        self._style_profile_action_button(update_button)
+        update_button.clicked.connect(lambda _=False, key=profile_type: self.update_selected_source_profile(key))
+        delete_button = QPushButton("Delete Selected")
+        self._style_profile_action_button(delete_button, destructive=True)
+        delete_button.clicked.connect(lambda _=False, key=profile_type: self.delete_selected_source_profile(key))
+        button_row.addWidget(add_button)
+        button_row.addWidget(edit_button)
+        button_row.addWidget(save_button)
+        button_row.addWidget(update_button)
+        button_row.addWidget(delete_button)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+        return widget
+
+    def _source_profile_store(self):
+        return normalize_packet_builder_reference_profiles(self.config.get("packet_builder_reference_profiles"))
+
+    def _save_source_profile_store(self, store):
+        self.config = dict(
+            self.save_config_callback(
+                {"packet_builder_reference_profiles": normalize_packet_builder_reference_profiles(store)}
+            )
+            or {}
+        )
+        return self._source_profile_store()
+
+    def _selected_source_profile_id(self, profile_type):
+        combo = getattr(self, self._source_profile_combo_attr(profile_type), None)
+        if combo is None:
+            return ""
+        return str(combo.currentData() or "").strip()
+
+    def _find_source_profile_entry(self, profile_type, profile_id):
+        normalized_id = str(profile_id or "").strip()
+        if not normalized_id:
+            return None
+        for entry in self._source_profile_store().get(profile_type) or []:
+            if str(entry.get("profile_id") or "").strip() == normalized_id:
+                return dict(entry)
+        return None
+
+    def _source_profile_filter_text(self, profile_type):
+        widget = getattr(self, self._source_profile_filter_attr(profile_type), None)
+        return str(widget.text() or "").strip().lower() if widget is not None else ""
+
+    def _source_profile_matches_filter(self, profile_type, entry, filter_text):
+        needle = re.sub(r"\s+", " ", str(filter_text or "").strip().lower())
+        if not needle:
+            return True
+        haystack = [str((entry or {}).get("label") or "")]
+        for field_name, _label in PACKET_SOURCE_PROFILE_SPECS.get(profile_type, {}).get("fields", []):
+            haystack.append(str((entry or {}).get(field_name) or ""))
+        normalized_haystack = re.sub(r"\s+", " ", " | ".join(haystack).lower())
+        return needle in normalized_haystack
+
+    def _filtered_source_profile_entries(self, profile_type, entries=None):
+        source_entries = list(entries if entries is not None else (self._source_profile_store().get(profile_type) or []))
+        filter_text = self._source_profile_filter_text(profile_type)
+        if not filter_text:
+            return source_entries
+        return [entry for entry in source_entries if self._source_profile_matches_filter(profile_type, entry, filter_text)]
+
+    def _describe_source_profile_entry(self, profile_type, entry):
+        spec = PACKET_SOURCE_PROFILE_SPECS.get(profile_type, {})
+        if not entry:
+            return spec.get("empty_label") or "No saved profiles yet."
+        if profile_type == "va_sources":
+            parts = [
+                f"Facility: {entry.get('facility') or 'Pending'}",
+            ]
+            if entry.get("va10172_va_facility_address"):
+                parts.append("10-10172 facility address saved")
+            return " | ".join(parts)
+        if profile_type == "pcp_pcm_profiles":
+            parts = [
+                f"Name: {entry.get('pcp_pcm_name') or 'Pending'}",
+            ]
+            if entry.get("pcp_pcm_phone"):
+                parts.append(f"Phone: {entry.get('pcp_pcm_phone')}")
+            if entry.get("pcp_pcm_fax"):
+                parts.append(f"Fax: {entry.get('pcp_pcm_fax')}")
+            return " | ".join(parts)
+        parts = [
+            f"Practice: {entry.get('community_facility') or entry.get('master_practice_name') or 'Pending'}",
+            f"Provider: {entry.get('provider') or 'Pending'}",
+        ]
+        if entry.get("master_provider_phone"):
+            parts.append(f"Phone: {entry.get('master_provider_phone')}")
+        if entry.get("master_provider_fax"):
+            parts.append(f"Fax: {entry.get('master_provider_fax')}")
+        return " | ".join(parts)
+
+    def _update_source_profile_note(self, profile_type):
+        note_label = getattr(self, self._source_profile_note_attr(profile_type), None)
+        if note_label is None:
+            return
+        note_label.setText(
+            self._describe_source_profile_entry(
+                profile_type,
+                self._find_source_profile_entry(profile_type, self._selected_source_profile_id(profile_type)),
+            )
+        )
+
+    def _update_source_profile_summary(self, profile_type):
+        summary_label = getattr(self, self._source_profile_summary_attr(profile_type), None)
+        if summary_label is None:
+            return
+        store = self._source_profile_store()
+        entries = store.get(profile_type) or []
+        filtered_entries = self._filtered_source_profile_entries(profile_type, entries)
+        filter_text = self._source_profile_filter_text(profile_type)
+        selected = self._find_source_profile_entry(profile_type, self._selected_source_profile_id(profile_type))
+        if selected:
+            summary = f"Selected: {selected.get('label') or 'Saved profile'}"
+            details = self._describe_source_profile_entry(profile_type, selected)
+            if details:
+                summary = f"{summary} | {details}"
+        elif filter_text and entries:
+            if filtered_entries:
+                summary = f"Showing {len(filtered_entries)} matching saved profile(s). Select one to apply, edit, or update."
+            else:
+                summary = f"No saved profiles match \"{filter_text}\". Clear the search or add a new one."
+        elif entries:
+            summary = f"{len(entries)} saved. Open Profile Library to apply, edit, or export them."
+        else:
+            summary = PACKET_SOURCE_PROFILE_SPECS.get(profile_type, {}).get("empty_label") or "No saved profiles yet."
+        summary_label.setText(summary)
+
+    def _update_source_profile_library_counts(self):
+        if not hasattr(self, "profile_library_counts_label"):
+            return
+        store = self._source_profile_store()
+        counts = []
+        for profile_type, spec in PACKET_SOURCE_PROFILE_SPECS.items():
+            count = len(store.get(profile_type) or [])
+            counts.append(f"{spec.get('title')}: {count}")
+        self.profile_library_counts_label.setText("Saved profile counts | " + " | ".join(counts))
+
+    def _update_source_profile_filter_summary(self, profile_type, total_entries=None, filtered_entries=None):
+        label = getattr(self, self._source_profile_filter_summary_attr(profile_type), None)
+        if label is None:
+            return
+        total = len(total_entries if total_entries is not None else (self._source_profile_store().get(profile_type) or []))
+        filtered = len(filtered_entries if filtered_entries is not None else self._filtered_source_profile_entries(profile_type))
+        filter_text = self._source_profile_filter_text(profile_type)
+        if not total:
+            label.setText("No saved profiles yet")
+            return
+        if not filter_text:
+            label.setText(f"{total} saved")
+            return
+        if filtered:
+            label.setText(f"{filtered} of {total} shown")
+        else:
+            label.setText(f"No matches in {total} saved")
+
+    def _on_source_profile_filter_changed(self, profile_type):
+        self._refresh_source_profile_selectors()
+
+    def _refresh_source_profile_selectors(self, selected_va_id="", selected_community_id="", selected_pcp_id=""):
+        selected_map = {
+            "va_sources": str(selected_va_id or self._selected_source_profile_id("va_sources") or "").strip(),
+            "community_destinations": str(
+                selected_community_id or self._selected_source_profile_id("community_destinations") or ""
+            ).strip(),
+            "pcp_pcm_profiles": str(selected_pcp_id or self._selected_source_profile_id("pcp_pcm_profiles") or "").strip(),
+        }
+        profile_store = self._source_profile_store()
+        self._profile_combo_refresh_active = True
+        try:
+            for profile_type, spec in PACKET_SOURCE_PROFILE_SPECS.items():
+                combo = getattr(self, self._source_profile_combo_attr(profile_type), None)
+                if combo is None:
+                    continue
+                all_entries = list(profile_store.get(profile_type) or [])
+                filtered_entries = self._filtered_source_profile_entries(profile_type, all_entries)
+                filter_text = self._source_profile_filter_text(profile_type)
+                with QSignalBlocker(combo):
+                    combo.clear()
+                    if filter_text and all_entries and not filtered_entries:
+                        combo.addItem(f"(No matching {spec['title'].lower()} profiles)", "")
+                    else:
+                        combo.addItem(f"(No saved {spec['title'].lower()} selected)", "")
+                    for entry in filtered_entries:
+                        combo.addItem(str(entry.get("label") or spec["title"]), str(entry.get("profile_id") or ""))
+                    target_index = combo.findData(selected_map.get(profile_type) or "")
+                    combo.setCurrentIndex(target_index if target_index >= 0 else 0)
+                self._update_source_profile_filter_summary(profile_type, all_entries, filtered_entries)
+                self._update_source_profile_note(profile_type)
+                self._update_source_profile_summary(profile_type)
+        finally:
+            self._profile_combo_refresh_active = False
+        self._update_source_profile_library_counts()
+
+    def _capture_current_source_profile_values(self, profile_type):
+        payload = self.collect_payload()
+        spec = PACKET_SOURCE_PROFILE_SPECS.get(profile_type, {})
+        return {
+            field_name: str(payload.get(field_name) or "").strip()
+            for field_name, _label in spec.get("fields", [])
+        }
+
+    def _save_source_profile_record(self, profile_type, record, *, selected_profile_id=""):
+        normalized_record = dict(record or {})
+        profile_id = str(normalized_record.get("profile_id") or "").strip()
+        if not profile_id:
+            profile_id = _generate_reference_profile_id(profile_type, normalized_record.get("label"))
+            normalized_record["profile_id"] = profile_id
+        if not str(normalized_record.get("label") or "").strip():
+            normalized_record["label"] = _default_reference_profile_label(
+                profile_type,
+                {
+                    field_name: normalized_record.get(field_name)
+                    for field_name, _label in PACKET_SOURCE_PROFILE_SPECS.get(profile_type, {}).get("fields", [])
+                },
+            )
+        normalized_record["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+        store = self._source_profile_store()
+        updated = False
+        for index, item in enumerate(store.get(profile_type) or []):
+            if str(item.get("profile_id") or "").strip() != profile_id:
+                continue
+            store[profile_type][index] = {
+                **dict(item),
+                **normalized_record,
+            }
+            updated = True
+            break
+        if not updated:
+            store.setdefault(profile_type, []).append(normalized_record)
+        self._save_source_profile_store(store)
+        if profile_type == "va_sources":
+            self._refresh_source_profile_selectors(selected_va_id=selected_profile_id or profile_id)
+        elif profile_type == "community_destinations":
+            self._refresh_source_profile_selectors(selected_community_id=selected_profile_id or profile_id)
+        else:
+            self._refresh_source_profile_selectors(selected_pcp_id=selected_profile_id or profile_id)
+        return normalized_record
+
+    def _open_source_profile_editor(self, profile_type, entry=None):
+        dialog = SourceProfileEditorDialog(
+            profile_type,
+            entry=entry,
+            intake_defaults=self._capture_current_source_profile_values(profile_type),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return dialog.profile_record()
+
+    def _build_applied_source_profile_values(self, profile_type, entry):
+        values = {
+            field_name: str(entry.get(field_name) or "").strip()
+            for field_name, _label in PACKET_SOURCE_PROFILE_SPECS.get(profile_type, {}).get("fields", [])
+        }
+        if profile_type == "va_sources":
+            if values.get("facility") and not values.get("va_medical_center_name"):
+                values["va_medical_center_name"] = values.get("facility")
+            return values
+        if profile_type == "pcp_pcm_profiles":
+            return values
+
+        address_lines = [part.strip() for part in str(values.get("master_provider_address") or "").splitlines() if part.strip()]
+        one_line_address = ", ".join(address_lines)
+        if values.get("master_provider_credentials"):
+            values["provider_credentials"] = values.get("master_provider_credentials")
+        if values.get("master_provider_specialty"):
+            values["provider_specialty"] = values.get("master_provider_specialty")
+        if values.get("master_provider_npi"):
+            values["provider_npi"] = values.get("master_provider_npi")
+            values["va10172_ordering_provider_npi"] = values.get("master_provider_npi")
+        if values.get("master_practice_name") or values.get("community_facility"):
+            values["practice_name"] = values.get("master_practice_name") or values.get("community_facility")
+        if values.get("master_provider_phone"):
+            values["provider_phone"] = values.get("master_provider_phone")
+            values["va10172_ordering_provider_phone"] = values.get("master_provider_phone")
+        if values.get("master_provider_fax"):
+            values["provider_fax"] = values.get("master_provider_fax")
+            values["va10172_ordering_provider_fax"] = values.get("master_provider_fax")
+        if values.get("master_provider_email"):
+            values["provider_email"] = values.get("master_provider_email")
+            values["va10172_ordering_provider_secure_email"] = values.get("master_provider_email")
+        if values.get("master_provider_address"):
+            values["provider_address"] = one_line_address
+            values["va10172_ordering_provider_office_address"] = values.get("master_provider_address")
+        if values.get("provider"):
+            values["va10172_ordering_provider_name_printed"] = values.get("provider")
+        return values
+
+    def _validate_source_profile_values(self, profile_type, values):
+        meaningful = [str(value or "").strip() for value in dict(values or {}).values() if str(value or "").strip()]
+        if meaningful:
+            return True
+        spec = PACKET_SOURCE_PROFILE_SPECS.get(profile_type, {})
+        QMessageBox.information(
+            self,
+            "Nothing To Save",
+            f"Enter at least one {spec.get('title', 'source profile').lower()} value before saving a reusable profile.",
+        )
+        return False
+
+    def _source_profile_name_prompt(self, profile_type, values):
+        spec = PACKET_SOURCE_PROFILE_SPECS.get(profile_type, {})
+        default_name = _default_reference_profile_label(profile_type, values)
+        label, accepted = QInputDialog.getText(
+            self,
+            f"Save {spec.get('title', 'Source')} Profile",
+            "Profile name",
+            text=default_name,
+        )
+        return str(label or "").strip(), bool(accepted)
+
+    def _on_source_profile_selection_changed(self, profile_type):
+        self._update_source_profile_note(profile_type)
+        self._update_source_profile_summary(profile_type)
+        if self._profile_combo_refresh_active:
+            return
+        self._update_current_packet_status()
+
+    def add_manual_source_profile(self, profile_type):
+        record = self._open_source_profile_editor(profile_type)
+        if not record:
+            return
+        saved = self._save_source_profile_record(profile_type, record)
+        QMessageBox.information(
+            self,
+            "Profile Saved",
+            f"{saved.get('label') or 'New profile'} was saved to the Packet Intake profile library.",
+        )
+
+    def edit_selected_source_profile(self, profile_type):
+        profile_id = self._selected_source_profile_id(profile_type)
+        entry = self._find_source_profile_entry(profile_type, profile_id)
+        if not entry:
+            QMessageBox.information(
+                self,
+                "Select A Profile",
+                "Choose a saved profile first, then edit it directly from this profile library.",
+            )
+            return
+        record = self._open_source_profile_editor(profile_type, entry=entry)
+        if not record:
+            return
+        record["profile_id"] = profile_id
+        saved = self._save_source_profile_record(profile_type, record, selected_profile_id=profile_id)
+        QMessageBox.information(
+            self,
+            "Profile Updated",
+            f"{saved.get('label') or 'Selected profile'} was updated in the Packet Intake profile library.",
+        )
+
+    def save_current_source_profile_as_new(self, profile_type):
+        values = self._capture_current_source_profile_values(profile_type)
+        if not self._validate_source_profile_values(profile_type, values):
+            return
+        label, accepted = self._source_profile_name_prompt(profile_type, values)
+        if not accepted:
+            return
+        if not label:
+            QMessageBox.information(self, "Profile Name Required", "Enter a name for the saved profile.")
+            return
+        saved = self._save_source_profile_record(
+            profile_type,
+            {
+                "label": label,
+                **values,
+            },
+        )
+        QMessageBox.information(
+            self,
+            "Profile Saved",
+            f"{saved.get('label') or label} was saved from the current intake values.",
+        )
+
+    def update_selected_source_profile(self, profile_type):
+        profile_id = self._selected_source_profile_id(profile_type)
+        entry = self._find_source_profile_entry(profile_type, profile_id)
+        if not entry:
+            QMessageBox.information(self, "Select A Profile", "Choose a saved profile first, then update it from the current intake values.")
+            return
+        values = self._capture_current_source_profile_values(profile_type)
+        if not self._validate_source_profile_values(profile_type, values):
+            return
+        self._save_source_profile_record(
+            profile_type,
+            {
+                **dict(entry),
+                **values,
+            },
+            selected_profile_id=profile_id,
+        )
+        QMessageBox.information(
+            self,
+            "Profile Updated",
+            f"{entry.get('label') or 'Selected profile'} was updated from the current intake values.",
+        )
+
+    def delete_selected_source_profile(self, profile_type):
+        profile_id = self._selected_source_profile_id(profile_type)
+        entry = self._find_source_profile_entry(profile_type, profile_id)
+        if not entry:
+            QMessageBox.information(self, "Select A Profile", "Choose a saved profile first, then delete it.")
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete Saved Profile",
+            f"Remove {entry.get('label') or 'this profile'} from the Packet Intake profile library?\n\nExisting drafts will keep their own saved snapshot values.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        store = self._source_profile_store()
+        store[profile_type] = [
+            item for item in (store.get(profile_type) or [])
+            if str(item.get("profile_id") or "").strip() != profile_id
+        ]
+        self._save_source_profile_store(store)
+        self._refresh_source_profile_selectors()
+        QMessageBox.information(self, "Profile Deleted", f"{entry.get('label') or 'The selected profile'} was removed.")
+
+    def apply_selected_source_profile(self, profile_type):
+        profile_id = self._selected_source_profile_id(profile_type)
+        entry = self._find_source_profile_entry(profile_type, profile_id)
+        if not entry:
+            QMessageBox.information(self, "Select A Profile", "Choose a saved profile first, then apply it to the current packet.")
+            return
+        for field_name, value in self._build_applied_source_profile_values(profile_type, entry).items():
+            self._set_payload_field_value(field_name, value)
+        self._shared_sync_state.clear()
+        self.refresh_preview()
+
+    def _source_profile_export_payload(self):
+        return {
+            "schema_version": "1.0",
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "source": "TrueCore Packet Builder Source Profile Library",
+            "packet_builder_reference_profiles": self._source_profile_store(),
+        }
+
+    def _extract_imported_source_profile_store(self, payload):
+        if not isinstance(payload, dict):
+            return None
+        candidate = payload.get("packet_builder_reference_profiles")
+        if isinstance(candidate, dict):
+            return normalize_packet_builder_reference_profiles(candidate)
+        if any(key in payload for key in PACKET_SOURCE_PROFILE_SPECS):
+            return normalize_packet_builder_reference_profiles(payload)
+        return None
+
+    def _source_profile_merge_key(self, profile_type, entry):
+        label = re.sub(r"\s+", " ", str((entry or {}).get("label") or "").strip()).lower()
+        if label:
+            return label
+        values = []
+        for field_name, _label in PACKET_SOURCE_PROFILE_SPECS.get(profile_type, {}).get("fields", []):
+            field_value = re.sub(r"\s+", " ", str((entry or {}).get(field_name) or "").strip()).lower()
+            if field_value:
+                values.append(f"{field_name}:{field_value}")
+        return " | ".join(values)
+
+    def _merge_source_profile_store(self, current_store, imported_store):
+        merged = normalize_packet_builder_reference_profiles(current_store)
+        incoming = normalize_packet_builder_reference_profiles(imported_store)
+        for profile_type in PACKET_SOURCE_PROFILE_SPECS:
+            entries = list(merged.get(profile_type) or [])
+            id_to_index = {
+                str(item.get("profile_id") or "").strip(): index
+                for index, item in enumerate(entries)
+                if str(item.get("profile_id") or "").strip()
+            }
+            key_to_index = {}
+            for index, item in enumerate(entries):
+                merge_key = self._source_profile_merge_key(profile_type, item)
+                if merge_key:
+                    key_to_index.setdefault(merge_key, index)
+            for imported_entry in incoming.get(profile_type) or []:
+                entry = dict(imported_entry or {})
+                profile_id = str(entry.get("profile_id") or "").strip()
+                merge_key = self._source_profile_merge_key(profile_type, entry)
+                target_index = None
+                if profile_id and profile_id in id_to_index:
+                    target_index = id_to_index[profile_id]
+                elif merge_key and merge_key in key_to_index:
+                    target_index = key_to_index[merge_key]
+                if target_index is not None:
+                    entries[target_index] = {
+                        **dict(entries[target_index]),
+                        **entry,
+                    }
+                    refreshed_id = str(entries[target_index].get("profile_id") or "").strip()
+                    if refreshed_id:
+                        id_to_index[refreshed_id] = target_index
+                    refreshed_key = self._source_profile_merge_key(profile_type, entries[target_index])
+                    if refreshed_key:
+                        key_to_index[refreshed_key] = target_index
+                    continue
+                if not profile_id or profile_id in id_to_index:
+                    entry["profile_id"] = _generate_reference_profile_id(profile_type, entry.get("label"))
+                entries.append(entry)
+                new_index = len(entries) - 1
+                id_to_index[str(entry.get("profile_id") or "").strip()] = new_index
+                if merge_key:
+                    key_to_index[merge_key] = new_index
+            merged[profile_type] = entries
+        return normalize_packet_builder_reference_profiles(merged)
+
+    def _source_profile_count_summary(self, store):
+        parts = []
+        for profile_type, spec in PACKET_SOURCE_PROFILE_SPECS.items():
+            parts.append(f"{spec.get('title')}: {len((store or {}).get(profile_type) or [])}")
+        return " | ".join(parts)
+
+    def open_profile_library_tab(self):
+        if hasattr(self, "packet_builder_left_tabs") and hasattr(self, "packet_profile_library_page"):
+            self.packet_builder_left_tabs.setCurrentWidget(self.packet_profile_library_page)
+
+    def choose_source_profile_library_dir(self):
+        current_dir = (
+            self.config.get("source_profile_library_dir")
+            or self.config.get("packet_builder_export_dir")
+            or _default_export_dir()
+        )
+        selected = QFileDialog.getExistingDirectory(self, "Choose Source Profile Library Folder", current_dir)
+        if not selected:
+            return
+        self.config = dict(self.save_config_callback({"source_profile_library_dir": selected}) or {})
+        if hasattr(self, "source_profile_library_dir_value"):
+            self.source_profile_library_dir_value.setText(selected)
+
+    def _resolve_source_profile_library_dir(self):
+        library_dir = str(
+            self.config.get("source_profile_library_dir")
+            or self.config.get("packet_builder_export_dir")
+            or ""
+        ).strip()
+        if library_dir and os.path.isdir(library_dir):
+            return library_dir
+        self.choose_source_profile_library_dir()
+        return str(self.config.get("source_profile_library_dir") or "").strip()
+
+    def export_source_profile_library(self):
+        suggested_dir = self._resolve_source_profile_library_dir() or _default_export_dir()
+        suggested_path = os.path.join(suggested_dir, "truecore_source_profile_library.json")
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Source Profile Library",
+            suggested_path,
+            "JSON Files (*.json);;All Files (*.*)",
+        )
+        if not selected:
+            return
+        export_path = str(selected).strip()
+        export_dir = os.path.dirname(export_path) or suggested_dir
+        try:
+            with open(export_path, "w", encoding="utf-8") as handle:
+                json.dump(self._source_profile_export_payload(), handle, indent=4, ensure_ascii=True, sort_keys=True)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Failed", f"Could not export the source profile library.\n\n{exc}")
+            return
+        self.config = dict(self.save_config_callback({"source_profile_library_dir": export_dir}) or {})
+        if hasattr(self, "source_profile_library_dir_value"):
+            self.source_profile_library_dir_value.setText(export_dir)
+        QMessageBox.information(
+            self,
+            "Library Exported",
+            f"Source profile library exported successfully.\n\n{export_path}\n\n{self._source_profile_count_summary(self._source_profile_store())}",
+        )
+
+    def import_source_profile_library(self):
+        suggested_dir = self._resolve_source_profile_library_dir() or _default_export_dir()
+        selected, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Import Source Profile Library",
+            suggested_dir,
+            "JSON Files (*.json);;All Files (*.*)",
+        )
+        if not selected:
+            return
+        import_path = str(selected).strip()
+        try:
+            with open(import_path, "r", encoding="utf-8-sig") as handle:
+                raw_payload = json.load(handle)
+        except Exception as exc:
+            QMessageBox.warning(self, "Import Failed", f"Could not read that library file.\n\n{exc}")
+            return
+        imported_store = self._extract_imported_source_profile_store(raw_payload)
+        if imported_store is None:
+            QMessageBox.warning(
+                self,
+                "Import Failed",
+                "That file does not look like a valid TrueCore source profile library export.",
+            )
+            return
+        import_dir = os.path.dirname(import_path) or suggested_dir
+        self.config = dict(self.save_config_callback({"source_profile_library_dir": import_dir}) or {})
+        if hasattr(self, "source_profile_library_dir_value"):
+            self.source_profile_library_dir_value.setText(import_dir)
+
+        decision_box = QMessageBox(self)
+        decision_box.setIcon(QMessageBox.Question)
+        decision_box.setWindowTitle("Import Source Profile Library")
+        decision_box.setText("How should this imported library be applied?")
+        decision_box.setInformativeText(
+            "Merge keeps the current library and updates matching entries. Replace discards the current saved source profiles and uses only the imported ones."
+        )
+        merge_button = decision_box.addButton("Merge Into Current Library", QMessageBox.AcceptRole)
+        replace_button = decision_box.addButton("Replace Current Library", QMessageBox.DestructiveRole)
+        cancel_button = decision_box.addButton("Cancel", QMessageBox.RejectRole)
+        decision_box.setDefaultButton(merge_button)
+        decision_box.exec()
+        clicked = decision_box.clickedButton()
+        if clicked == cancel_button or clicked is None:
+            return
+
+        current_store = self._source_profile_store()
+        if clicked == replace_button:
+            new_store = normalize_packet_builder_reference_profiles(imported_store)
+            action_label = "replaced"
+        else:
+            new_store = self._merge_source_profile_store(current_store, imported_store)
+            action_label = "merged"
+        self._save_source_profile_store(new_store)
+        self._refresh_source_profile_selectors()
+        QMessageBox.information(
+            self,
+            "Library Imported",
+            f"Source profile library {action_label} successfully.\n\n{self._source_profile_count_summary(new_store)}",
         )
 
     def _update_wording_assist_list_width(self):
@@ -7319,6 +10576,11 @@ class PacketBuilderTab(QWidget):
                 self.va10172_template_value.setText(
                     str(self.config.get("va_form_10172_template_path") or _default_va_form_10172_template_path() or "")
                 )
+            self._refresh_source_profile_selectors(
+                packet.get("selected_va_source_profile_id"),
+                packet.get("selected_community_destination_profile_id"),
+                packet.get("selected_pcp_pcm_profile_id"),
+            )
             self._shared_sync_state.clear()
         finally:
             self._builder_ready = True
@@ -7607,19 +10869,31 @@ class PacketBuilderTab(QWidget):
         reply = QMessageBox.question(
             self,
             "Start New Packet",
-            "Clear the current working packet and start a new one?",
+            "Clear the current working packet and start a new one?\n\nYou can stage the new packet through the starter wizard or begin blank.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
+        dialog = PacketStartWizardDialog(
+            profile_store=self.config.get("packet_builder_reference_profiles"),
+            starting_profile=self.profile_combo.currentText(),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
         self.current_draft_id = None
         self.current_draft_record = {}
         self._signature_images = {}
-        self._apply_payload_to_widgets(default_packet_builder_payload(), "truecore_packet")
+        if dialog.start_blank_requested():
+            payload = default_packet_builder_payload()
+        else:
+            payload = dialog.build_payload()
+        self._apply_payload_to_widgets(payload, "truecore_packet")
         self.preview_tabs.setCurrentIndex(0)
         if hasattr(self, "packet_builder_left_tabs"):
-            self.packet_builder_left_tabs.setCurrentWidget(self.packet_intake_page)
+            target_page = self.packet_intake_page if dialog.start_blank_requested() else self.packet_workspace_page
+            self.packet_builder_left_tabs.setCurrentWidget(target_page)
         self.refresh_library()
         self._update_current_packet_status()
 
@@ -7789,6 +11063,9 @@ class PacketBuilderTab(QWidget):
         return normalize_packet_builder_payload({
             "packet_title": self.packet_title_input.text().strip(),
             "packet_profile": self.profile_combo.currentText().strip(),
+            "selected_va_source_profile_id": self._selected_source_profile_id("va_sources"),
+            "selected_community_destination_profile_id": self._selected_source_profile_id("community_destinations"),
+            "selected_pcp_pcm_profile_id": self._selected_source_profile_id("pcp_pcm_profiles"),
             "patient_name": self.patient_name_input.text().strip(),
             "date_of_birth": self.dob_input.text().strip(),
             "authorization_number": self.auth_input.text().strip(),
@@ -7815,6 +11092,35 @@ class PacketBuilderTab(QWidget):
             "master_affected_levels": self.master_affected_levels_input.text().strip(),
             "clinical_summary": self.clinical_summary_input.toPlainText().strip(),
             "packet_notes": self.packet_notes_input.toPlainText().strip(),
+            "appeal_letter_date": self.appeal_letter_date_input.text().strip(),
+            "appeal_to_name": self.appeal_to_name_input.text().strip(),
+            "appeal_to_title": self.appeal_to_title_input.text().strip(),
+            "appeal_to_office": self.appeal_to_office_input.text().strip(),
+            "appeal_to_address": self.appeal_to_address_input.toPlainText().strip(),
+            "appeal_from_name": self.appeal_from_name_input.text().strip(),
+            "appeal_from_title": self.appeal_from_title_input.text().strip(),
+            "appeal_from_organization": self.appeal_from_organization_input.text().strip(),
+            "appeal_from_address": self.appeal_from_address_input.toPlainText().strip(),
+            "appeal_from_phone": self.appeal_from_phone_input.text().strip(),
+            "appeal_from_fax": self.appeal_from_fax_input.text().strip(),
+            "appeal_from_email": self.appeal_from_email_input.text().strip(),
+            "appeal_from_npi": self.appeal_from_npi_input.text().strip(),
+            "appeal_subject_line": self.appeal_subject_line_input.text().strip(),
+            "appeal_denied_service": self.appeal_denied_service_input.text().strip(),
+            "appeal_denial_date": self.appeal_denial_date_input.text().strip(),
+            "appeal_denial_source": self.appeal_denial_source_input.text().strip(),
+            "appeal_opening_request": self.appeal_opening_request_input.toPlainText().strip(),
+            "appeal_case_timeline": self.appeal_case_timeline_input.toPlainText().strip(),
+            "appeal_clinical_necessity": self.appeal_clinical_necessity_input.toPlainText().strip(),
+            "appeal_denial_reason_1": self.appeal_denial_reason_1_input.toPlainText().strip(),
+            "appeal_denial_rebuttal_1": self.appeal_denial_rebuttal_1_input.toPlainText().strip(),
+            "appeal_denial_reason_2": self.appeal_denial_reason_2_input.toPlainText().strip(),
+            "appeal_denial_rebuttal_2": self.appeal_denial_rebuttal_2_input.toPlainText().strip(),
+            "appeal_policy_support": self.appeal_policy_support_input.toPlainText().strip(),
+            "appeal_medical_literature_support": self.appeal_medical_literature_support_input.toPlainText().strip(),
+            "appeal_requested_relief": self.appeal_requested_relief_input.toPlainText().strip(),
+            "appeal_exhibits": self.appeal_exhibits_input.toPlainText().strip(),
+            "appeal_closing_contact": self.appeal_closing_contact_input.toPlainText().strip(),
             "scenario_pathology_pattern": self.scenario_pathology_pattern_input.text().strip(),
             "scenario_conservative_duration": self.scenario_conservative_duration_input.text().strip(),
             "scenario_prior_esi_response": self.scenario_prior_esi_response_input.text().strip(),
@@ -8169,6 +11475,7 @@ class PacketBuilderTab(QWidget):
 
     def on_profile_changed(self, profile_name):
         is_referral = is_referral_request_profile(profile_name)
+        is_appeal = is_appeal_letter_profile(profile_name)
         is_consent = is_virtual_consent_profile(profile_name)
         is_cover_sheet = is_submission_cover_profile(profile_name)
         is_seoc = is_seoc_request_profile(profile_name)
@@ -8177,6 +11484,7 @@ class PacketBuilderTab(QWidget):
         is_clinical_doc = is_clinical_documentation_profile(profile_name)
         is_va_10172 = is_va_10172_profile(profile_name)
         self.referral_group.setVisible(is_referral)
+        self.appeal_letter_group.setVisible(is_appeal)
         self.virtual_consent_group.setVisible(is_consent)
         self.submission_cover_group.setVisible(is_cover_sheet)
         self.seoc_request_group.setVisible(is_seoc)
@@ -8922,6 +12230,9 @@ class PacketBuilderTab(QWidget):
         if is_referral_request_profile(payload.get("packet_profile")):
             self._write_referral_request_doc(path, payload)
             return
+        if is_appeal_letter_profile(payload.get("packet_profile")):
+            self._write_appeal_letter_doc_v2(path, payload)
+            return
         if is_virtual_consent_profile(payload.get("packet_profile")):
             self._write_virtual_consent_doc_v2(path, payload)
             return
@@ -9045,6 +12356,158 @@ class PacketBuilderTab(QWidget):
         document.add_paragraph("Our Veteran liaison team is here to assist you.")
         document.add_paragraph(payload.get("liaison_contact_info") or "Pending")
 
+        document.save(path)
+
+    def _write_appeal_letter_doc_v2(self, path, payload):
+        document = Document()
+        section = document.sections[0]
+        section.top_margin = Pt(46)
+        section.bottom_margin = Pt(46)
+        section.left_margin = Pt(72)
+        section.right_margin = Pt(72)
+
+        normal_style = document.styles["Normal"]
+        normal_style.font.name = "Calibri"
+        normal_style.font.size = Pt(10.5)
+        body_indent = Pt(18)
+        block_indent = Pt(30)
+
+        def fill_text(value, blank="______________"):
+            text = str(value or "").strip()
+            return text or blank
+
+        def add_line(text, bold=False, space_after=Pt(4), alignment=None, left_indent=None):
+            paragraph = document.add_paragraph()
+            if alignment is not None:
+                paragraph.alignment = alignment
+            if left_indent is not None:
+                paragraph.paragraph_format.left_indent = left_indent
+            paragraph.paragraph_format.space_after = space_after
+            run = paragraph.add_run(text)
+            run.bold = bold
+            return paragraph
+
+        def add_multiline_block(text, left_indent=body_indent, space_after=Pt(6)):
+            lines = [line for line in str(text or "").splitlines()] or [""]
+            paragraph = document.add_paragraph()
+            paragraph.paragraph_format.left_indent = left_indent
+            paragraph.paragraph_format.space_after = space_after
+            paragraph.add_run(lines[0] or "____________________________________________________________")
+            for line in lines[1:]:
+                paragraph.add_run("\n" + line)
+            return paragraph
+
+        def add_bullets(text_value, fallback_text):
+            lines = [line.strip() for line in str(text_value or "").splitlines() if line.strip()]
+            if not lines:
+                lines = [fallback_text]
+            for line in lines:
+                add_line("- " + line, space_after=Pt(1), left_indent=block_indent)
+
+        title = payload.get("packet_title") or "COMMUNITY CARE APPEAL LETTER"
+        appeal_date = fill_text(payload.get("appeal_letter_date"), "[Date]")
+        recipient_lines = [
+            str(payload.get("appeal_to_name") or "").strip(),
+            str(payload.get("appeal_to_title") or "").strip(),
+            _appeal_recipient_office(payload),
+            str(payload.get("appeal_to_address") or "").strip(),
+        ]
+        recipient_lines = [line for line in recipient_lines if line]
+        sender_name = fill_text(_appeal_sender_name(payload), "[Sender Name]")
+        sender_title = str(_appeal_sender_title(payload) or "").strip()
+        sender_org = fill_text(_appeal_sender_organization(payload), "[Treating Office]")
+        sender_address = str(_appeal_sender_address(payload) or "").strip()
+        sender_phone = str(_appeal_sender_phone(payload) or "").strip()
+        sender_fax = str(_appeal_sender_fax(payload) or "").strip()
+        sender_email = str(_appeal_sender_email(payload) or "").strip()
+        sender_npi = str(_appeal_sender_npi(payload) or "").strip()
+        sender_contact_line = " | ".join(
+            part for part in [
+                f"Phone: {sender_phone}" if sender_phone else "",
+                f"Fax: {sender_fax}" if sender_fax else "",
+                f"Email: {sender_email}" if sender_email else "",
+                f"NPI: {sender_npi}" if sender_npi else "",
+            ] if part
+        )
+        subject_line = _appeal_subject_line(payload)
+        service_subtitle = str(payload.get("appeal_denied_service") or payload.get("requested_service") or "").strip()
+        denied_service = fill_text(_appeal_requested_service(payload), "[Requested Service]")
+        denial_date = fill_text(payload.get("appeal_denial_date"), "[Denial Date]")
+        denial_source = fill_text(payload.get("appeal_denial_source") or payload.get("facility"), "[Reviewing Source]")
+
+        add_line(title, bold=True, alignment=1, space_after=Pt(10))
+        if service_subtitle:
+            add_line(service_subtitle, bold=True, alignment=1, space_after=Pt(6))
+        add_line(appeal_date, space_after=Pt(10))
+        add_line("\n".join(recipient_lines or [_appeal_recipient_office(payload)]), space_after=Pt(10))
+        add_line(f"RE: {subject_line}", bold=True, space_after=Pt(6))
+        add_line(
+            f"Veteran Name: {fill_text(payload.get('patient_name'), '[Full Name]')}    "
+            f"DOB: {fill_text(payload.get('date_of_birth'), '[MM/DD/YYYY]')}",
+            space_after=Pt(2),
+        )
+        add_line(f"VA Authorization / Claim: {fill_text(payload.get('authorization_number'), '[Authorization / Claim]')}", space_after=Pt(2))
+        add_line(f"Requested Service: {denied_service}", space_after=Pt(2))
+        add_line(
+            f"Denied / Deferred On: {denial_date}    Reviewing Office: {denial_source}",
+            space_after=Pt(2),
+        )
+        add_line(
+            "Diagnosis: "
+            + fill_text(payload.get("diagnosis"), "[Primary Diagnosis]")
+            + (
+                f" | ICD-10: {payload.get('icd_codes').strip()}"
+                if str(payload.get("icd_codes") or "").strip() else
+                ""
+            ),
+            space_after=Pt(8),
+        )
+
+        salutation = f"Dear {payload.get('appeal_to_name').strip()}:" if str(payload.get("appeal_to_name") or "").strip() else "To Whom It May Concern:"
+        add_line(salutation, bold=True, space_after=Pt(4))
+        add_line("I. Summary of the Appeal", bold=True, space_after=Pt(2))
+        add_multiline_block(payload.get("appeal_opening_request"))
+        add_line("II. Patient-Specific Clinical Necessity", bold=True, space_after=Pt(2))
+        add_multiline_block(payload.get("appeal_clinical_necessity"))
+        add_line("III. Referral and Community Care Authority", bold=True, space_after=Pt(2))
+        add_multiline_block(_appeal_case_timeline(payload))
+
+        add_line("IV. Response to Denial Grounds", bold=True, space_after=Pt(2))
+        add_line(
+            "Denial reason or concern 1: " + fill_text(payload.get("appeal_denial_reason_1"), "________________________________________"),
+            left_indent=body_indent,
+            space_after=Pt(2),
+        )
+        add_multiline_block(payload.get("appeal_denial_rebuttal_1"), left_indent=block_indent)
+        if str(payload.get("appeal_denial_reason_2") or "").strip() or str(payload.get("appeal_denial_rebuttal_2") or "").strip():
+            add_line(
+                "Denial reason or concern 2: " + fill_text(payload.get("appeal_denial_reason_2"), "________________________________________"),
+                left_indent=body_indent,
+                space_after=Pt(2),
+            )
+            add_multiline_block(payload.get("appeal_denial_rebuttal_2"), left_indent=block_indent)
+
+        add_line("Policy and Appeal Support", bold=True, space_after=Pt(2))
+        add_multiline_block(payload.get("appeal_policy_support"))
+        if str(payload.get("appeal_medical_literature_support") or "").strip():
+            add_line("V. Scientific Evidence Summary", bold=True, space_after=Pt(2))
+            add_multiline_block(payload.get("appeal_medical_literature_support"))
+        add_line("VI. Requested Determination", bold=True, space_after=Pt(2))
+        add_multiline_block(payload.get("appeal_requested_relief"))
+        add_line("Exhibit Checklist for Submission", bold=True, space_after=Pt(2))
+        add_bullets(payload.get("appeal_exhibits"), "Supporting exhibits pending")
+        add_line("Closing Contact Statement", bold=True, space_after=Pt(2))
+        add_multiline_block(payload.get("appeal_closing_contact"), space_after=Pt(10))
+
+        add_line("Respectfully,", space_after=Pt(8))
+        add_line(sender_name, space_after=Pt(2))
+        if sender_title:
+            add_line(sender_title, space_after=Pt(2))
+        add_line(sender_org, space_after=Pt(2))
+        if sender_address:
+            add_line(sender_address, space_after=Pt(2))
+        if sender_contact_line:
+            add_line(sender_contact_line, space_after=Pt(0))
         document.save(path)
 
     def _write_virtual_consent_doc(self, path, payload):
@@ -10733,7 +14196,6 @@ class DevToolsDialog(QDialog):
 
         tabs = QTabWidget()
         tabs.addTab(self._build_overview_tab(), "Overview")
-        tabs.addTab(LegacyGalleryTab(self.config, self.save_config, self), "Legacy UI Gallery")
         tabs.addTab(PacketBuilderTab(self.config, self.save_config, self), "Packet Builder Studio")
         layout.addWidget(tabs, stretch=1)
 

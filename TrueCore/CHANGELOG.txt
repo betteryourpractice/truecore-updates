@@ -862,3 +862,12 @@ CHANGES
 
 * Office setup gating, credential hardening, and manager console polish
 
+
+
+VERSION: dv2.4
+DATE: 2026-06-30
+
+CHANGES
+
+* Appeal letter wording assist pass 1 and current dev workspace refresh
+

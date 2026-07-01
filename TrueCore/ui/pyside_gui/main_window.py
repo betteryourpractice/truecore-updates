@@ -639,13 +639,14 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
             self._dev_tools_dialog.activateWindow()
             return
 
+        # Keep Dev Tools as an independent top-level window so minimizing the
+        # analysis window does not also minimize Packet Builder.
         dialog = DevToolsDialog(
             machine_role=self.machine_role,
             primary_update_channel=self.primary_update_channel,
             reference_update_channel=self.reference_update_channel,
             developer_tools_enabled=self.developer_tools_enabled,
             private_dev_channel=self.private_dev_channel,
-            parent=self,
         )
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
         dialog.destroyed.connect(lambda *_: setattr(self, "_dev_tools_dialog", None))
