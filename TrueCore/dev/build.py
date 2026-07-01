@@ -81,6 +81,8 @@ PRODUCTION_RELEASE_CHANNEL_URL = "https://raw.githubusercontent.com/betteryourpr
 DEV_RELEASE_CHANNEL_URL = "https://raw.githubusercontent.com/betteryourpractice/truecore-updates/main/version-dev.json"
 PUBLIC_DEV_CHANNEL_ENABLED = False
 DIST_ROOT = os.path.join(ROOT_DIR, "dist")
+PRODUCTION_SOURCE_BRANCH_NAME = "office-main"
+DEV_SOURCE_BRANCH_NAME = "dev-main"
 
 GUI_DIR = os.path.join(CORE_DIR, "ui", "pyside_gui")
 
@@ -494,10 +496,101 @@ def read_git_branch(*, cwd=None):
     return branch_name
 
 
-def push_git_head(remote_name, *, cwd=None):
+def branch_exists(branch_name, *, cwd=None):
+    result = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+        cwd=cwd or ROOT_DIR,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def get_lane_branch_name(build_channel):
+    normalized = str(build_channel or "").strip().lower()
+    if normalized == "dev":
+        return DEV_SOURCE_BRANCH_NAME
+    if normalized == "production":
+        return PRODUCTION_SOURCE_BRANCH_NAME
+    return ""
+
+
+def sync_branch_to_remote(local_branch_name, remote_name, *, cwd=None):
+    if not local_branch_name or not remote_name:
+        return False
+
+    remote_ref = f"{remote_name}/main"
+    fetch_result = run_git_command(["git", "fetch", remote_name, "--tags"], cwd=cwd)
+    if fetch_result != 0:
+        print(f"ERROR: failed to fetch {remote_name} before branch sync.")
+        return False
+
+    if branch_exists(local_branch_name, cwd=cwd):
+        checkout_result = run_git_command(["git", "checkout", local_branch_name], cwd=cwd)
+        if checkout_result != 0:
+            print(f"ERROR: failed to checkout local branch {local_branch_name}.")
+            return False
+        merge_result = run_git_command(["git", "merge", "--ff-only", remote_ref], cwd=cwd)
+        if merge_result != 0:
+            print(
+                f"ERROR: local branch {local_branch_name} cannot fast-forward to {remote_ref}. "
+                "Resolve or reset that branch before continuing."
+            )
+            return False
+    else:
+        checkout_result = run_git_command(
+            ["git", "checkout", "-b", local_branch_name, "--track", remote_ref],
+            cwd=cwd,
+        )
+        if checkout_result != 0:
+            print(
+                f"ERROR: failed to create local branch {local_branch_name} tracking {remote_ref}."
+            )
+            return False
+
+    return True
+
+
+def switch_to_lane_branch(build_channel):
+    if has_git_changes():
+        print(
+            "ERROR: working tree has uncommitted changes. Commit or stash them before switching release lanes."
+        )
+        sys.exit(1)
+
+    source_remote = select_source_remote(build_channel)
+    source_remote_name = source_remote["name"]
+    lane_branch_name = get_lane_branch_name(build_channel)
+
+    if not source_remote_name:
+        print(
+            f"ERROR: no source remote is configured for the {str(build_channel or '').strip().lower()} release lane."
+        )
+        sys.exit(1)
+
+    if not lane_branch_name:
+        print(f"ERROR: unsupported build channel for branch routing: {build_channel}")
+        sys.exit(1)
+
+    if not sync_branch_to_remote(lane_branch_name, source_remote_name):
+        sys.exit(1)
+
+    print(
+        f"\nRelease branch ready: {lane_branch_name} tracking {source_remote_name}/main.\n"
+    )
+    return {
+        "branch_name": lane_branch_name,
+        "remote_name": source_remote_name,
+        "remote_url": source_remote["url"],
+    }
+
+
+def push_git_head(remote_name, *, cwd=None, remote_branch_name="main"):
     branch_name = read_git_branch(cwd=cwd)
     if not remote_name:
         return 1
+    target_branch_name = str(remote_branch_name or "").strip()
+    if target_branch_name:
+        return run_git_command(["git", "push", remote_name, f"HEAD:{target_branch_name}"], cwd=cwd)
     if branch_name and branch_name.upper() != "HEAD":
         return run_git_command(["git", "push", remote_name, f"HEAD:{branch_name}"], cwd=cwd)
     return run_git_command(["git", "push", remote_name, "HEAD"], cwd=cwd)
@@ -547,12 +640,14 @@ def build_release_title(build_channel, version_label):
 def print_lane_summary(build_channel, *, private_dev_config=None):
     build_channel = str(build_channel or "").strip().lower()
     source_remote = select_source_remote(build_channel)
+    lane_branch_name = get_lane_branch_name(build_channel) or "(unresolved)"
     release_repo_slug = build_release_repo_slug(build_channel, private_dev_config=private_dev_config) or "(unresolved)"
     manifest_name = "version-dev.json" if build_channel == "dev" else "version.json"
     runtime_folder = os.path.join("dist", "DEVELOPMENT" if build_channel == "dev" else "OFFICE")
 
     print("\nRelease lane summary:")
     print(f"- Build channel: {build_channel.title()}")
+    print(f"- Local release branch: {lane_branch_name}")
     if source_remote["name"]:
         print(f"- Source remote: {source_remote['name']} -> {source_remote['url'] or 'unresolved'}")
     else:
@@ -815,7 +910,7 @@ def publish_release_changes(version_label, notes, *, build_channel, private_dev_
                     "release_assets_synced": False,
                 }
 
-        push_result = push_git_head(source_remote_name)
+        push_result = push_git_head(source_remote_name, remote_branch_name="main")
         if push_result != 0:
             print(f"ERROR: git push failed for source remote {source_remote_name or 'unknown'}.")
             return {
@@ -1115,6 +1210,7 @@ def runtime_startup_test():
 # -------------------------------------------------
 
 build_channel = prompt_build_channel()
+lane_branch = switch_to_lane_branch(build_channel)
 release_channel_url = DEV_RELEASE_CHANNEL_URL if build_channel == "dev" and PUBLIC_DEV_CHANNEL_ENABLED else PRODUCTION_RELEASE_CHANNEL_URL
 version_track_path = DEV_VERSION_PATH if build_channel == "dev" else VERSION_PATH
 default_track_version = "0.0" if build_channel == "dev" else "5.0"

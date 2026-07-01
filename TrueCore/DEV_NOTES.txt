@@ -14,6 +14,9 @@ Production releases require typing `PRODUCTION` before the public office lane ca
 Source-publish lanes:
 Production source uses `office-source` if present, otherwise `origin`.
 DEV source uses `dev-source` if configured; otherwise DEV source commits stay local while the private DEV release still publishes.
+Local branch lanes:
+Production builds auto-switch to `office-main` before version bumping and publishing.
+DEV builds auto-switch to `dev-main` before version bumping and publishing.
 
 Versioning:
 `TrueCore/VERSION.txt` stores the production version track.
