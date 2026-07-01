@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QTableWidgetItem,
     QHeaderView,
-    QGraphicsOpacityEffect
+    QGraphicsOpacityEffect,
+    QSizePolicy,
 )
 
 from PySide6.QtGui import QGuiApplication, QIcon, QColor, QPixmap, QFont
@@ -291,9 +292,17 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         header = QFrame()
         header.setObjectName("headerPanel")
 
-        header_layout = QHBoxLayout()
+        header_layout = QVBoxLayout()
+        header_layout.setContentsMargins(12, 10, 20, 10)
+        header_layout.setSpacing(12)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(0)
 
         title_block = QVBoxLayout()
+        title_block.setContentsMargins(0, 0, 0, 0)
+        title_block.setSpacing(6)
 
         title = QLabel("TRUEVALOUR PACKET AUDITOR")
         title.setObjectName("appTitle")
@@ -304,8 +313,9 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         title_block.addWidget(title)
         title_block.addWidget(subtitle)
 
-        header_layout.addLayout(title_block)
-        header_layout.addStretch()
+        title_row.addLayout(title_block, 1)
+        title_row.addStretch()
+        header_layout.addLayout(title_row)
 
         self.btn_admin = QPushButton(
             QIcon(icon_base + "settings.svg"),
@@ -337,12 +347,25 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         self.btn_close = QPushButton("Exit")
         self.btn_close.setObjectName("closeButton")
 
-        header_layout.addWidget(self.btn_scan_diagnostics)
-        header_layout.addWidget(self.btn_record_outcome)
+        header_action_buttons = [
+            self.btn_scan_diagnostics,
+            self.btn_record_outcome,
+        ]
         if self.btn_dev_tools:
-            header_layout.addWidget(self.btn_dev_tools)
-        header_layout.addWidget(self.btn_admin)
-        header_layout.addWidget(self.btn_close)
+            header_action_buttons.append(self.btn_dev_tools)
+        header_action_buttons.extend([self.btn_admin, self.btn_close])
+
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(10)
+        action_row.addStretch()
+
+        for btn in header_action_buttons:
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            btn.setMinimumWidth(btn.sizeHint().width() + (18 if btn is self.btn_close else 10))
+            action_row.addWidget(btn)
+
+        header_layout.addLayout(action_row)
 
         header.setLayout(header_layout)
 

@@ -8,6 +8,12 @@ Build:
 Use `python -m TrueCore.dev.build`.
 Portable runtime outputs live in `dist\\OFFICE` and `dist\\DEVELOPMENT`.
 Release upload artifacts live in `release\\`.
+The build script now rejects invalid lane selections instead of defaulting to Production.
+The build script prints a release-lane summary and requires confirmation before it bumps any version files.
+Production releases require typing `PRODUCTION` before the public office lane can continue.
+Source-publish lanes:
+Production source uses `office-source` if present, otherwise `origin`.
+DEV source uses `dev-source` if configured; otherwise DEV source commits stay local while the private DEV release still publishes.
 
 Versioning:
 `TrueCore/VERSION.txt` stores the production version track.

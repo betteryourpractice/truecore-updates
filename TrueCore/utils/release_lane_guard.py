@@ -5,6 +5,8 @@ from TrueCore.utils.private_dev_channel import get_private_dev_repo_slug, is_pri
 
 PUBLIC_OFFICE_REPO_SLUG = "betteryourpractice/truecore-updates"
 PUBLIC_OFFICE_REPO_URL = f"https://github.com/{PUBLIC_OFFICE_REPO_SLUG}"
+PRODUCTION_SOURCE_REMOTE_CANDIDATES = ("office-source", "origin")
+DEV_SOURCE_REMOTE_CANDIDATES = ("dev-source",)
 
 
 def normalize_git_remote_url(url):
@@ -32,15 +34,33 @@ def is_public_office_repo_url(url):
     return extract_github_repo_slug(url) == PUBLIC_OFFICE_REPO_SLUG
 
 
-def evaluate_release_lane(build_channel, origin_url, *, private_dev_config=None, public_dev_channel_enabled=False):
-    normalized_origin = normalize_git_remote_url(origin_url)
-    origin_repo_slug = extract_github_repo_slug(normalized_origin)
+def resolve_source_remote_name(build_channel, available_remote_names):
+    candidates = (
+        PRODUCTION_SOURCE_REMOTE_CANDIDATES
+        if str(build_channel or "").strip().lower() == "production"
+        else DEV_SOURCE_REMOTE_CANDIDATES
+    )
+    available = {
+        str(name or "").strip().lower(): str(name or "").strip()
+        for name in (available_remote_names or [])
+        if str(name or "").strip()
+    }
+    for candidate in candidates:
+        if candidate.lower() in available:
+            return available[candidate.lower()]
+    return ""
+
+
+def evaluate_release_lane(build_channel, source_remote_url, *, private_dev_config=None, public_dev_channel_enabled=False, source_remote_name=""):
+    normalized_source_remote = normalize_git_remote_url(source_remote_url)
+    source_repo_slug = extract_github_repo_slug(normalized_source_remote)
     private_dev_repo_slug = get_private_dev_repo_slug(private_dev_config or {})
 
     payload = {
         "build_channel": str(build_channel or "").strip().lower(),
-        "origin_url": normalized_origin,
-        "origin_repo_slug": origin_repo_slug,
+        "source_remote_name": str(source_remote_name or "").strip(),
+        "source_remote_url": normalized_source_remote,
+        "source_repo_slug": source_repo_slug,
         "private_dev_repo_slug": private_dev_repo_slug,
         "source_publish_allowed": False,
         "private_dev_publish_expected": False,
@@ -49,9 +69,15 @@ def evaluate_release_lane(build_channel, origin_url, *, private_dev_config=None,
     }
 
     if payload["build_channel"] == "production":
-        if not is_public_office_repo_url(normalized_origin):
+        if not normalized_source_remote:
             payload["errors"].append(
-                "Production publish is only allowed from the public office repo origin."
+                "Production publish requires a configured office source remote."
+            )
+            return payload
+
+        if not is_public_office_repo_url(normalized_source_remote):
+            payload["errors"].append(
+                "Production publish is only allowed from the public office source repo."
             )
             return payload
 
@@ -73,18 +99,16 @@ def evaluate_release_lane(build_channel, origin_url, *, private_dev_config=None,
                 "Private DEV release repo is pointed at the public office repo, which is not allowed."
             )
 
-    if is_public_office_repo_url(normalized_origin):
-        payload["warnings"].append(
-            "DEV source publish is disabled because the current origin is the public office repo."
-        )
-        payload["source_publish_allowed"] = False
-        return payload
-
-    if normalized_origin:
+    if normalized_source_remote:
+        if is_public_office_repo_url(normalized_source_remote):
+            payload["errors"].append(
+                "DEV source remote is pointed at the public office repo, which is not allowed."
+            )
+            return payload
         payload["source_publish_allowed"] = True
     else:
         payload["warnings"].append(
-            "No git origin was detected, so DEV source changes will stay local."
+            "No DEV source remote is configured, so DEV source changes will stay local while the private DEV release still publishes."
         )
 
     return payload

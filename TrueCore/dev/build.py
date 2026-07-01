@@ -29,10 +29,16 @@ from TrueCore.dev.update_channel_manager import (
     build_signed_channel_manifest,
     write_manifest,
 )
-from TrueCore.utils.private_dev_channel import load_private_dev_channel_config, is_private_dev_channel_enabled
+from TrueCore.utils.private_dev_channel import (
+    load_private_dev_channel_config,
+    is_private_dev_channel_enabled,
+    get_private_dev_repo_slug,
+)
 from TrueCore.utils.release_lane_guard import (
+    PUBLIC_OFFICE_REPO_SLUG,
     evaluate_release_lane,
     normalize_git_remote_url,
+    resolve_source_remote_name,
 )
 
 print("=====================================")
@@ -433,6 +439,23 @@ def get_git_remote_url(remote_name="origin", *, cwd=None):
     return (result.stdout or "").strip() or None
 
 
+def list_git_remotes(*, cwd=None):
+    result = subprocess.run(
+        ["git", "remote"],
+        cwd=cwd or ROOT_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return [
+        line.strip()
+        for line in (result.stdout or "").splitlines()
+        if line.strip()
+    ]
+
+
 def has_git_changes(*, cwd=None):
     result = subprocess.run(
         ["git", "status", "--porcelain"],
@@ -455,6 +478,203 @@ def read_git_head(*, cwd=None):
     if result.returncode != 0:
         return None
     return (result.stdout or "").strip() or None
+
+
+def read_git_branch(*, cwd=None):
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=cwd or ROOT_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    branch_name = (result.stdout or "").strip() or None
+    return branch_name
+
+
+def push_git_head(remote_name, *, cwd=None):
+    branch_name = read_git_branch(cwd=cwd)
+    if not remote_name:
+        return 1
+    if branch_name and branch_name.upper() != "HEAD":
+        return run_git_command(["git", "push", remote_name, f"HEAD:{branch_name}"], cwd=cwd)
+    return run_git_command(["git", "push", remote_name, "HEAD"], cwd=cwd)
+
+
+def select_source_remote(build_channel, *, cwd=None):
+    available_remotes = list_git_remotes(cwd=cwd)
+    remote_name = resolve_source_remote_name(build_channel, available_remotes)
+    remote_url = get_git_remote_url(remote_name, cwd=cwd) if remote_name else None
+    return {
+        "name": remote_name,
+        "url": remote_url,
+        "available_remotes": available_remotes,
+    }
+
+
+def is_gh_cli_available():
+    result = subprocess.run(
+        ["gh", "--version"],
+        cwd=ROOT_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def build_release_repo_slug(build_channel, *, private_dev_config=None):
+    if str(build_channel or "").strip().lower() == "production":
+        return PUBLIC_OFFICE_REPO_SLUG
+    if str(build_channel or "").strip().lower() == "dev":
+        if not PUBLIC_DEV_CHANNEL_ENABLED:
+            return get_private_dev_repo_slug(private_dev_config or {})
+        return PUBLIC_OFFICE_REPO_SLUG
+    return None
+
+
+def build_release_title(build_channel, version_label):
+    version_label = str(version_label or "").strip()
+    if str(build_channel or "").strip().lower() == "dev":
+        numeric = version_label[2:] if version_label.lower().startswith("dv") else version_label
+        return f"Dev Version {numeric}"
+    numeric = version_label[1:] if version_label.lower().startswith("v") else version_label
+    return f"TrueCore {numeric}"
+
+
+def print_lane_summary(build_channel, *, private_dev_config=None):
+    build_channel = str(build_channel or "").strip().lower()
+    source_remote = select_source_remote(build_channel)
+    release_repo_slug = build_release_repo_slug(build_channel, private_dev_config=private_dev_config) or "(unresolved)"
+    manifest_name = "version-dev.json" if build_channel == "dev" else "version.json"
+    runtime_folder = os.path.join("dist", "DEVELOPMENT" if build_channel == "dev" else "OFFICE")
+
+    print("\nRelease lane summary:")
+    print(f"- Build channel: {build_channel.title()}")
+    if source_remote["name"]:
+        print(f"- Source remote: {source_remote['name']} -> {source_remote['url'] or 'unresolved'}")
+    else:
+        if build_channel == "dev":
+            print("- Source remote: local-only DEV source (no dev-source remote configured)")
+        else:
+            print("- Source remote: not configured")
+    print(f"- Release repo: {release_repo_slug}")
+    print(f"- Manifest target: {manifest_name}")
+    print(f"- Portable runtime folder: {runtime_folder}")
+    if build_channel == "dev" and not source_remote["name"]:
+        print("- DEV source push policy: source stays local; private DEV manifest/tag/release still publish.")
+    elif build_channel == "dev":
+        print("- DEV source push policy: push source to dev-source and publish private DEV release.")
+    else:
+        print("- Production source push policy: push source and release through the public office lane.")
+
+
+def confirm_lane_summary_or_exit(build_channel, *, private_dev_config=None):
+    print_lane_summary(build_channel, private_dev_config=private_dev_config)
+    if str(build_channel or "").strip().lower() == "production":
+        confirm = input(
+            "\nType PRODUCTION to confirm the public office release lane, or press Enter to cancel: "
+        ).strip()
+        if confirm != "PRODUCTION":
+            print("\nBuild cancelled before version bump.\n")
+            sys.exit(0)
+        return
+
+    confirm = input("\nProceed with this DEV release lane? (Y/n): ").strip().lower()
+    if confirm in {"n", "no"}:
+        print("\nBuild cancelled before version bump.\n")
+        sys.exit(0)
+
+
+def prompt_build_channel():
+    print("\nSelect build channel:")
+    print("1 - Production")
+    print("2 - Dev\n")
+
+    while True:
+        channel_choice = input("Choose 1 or 2: ").strip()
+        if channel_choice == "1":
+            return "production"
+        if channel_choice == "2":
+            return "dev"
+        print("Invalid choice. Enter 1 for Production or 2 for Dev.\n")
+
+
+def prompt_update_type():
+    print("Select update type:")
+    print("1 - BIG update")
+    print("2 - SMALL fix\n")
+
+    while True:
+        choice = input("Choose 1 or 2: ").strip()
+        if choice == "1":
+            return True
+        if choice == "2":
+            return False
+        print("Invalid choice. Enter 1 for BIG update or 2 for SMALL fix.\n")
+
+
+def sync_github_release_assets(version_label, *, notes, build_channel, release_assets=None, private_dev_config=None):
+    asset_paths = [
+        os.path.abspath(path)
+        for path in (release_assets or [])
+        if path and os.path.exists(path)
+    ]
+    if not asset_paths:
+        print("Release asset sync skipped: no release artifacts were provided.")
+        return True
+
+    repo_slug = build_release_repo_slug(build_channel, private_dev_config=private_dev_config)
+    if not repo_slug:
+        print("ERROR: release repo slug could not be determined for this build lane.")
+        return False
+
+    if not is_gh_cli_available():
+        print("ERROR: GitHub CLI (gh) is required to publish release assets automatically.")
+        return False
+
+    release_title = build_release_title(build_channel, version_label)
+    release_notes = str(notes or "").strip() or release_title
+
+    view_result = subprocess.run(
+        ["gh", "release", "view", version_label, "--repo", repo_slug, "--json", "tagName"],
+        cwd=ROOT_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if view_result.returncode == 0:
+        edit_result = subprocess.run(
+            ["gh", "release", "edit", version_label, "--repo", repo_slug, "--title", release_title, "--notes", release_notes],
+            cwd=ROOT_DIR,
+            check=False,
+        )
+        if edit_result.returncode != 0:
+            print(f"ERROR: failed to edit GitHub release {version_label} in {repo_slug}.")
+            return False
+        upload_result = subprocess.run(
+            ["gh", "release", "upload", version_label, *asset_paths, "--repo", repo_slug, "--clobber"],
+            cwd=ROOT_DIR,
+            check=False,
+        )
+        if upload_result.returncode != 0:
+            print(f"ERROR: failed to upload release assets for {version_label} in {repo_slug}.")
+            return False
+    else:
+        create_result = subprocess.run(
+            ["gh", "release", "create", version_label, *asset_paths, "--repo", repo_slug, "--title", release_title, "--notes", release_notes],
+            cwd=ROOT_DIR,
+            check=False,
+        )
+        if create_result.returncode != 0:
+            print(f"ERROR: failed to create GitHub release {version_label} in {repo_slug}.")
+            return False
+
+    print(f"GitHub release assets synced for {version_label} -> {repo_slug}.")
+    return True
 
 
 def sync_git_release_tag(version_label, *, commit_ref="HEAD", remote_name="origin", cwd=None):
@@ -535,7 +755,7 @@ def sync_private_dev_manifest_repo(version_label, *, notes, private_dev_config, 
         shutil.rmtree(clone_root, ignore_errors=True)
 
 
-def publish_release_changes(version_label, notes, *, build_channel, private_dev_config=None, dev_manifest_path=None):
+def publish_release_changes(version_label, notes, *, build_channel, private_dev_config=None, dev_manifest_path=None, release_assets=None):
     commit_message = f"Release {version_label}"
     cleaned_notes = str(notes or "").strip()
     if cleaned_notes:
@@ -543,11 +763,16 @@ def publish_release_changes(version_label, notes, *, build_channel, private_dev_
 
     print("\nPreparing Git publish...\n")
 
+    source_remote = select_source_remote(build_channel)
+    source_remote_name = source_remote["name"]
+    source_remote_url = source_remote["url"]
+
     lane_status = evaluate_release_lane(
         build_channel,
-        get_git_remote_url(),
+        source_remote_url,
         private_dev_config=private_dev_config,
         public_dev_channel_enabled=PUBLIC_DEV_CHANNEL_ENABLED,
+        source_remote_name=source_remote_name,
     )
     source_publish_allowed = bool(lane_status["source_publish_allowed"])
 
@@ -561,6 +786,7 @@ def publish_release_changes(version_label, notes, *, build_channel, private_dev_
             "source_pushed": False,
             "private_dev_synced": False,
             "public_tag_synced": False,
+            "release_assets_synced": False,
         }
 
     if source_publish_allowed:
@@ -572,10 +798,11 @@ def publish_release_changes(version_label, notes, *, build_channel, private_dev_
                 "source_pushed": False,
                 "private_dev_synced": False,
                 "public_tag_synced": False,
+                "release_assets_synced": False,
             }
 
         if not has_git_changes():
-            print("No git changes detected after build. Nothing to commit.\n")
+            print("No new git changes detected after build. Using the current HEAD for publish.\n")
         else:
             commit_result = run_git_command(["git", "commit", "-m", commit_message])
             if commit_result != 0:
@@ -585,17 +812,19 @@ def publish_release_changes(version_label, notes, *, build_channel, private_dev_
                     "source_pushed": False,
                     "private_dev_synced": False,
                     "public_tag_synced": False,
+                    "release_assets_synced": False,
                 }
 
-            push_result = run_git_command(["git", "push"])
-            if push_result != 0:
-                print("ERROR: git push failed.")
-                return {
-                    "success": False,
-                    "source_pushed": False,
-                    "private_dev_synced": False,
-                    "public_tag_synced": False,
-                }
+        push_result = push_git_head(source_remote_name)
+        if push_result != 0:
+            print(f"ERROR: git push failed for source remote {source_remote_name or 'unknown'}.")
+            return {
+                "success": False,
+                "source_pushed": False,
+                "private_dev_synced": False,
+                "public_tag_synced": False,
+                "release_assets_synced": False,
+            }
 
         release_commit = read_git_head()
         if not release_commit:
@@ -605,27 +834,29 @@ def publish_release_changes(version_label, notes, *, build_channel, private_dev_
                 "source_pushed": False,
                 "private_dev_synced": False,
                 "public_tag_synced": False,
+                "release_assets_synced": False,
             }
     else:
         release_commit = read_git_head() or "HEAD"
-        origin_url = normalize_git_remote_url(get_git_remote_url() or "")
-        print(
-            "Skipping source repo commit/push for this dev publish because the current "
-            f"origin points to the public office repo ({origin_url or 'unknown origin'}).\n"
-            "Dev publish will sync only the private dev channel manifest and release tag."
-        )
+        if build_channel == "dev":
+            print(
+                "Skipping DEV source repo commit/push because no dedicated DEV source remote is configured.\n"
+                "DEV publish will sync the private DEV manifest, tag, and release assets only."
+            )
 
     source_pushed = source_publish_allowed
     private_dev_synced = False
     public_tag_synced = False
+    release_assets_synced = False
 
     if build_channel == "production":
-        if not sync_git_release_tag(version_label, commit_ref=release_commit):
+        if not sync_git_release_tag(version_label, commit_ref=release_commit, remote_name=source_remote_name or "origin"):
             return {
                 "success": False,
                 "source_pushed": source_pushed,
                 "private_dev_synced": False,
                 "public_tag_synced": False,
+                "release_assets_synced": False,
             }
         public_tag_synced = True
     elif build_channel == "dev":
@@ -641,8 +872,25 @@ def publish_release_changes(version_label, notes, *, build_channel, private_dev_
                 "source_pushed": source_pushed,
                 "private_dev_synced": False,
                 "public_tag_synced": False,
+                "release_assets_synced": False,
             }
         private_dev_synced = True
+
+    if not sync_github_release_assets(
+        version_label,
+        notes=notes,
+        build_channel=build_channel,
+        release_assets=release_assets,
+        private_dev_config=private_dev_config,
+    ):
+        return {
+            "success": False,
+            "source_pushed": source_pushed,
+            "private_dev_synced": private_dev_synced,
+            "public_tag_synced": public_tag_synced,
+            "release_assets_synced": False,
+        }
+    release_assets_synced = True
 
     print("\nGit publish completed successfully.\n")
     return {
@@ -650,6 +898,7 @@ def publish_release_changes(version_label, notes, *, build_channel, private_dev_
         "source_pushed": source_pushed,
         "private_dev_synced": private_dev_synced,
         "public_tag_synced": public_tag_synced,
+        "release_assets_synced": release_assets_synced,
     }
 
 
@@ -865,12 +1114,7 @@ def runtime_startup_test():
 # VERSION BUMP LOGIC
 # -------------------------------------------------
 
-print("\nSelect build channel:")
-print("1 - Production")
-print("2 - Dev\n")
-
-channel_choice = input("Choose 1 or 2: ").strip()
-build_channel = "dev" if channel_choice == "2" else "production"
+build_channel = prompt_build_channel()
 release_channel_url = DEV_RELEASE_CHANNEL_URL if build_channel == "dev" and PUBLIC_DEV_CHANNEL_ENABLED else PRODUCTION_RELEASE_CHANNEL_URL
 version_track_path = DEV_VERSION_PATH if build_channel == "dev" else VERSION_PATH
 default_track_version = "0.0" if build_channel == "dev" else "5.0"
@@ -878,13 +1122,9 @@ current_version = read_version(version_track_path, default_version=default_track
 current_version_label = format_release_tag(build_channel, current_version)
 
 print(f"Current {build_channel.title()} Version: {current_version_label}\n")
+confirm_lane_summary_or_exit(build_channel, private_dev_config=load_private_dev_channel_config())
 
-print("Select update type:")
-print("1 - BIG update")
-print("2 - SMALL fix\n")
-
-choice = input("Choose 1 or 2: ").strip()
-is_big_update = choice == "1"
+is_big_update = prompt_update_type()
 new_version = bump_numeric_version(current_version, is_big_update)
 new_version_label = format_release_tag(build_channel, new_version)
 
@@ -1315,6 +1555,7 @@ git_publish_result = {
     "source_pushed": False,
     "private_dev_synced": False,
     "public_tag_synced": False,
+    "release_assets_synced": False,
 }
 
 if publish_choice in {"y", "yes"}:
@@ -1324,6 +1565,7 @@ if publish_choice in {"y", "yes"}:
         build_channel=build_channel,
         private_dev_config=private_dev_config,
         dev_manifest_path=VERSION_DEV_JSON_PATH,
+        release_assets=[zip_path, launcher_zip_path, suite_zip_path],
     )
 else:
     print("\nGit publish skipped. Your build files remain local until you commit and push them.\n")
@@ -1333,22 +1575,24 @@ if git_publish_result["success"]:
     if build_channel == "dev" and not PUBLIC_DEV_CHANNEL_ENABLED:
         if git_publish_result["source_pushed"]:
             print("1. Source changes were pushed.")
-            print("2. Private dev manifest repo and release tag were synced automatically.")
+            print("2. Private dev manifest repo and dev source lane were synced automatically.")
         else:
-            print("1. Source changes were intentionally kept off the public office repo.")
+            print("1. No dedicated DEV source remote was configured, so source changes stayed local.")
             print("2. Private dev manifest repo and release tag were synced automatically.")
-        print(f"3. Dev tag/release name: {release_tag}")
-        print(f"4. Engine package: {zip_path}")
-        print(f"5. Launcher package: {launcher_zip_path}")
-        print(f"6. Full suite package: {suite_zip_path}\n")
+        print("3. Private dev GitHub release assets were synced automatically.")
+        print(f"4. Dev tag/release name: {release_tag}")
+        print(f"5. Engine package: {zip_path}")
+        print(f"6. Launcher package: {launcher_zip_path}")
+        print(f"7. Full suite package: {suite_zip_path}\n")
     else:
         print("1. Source changes were pushed.")
         print("2. Public release tag was synced automatically.")
-        print(f"3. Build channel: {build_channel.title()}")
-        print(f"4. Tag/release name: {release_tag}")
-        print(f"5. Upload engine: {zip_path}")
-        print(f"6. Launcher package: {launcher_zip_path}")
-        print(f"7. Full suite package: {suite_zip_path}\n")
+        print("3. Public GitHub release assets were synced automatically.")
+        print(f"4. Build channel: {build_channel.title()}")
+        print(f"5. Tag/release name: {release_tag}")
+        print(f"6. Upload engine: {zip_path}")
+        print(f"7. Launcher package: {launcher_zip_path}")
+        print(f"8. Full suite package: {suite_zip_path}\n")
 else:
     if build_channel == "dev" and not PUBLIC_DEV_CHANNEL_ENABLED:
         print("1. Commit and push source changes when you are ready.")
