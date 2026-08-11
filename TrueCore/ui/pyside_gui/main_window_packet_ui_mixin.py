@@ -1230,16 +1230,16 @@ class MainWindowPacketUiMixin:
                 continue
 
             subtitle_html = (
-                f"<div style=\"color:#9CA3AF; font-size:11px; margin-top:4px; text-align:left;\">{html.escape(subtitle)}</div>"
+                f"<div style=\"color:#8FA2B8; font-size:11px; line-height:1.4; margin-top:6px; text-align:left;\">{html.escape(subtitle)}</div>"
                 if subtitle else ""
             )
 
             rendered_tiles.append(
                 "<div style=\"display:inline-block; width:31%; min-width:180px; vertical-align:top; "
-                "margin:0 1.5% 12px 0; padding:12px 14px; background-color:#10161E; "
-                f"border:1px solid #253243; border-top:3px solid {accent}; border-radius:8px; box-sizing:border-box; text-align:left;\">"
-                f"<div style=\"color:#FFFFFF; font-size:12px; font-weight:600; text-align:left;\">{html.escape(title)}</div>"
-                f"<div style=\"color:{accent}; font-size:24px; font-weight:700; margin-top:6px; text-align:left;\">{html.escape(value)}</div>"
+                "margin:0 1.5% 12px 0; padding:14px 16px; background:linear-gradient(180deg, #121C27 0%, #0E151D 100%); "
+                f"border:1px solid #253243; border-top:3px solid {accent}; border-radius:12px; box-sizing:border-box; text-align:left;\">"
+                f"<div style=\"color:#C7D4E5; font-size:11px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; text-align:left;\">{html.escape(title)}</div>"
+                f"<div style=\"color:{accent}; font-size:25px; font-weight:700; margin-top:8px; text-align:left;\">{html.escape(value)}</div>"
                 f"{subtitle_html}</div>"
             )
 
@@ -1251,11 +1251,11 @@ class MainWindowPacketUiMixin:
     def build_detail_card(self, title, body_html, accent_color="#2F80ED", margin_top=12):
 
         return (
-            f"<div style=\"margin-top:{margin_top}px; padding:12px 14px; "
-            f"background-color:#10161E; border:1px solid #253243; "
-            f"border-left:3px solid {accent_color}; border-radius:8px; "
+            f"<div style=\"margin-top:{margin_top}px; padding:14px 16px; "
+            f"background:linear-gradient(180deg, #121B25 0%, #0E151D 100%); border:1px solid #253243; "
+            f"border-left:3px solid {accent_color}; border-radius:12px; "
             f"box-sizing:border-box; overflow-wrap:anywhere; word-break:break-word; text-align:left;\">"
-            f"<div style=\"color:#FFFFFF; font-weight:700; margin-bottom:8px; text-align:left;\">"
+            f"<div style=\"color:#FFFFFF; font-weight:700; font-size:13px; margin-bottom:10px; letter-spacing:0.02em; text-align:left;\">"
             f"{html.escape(title)}</div>{body_html}</div>"
         )
 
@@ -1272,10 +1272,10 @@ class MainWindowPacketUiMixin:
 
             rendered_rows.append(
                 "<tr>"
-                f"<td valign=\"top\" style=\"color:#FFFFFF; font-weight:600; padding:3px 12px 3px 0; width:38%; "
+                f"<td valign=\"top\" style=\"color:#AFC2D6; font-weight:600; padding:8px 14px 8px 0; width:34%; border-bottom:1px solid #1B2633; "
                 f"white-space:normal; overflow-wrap:anywhere; word-break:break-word; text-align:left;\">"
                 f"{html.escape(str(label))}</td>"
-                f"<td valign=\"top\" style=\"color:{row_color}; padding:3px 0; "
+                f"<td valign=\"top\" style=\"color:{row_color}; padding:8px 0; border-bottom:1px solid #1B2633; "
                 f"white-space:normal; overflow-wrap:anywhere; word-break:break-word; text-align:left;\">"
                 f"{html.escape(display_value)}</td>"
                 "</tr>"
@@ -1291,29 +1291,31 @@ class MainWindowPacketUiMixin:
             "</table>"
         )
 
-    def build_bullet_section(self, title, items, color, accent_color=None, bullet="•"):
+    def build_bullet_section(self, title, items, color, accent_color=None, bullet="-"):
 
         if not items:
             return ""
 
         accent = accent_color or color
+        bullet_markup = bullet if str(bullet).startswith("&") else html.escape(str(bullet))
         lines = []
 
         for item in items:
             lines.append(
                 f"<div style=\"color:{color}; margin:0 0 6px 0; white-space:normal; "
                 f"overflow-wrap:anywhere; word-break:break-word; line-height:1.45; text-align:left;\">"
-                f"{html.escape(bullet)} {html.escape(self.format_detail_value(item))}</div>"
+                f"{bullet_markup} {html.escape(self.format_detail_value(item))}</div>"
             )
 
         return self.build_detail_card(title, "".join(lines), accent_color=accent)
 
-    def build_issue_breakdown_section(self, title, issue_groups, color, accent_color=None, bullet="⚠"):
+    def build_issue_breakdown_section(self, title, issue_groups, color, accent_color=None, bullet="!"):
 
         if not issue_groups:
             return ""
 
         accent = accent_color or color
+        bullet_markup = bullet if str(bullet).startswith("&") else html.escape(str(bullet))
         detail_color = "#F7C2C2" if color == "#EB5757" else "#F8E7A1"
         groups_html = []
 
@@ -1330,13 +1332,13 @@ class MainWindowPacketUiMixin:
                 detail_lines.append(
                     f"<div style=\"color:{detail_color}; margin:4px 0 0 22px; white-space:normal; "
                     f"overflow-wrap:anywhere; word-break:break-word; line-height:1.4; text-align:left;\">"
-                    f"• {html.escape(self.format_detail_value(detail))}</div>"
+                    f"- {html.escape(self.format_detail_value(detail))}</div>"
                 )
 
             groups_html.append(
                 f"<div style=\"margin:0 0 8px 0;\">"
                 f"<div style=\"color:{color}; white-space:normal; overflow-wrap:anywhere; "
-                f"word-break:break-word; line-height:1.45; text-align:left;\">{html.escape(bullet)} {html.escape(group_title)}</div>"
+                f"word-break:break-word; line-height:1.45; text-align:left;\">{bullet_markup} {html.escape(group_title)}</div>"
                 f"{''.join(detail_lines)}</div>"
             )
 

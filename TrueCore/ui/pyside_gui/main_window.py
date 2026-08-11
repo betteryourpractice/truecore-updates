@@ -437,9 +437,10 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         body.setSpacing(16)
         root_layout.addLayout(body)
 
-        left = QVBoxLayout()
-        left.setSpacing(16)
-        body.addLayout(left,2)
+        self.left_splitter = QSplitter(Qt.Vertical)
+        self.left_splitter.setChildrenCollapsible(False)
+        self.left_splitter.setHandleWidth(8)
+        body.addWidget(self.left_splitter, 2)
 
         right = QVBoxLayout()
         body.addLayout(right,3)
@@ -450,6 +451,8 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         results_panel = QFrame()
         results_panel.setObjectName("panel")
+        results_panel.setMinimumHeight(280)
+        results_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         results_layout = QVBoxLayout()
 
@@ -475,13 +478,14 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.setSortingEnabled(False)
+        self.table.setMinimumHeight(185)
 
         self.table.itemSelectionChanged.connect(self.load_packet_details)
 
         results_layout.addWidget(self.table)
 
         results_panel.setLayout(results_layout)
-        left.addWidget(results_panel)
+        self.left_splitter.addWidget(results_panel)
 
         # -------------------------------------------------
         # CONSOLE
@@ -489,6 +493,8 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         console_panel = QFrame()
         console_panel.setObjectName("panel")
+        console_panel.setMinimumHeight(170)
+        console_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         console_layout = QVBoxLayout()
 
@@ -500,11 +506,14 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         self.console = QTextEdit()
         self.console.setReadOnly(True)
         self.console.setFont(QFont("Consolas", 10))
+        self.console.setMinimumHeight(120)
+        self.console.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.console.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         console_layout.addWidget(self.console)
 
         console_panel.setLayout(console_layout)
-        left.addWidget(console_panel)
+        self.left_splitter.addWidget(console_panel)
 
         # -------------------------------------------------
         # DETAILS PANEL
@@ -556,11 +565,15 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         self.details = QTextEdit()
         self.details.setReadOnly(True)
         self.details.setFont(QFont("Segoe UI", 10))
+        self.details.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.details.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.details_tabs.addTab(self.details, "Packet Details")
 
         self.details_math = QTextEdit()
         self.details_math.setReadOnly(True)
         self.details_math.setFont(QFont("Segoe UI", 10))
+        self.details_math.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.details_math.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.details_tabs.addTab(self.details_math, "Math")
 
         details_layout.addWidget(self.details_tabs)
@@ -584,6 +597,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         self.btn_admin.clicked.connect(self.open_admin_panel)
         self.btn_close.clicked.connect(self.close)
         self.show_reviewer_empty_state("startup")
+        QTimer.singleShot(0, self.normalize_review_workspace_layout)
 
 
     # ----------------------------------------------
@@ -601,6 +615,40 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
         if hasattr(self, "update_background"):
 
             self.update_background()
+
+        QTimer.singleShot(0, self.normalize_review_workspace_layout)
+
+    def normalize_review_workspace_layout(self):
+
+        splitter = getattr(self, "left_splitter", None)
+        if not splitter:
+            return
+
+        total_height = splitter.height()
+        if total_height <= 0:
+            sizes = splitter.sizes()
+            total_height = sum(sizes)
+
+        if total_height <= 0:
+            return
+
+        min_results = 245
+        min_console = 160
+        sizes = splitter.sizes()
+        if len(sizes) < 2:
+            return
+
+        if sizes[0] >= min_results and sizes[1] >= min_console:
+            return
+
+        console_height = min(max(min_console, int(total_height * 0.34)), 245)
+        results_height = max(min_results, total_height - console_height)
+
+        if results_height + console_height > total_height:
+            results_height = max(130, total_height - min_console)
+            console_height = max(110, total_height - results_height)
+
+        splitter.setSizes([results_height, console_height])
 
     def closeEvent(self, event):
 
@@ -1601,14 +1649,14 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                     forms,
                     color="#6FCF97",
                     accent_color="#27AE60",
-                    bullet="✓",
+                    bullet="OK -",
                 ),
                 self.build_bullet_section(
                     "Expected Documents",
                     intel_display.get("expected_documents", []),
                     color="#6FCF97",
                     accent_color="#27AE60",
-                    bullet="•",
+                    bullet="-",
                 ),
                 self.build_detail_card(
                     "Key Packet Fields",
@@ -1704,7 +1752,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 forms,
                 color="#6FCF97",
                 accent_color="#27AE60",
-                bullet="✓",
+                bullet="OK",
             ),
             self.build_detail_card(
                 "Fields",
@@ -1719,7 +1767,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 issues,
                 color="#EB5757",
                 accent_color="#EB5757",
-                bullet="⚠",
+                bullet="!",
             ),
             self.build_bullet_section(
                 "Suggested Fixes",
@@ -2285,7 +2333,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
 
         def format_score_value(value):
             if value in (None, "", [], {}):
-                return "—"
+                return "--"
             try:
                 return int(round(float(value)))
             except (TypeError, ValueError):
@@ -2937,14 +2985,14 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 improving_items,
                 color="#2DCE89",
                 accent_color="#2DCE89",
-                bullet="•",
+                bullet="-",
             ),
             self.build_bullet_section(
                 "Most At-Risk Declines",
                 declining_items,
                 color="#EB5757",
                 accent_color="#EB5757",
-                bullet="•",
+                bullet="-",
             ),
         ]
 
@@ -3058,7 +3106,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 snapshot_help_items,
                 color="#57B6FF",
                 accent_color="#57B6FF",
-                bullet="•",
+                bullet="-",
             ),
             self.build_detail_card(
                 "Current Office Snapshot",
@@ -3085,7 +3133,7 @@ class MainWindow(MainWindowAdminMixin, MainWindowPacketUiMixin, QMainWindow):
                 comparison_issue_items,
                 color="#F2C94C",
                 accent_color="#F2994A",
-                bullet="•",
+                bullet="-",
             ),
         ]
 

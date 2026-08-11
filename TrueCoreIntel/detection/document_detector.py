@@ -936,6 +936,11 @@ class DocumentDetector:
         for doc_type, patterns in self.NEGATIVE_PATTERNS.items():
             if doc_type not in filtered:
                 continue
+            if doc_type == "clinical_notes":
+                clinical_signature_hits = self.count_structure_signature_hits("clinical_notes", text)
+                clinical_anchor_hits = self.count_anchor_group_hits("clinical_notes", text)
+                if clinical_signature_hits >= 2 or clinical_anchor_hits >= 2:
+                    continue
             if any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns if pattern):
                 filtered.pop(doc_type, None)
 
@@ -953,9 +958,39 @@ class DocumentDetector:
 
         # seoc must really look like SEOC
         if "seoc" in filtered:
-            if "seoc" not in text and not (
-                "single" in text and "episode" in text and "care" in text
-            ):
+            seoc_language = any(
+                term in text for term in [
+                    "single episode of care",
+                    "seoc request",
+                    "scope of requested episode",
+                    "estimated duration of episode",
+                    "clinical objective",
+                    "continuity of care",
+                ]
+            )
+            clinical_note_overlap = sum(
+                1 for term in [
+                    "chief complaint",
+                    "history of present illness",
+                    "functional impairment",
+                    "conservative therapy history",
+                    "review of systems",
+                    "physical examination",
+                    "assessment",
+                    "treatment plan",
+                    "summary",
+                ]
+                if term in text
+            )
+            explicit_seoc_form_markers = any(
+                term in text for term in [
+                    "scope of requested episode",
+                    "estimated duration of episode",
+                    "clinical objective",
+                    "continuity of care",
+                ]
+            )
+            if not seoc_language or (clinical_note_overlap >= 2 and not explicit_seoc_form_markers):
                 filtered.pop("seoc", None)
 
         # consult_request should have request/provider language
@@ -1055,6 +1090,25 @@ class DocumentDetector:
                 ]
                 if term in text
             )
+            clinical_note_sections = sum(
+                1 for term in [
+                    "history of present illness",
+                    "chief complaint",
+                    "physical exam",
+                    "assessment",
+                    "assessment and plan",
+                    "treatment plan",
+                    "review of systems",
+                    "conservative therapy",
+                    "encounter date",
+                    "past medical history",
+                    "past surgical history",
+                    "medications",
+                    "allergies",
+                    "physical examination",
+                ]
+                if term in text
+            )
             procedure_language = any(
                 term in text for term in [
                     "procedure note",
@@ -1070,6 +1124,7 @@ class DocumentDetector:
                 procedure_language
                 or "office clinic note" in text
                 or ("clinical notes" in text and not report_language)
+                or (clinical_note_sections >= 2 and "mri report" not in text and "radiology report" not in text)
                 or (not report_language and interpretive_sections < 2)
             ):
                 filtered.pop("imaging_report", None)
@@ -1175,7 +1230,17 @@ class DocumentDetector:
             if self.looks_like_clinical_notes(page, page_metadata=page_metadata):
                 packet.detected_documents.add("clinical_notes")
 
-                if current_doc_type == "unknown":
+                title_text = self.extract_title_region_text(page, page_metadata=page_metadata)
+                current_has_explicit_title = bool(self.count_title_pattern_hits(current_doc_type, title_text))
+
+                if (
+                    current_doc_type == "unknown"
+                    or (
+                        current_doc_type in {"imaging_report", "seoc"}
+                        and not current_has_explicit_title
+                        and self.looks_like_clinical_notes(page, page_metadata=page_metadata)
+                    )
+                ):
                     packet.document_types[idx] = "clinical_notes"
                     packet.page_confidence[idx] = max(packet.page_confidence.get(idx, 0.0), 0.78)
                     current_doc_type = "clinical_notes"
@@ -1332,7 +1397,39 @@ class DocumentDetector:
 
         if not text or len(text) < 120:
             return False
-        return self.matches_family_fingerprint("clinical_notes", text)
+
+        if self.matches_family_fingerprint("clinical_notes", text):
+            return True
+
+        continuation_markers = [
+            "chief complaint",
+            "history of present illness",
+            "physical exam",
+            "assessment",
+            "assessment and plan",
+            "treatment plan",
+            "review of systems",
+            "diagnostic testing",
+            "conservative therapy",
+            "functional impairment",
+            "encounter date",
+            "office visit note",
+            "office clinic note",
+            "encounter performed and documented",
+            "conservative therapy history",
+            "past medical history",
+            "past surgical history",
+            "medications",
+            "allergies",
+            "physical examination",
+            "straight leg raise",
+            "sensory examination",
+            "strength testing",
+            "summary",
+        ]
+        continuation_hits = sum(1 for marker in continuation_markers if marker in text)
+        signature_hits = self.count_structure_signature_hits("clinical_notes", text)
+        return continuation_hits >= 2 and (signature_hits >= 1 or len(text) >= 800)
 
     def looks_like_rfs_form(self, page, page_metadata=None):
         text = self.normalize_page_text(page, page_metadata=page_metadata)
@@ -1394,7 +1491,34 @@ class DocumentDetector:
         if not any(marker in lower_text for marker in consent_markers):
             return False
 
-        return self.count_filled_consent_signals(text) < 3
+        filled_signals = self.count_filled_consent_signals(text)
+        has_named_attestation = bool(
+            re.search(
+                r"\bi,\s+[A-Za-z][A-Za-z'\-]+(?:\s+[A-Za-z][A-Za-z'\-]+){1,3}\s+hereby\b",
+                text,
+                re.IGNORECASE,
+            )
+        )
+        has_identity = bool(
+            re.search(
+                r"\b(?:full name|patient name|member name)\b[^\n\r:]{0,40}:\s*[A-Za-z][A-Za-z'\-]+(?:\s+[A-Za-z][A-Za-z'\-]+){1,3}",
+                text,
+                re.IGNORECASE,
+            )
+        ) or has_named_attestation
+        has_date = bool(re.search(r"\bdate:\s*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", text, re.IGNORECASE))
+        has_signature_language = bool(re.search(r"\b(?:signature|signed)\b", text, re.IGNORECASE))
+
+        if filled_signals >= 3:
+            return False
+
+        if has_named_attestation and has_date:
+            return False
+
+        if has_identity and has_date and has_signature_language:
+            return False
+
+        return True
 
     def looks_like_unfilled_consult_request(self, page_text):
         text = " ".join(str(page_text or "").replace("\r", "\n").split())

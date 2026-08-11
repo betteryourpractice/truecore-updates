@@ -14,7 +14,9 @@ from TrueCore.utils.private_dev_channel import load_private_dev_channel_config
 def configure_runtime_warnings():
 
     try:
-        from requests.exceptions import RequestsDependencyWarning
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from requests.exceptions import RequestsDependencyWarning
     except Exception:
         RequestsDependencyWarning = None
 

@@ -378,11 +378,34 @@ class ClinicalIntelligenceAnalyzer:
             gaps.append("Missing Letter of Medical Necessity.")
         if conservative_care.get("status") == "not_documented":
             gaps.append("No documented conservative care supporting the advanced request.")
-        if severity.get("level") == "high" and not any(
-            keyword in str(packet.fields.get("symptom") or "").lower()
-            for keyword in ("weakness", "numbness", "tingling")
-        ):
-            gaps.append("Neurologic deficit detail may be missing despite higher-severity indicators.")
+        packet_text = self.build_packet_text(packet).lower()
+        neuro_context_present = any(
+            keyword in packet_text
+            for keyword in (
+                "radiculopathy",
+                "radicular",
+                "sciatica",
+                "neurologic",
+                "neurological",
+            )
+        )
+        neuro_detail_present = any(
+            keyword in packet_text
+            for keyword in (
+                "weakness",
+                "numbness",
+                "tingling",
+                "sensory",
+                "motor",
+                "reflex",
+                "straight leg",
+                "slr",
+                "dermatome",
+                "myotome",
+            )
+        )
+        if severity.get("level") == "high" and neuro_context_present and not neuro_detail_present:
+            gaps.append("If radicular or neurologic symptoms support severity, add objective neurologic exam detail.")
 
         return {
             "gap_count": len(gaps),

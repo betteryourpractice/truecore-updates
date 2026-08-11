@@ -225,13 +225,7 @@ class ValidatorEngine:
         )
 
     def check_authorization_consistency(self, packet):
-        values = packet.field_values.get("authorization_number", [])
-        normalized_values = self.get_normalized_unique_values("authorization_number", values)
-
-        distinct_values = []
-        for value in normalized_values:
-            if not any(self.authorization_values_equivalent(value, existing) for existing in distinct_values):
-                distinct_values.append(value)
+        distinct_values = self.get_authorization_consensus_values(packet)
 
         if len(distinct_values) > 1:
             self.add_conflict(
@@ -242,6 +236,52 @@ class ValidatorEngine:
                 values=distinct_values,
                 message="Authorization or referral number is inconsistent across packet documents.",
             )
+
+    def get_authorization_consensus_values(self, packet):
+        observations = list((getattr(packet, "field_observations", {}) or {}).get("authorization_number", []) or [])
+        counts = {}
+        confidences = {}
+
+        for observation in observations:
+            normalized_value = self.normalize_conflict_value("authorization_number", observation.get("value"))
+            if not normalized_value:
+                continue
+            counts[normalized_value] = counts.get(normalized_value, 0) + 1
+            confidences.setdefault(normalized_value, []).append(float(observation.get("confidence") or 0.0))
+
+        if not counts:
+            return self.get_normalized_unique_values("authorization_number", packet.field_values.get("authorization_number", []))
+
+        ordered_values = sorted(
+            counts,
+            key=lambda value: (
+                counts.get(value, 0),
+                max(confidences.get(value, [0.0])),
+                len(str(value or "")),
+            ),
+            reverse=True,
+        )
+
+        distinct_values = []
+        suppressed = set()
+
+        for value in ordered_values:
+            if value in suppressed:
+                continue
+
+            distinct_values.append(value)
+            base_count = counts.get(value, 0)
+
+            for other in ordered_values:
+                if other == value or other in suppressed:
+                    continue
+                if self.authorization_values_equivalent(value, other):
+                    suppressed.add(other)
+                    continue
+                if self.authorization_values_ocr_near_duplicate(value, other) and base_count >= max(2, counts.get(other, 0) + 1):
+                    suppressed.add(other)
+
+        return distinct_values
 
     def check_npi_validity(self, packet):
         npi = packet.fields.get("npi")
@@ -617,6 +657,9 @@ class ValidatorEngine:
                 if not cleaned:
                     return None
 
+                if len(cleaned) < 5:
+                    return None
+
                 connector_fragments = {"and", "&", "of", "for"}
                 first_token = cleaned.split()[0] if cleaned.split() else ""
                 if first_token in connector_fragments:
@@ -647,6 +690,12 @@ class ValidatorEngine:
                 cleaned = cleaned.replace("bilateral", " ")
                 cleaned = re.sub(r"[^a-z0-9,;/ ]", " ", cleaned)
                 cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+                if "official clinical order" in cleaned or cleaned.startswith("ts the official"):
+                    return None
+
+                if cleaned in {"type of service evaluation and treatment", "evaluation and treatment"}:
+                    return None
 
                 if cleaned in {
                     "is medically reasonable and necessary",
@@ -679,6 +728,12 @@ class ValidatorEngine:
             if isinstance(value, str):
                 cleaned = value.strip().lower()
                 cleaned = re.sub(r"\s+", " ", cleaned)
+
+                if re.match(r"^\d+\.\s*[a-z]{1,4}$", cleaned):
+                    return None
+
+                if any(marker in cleaned for marker in ["co-morbidities", "comorbidities", "past medical history"]):
+                    return None
 
                 if re.search(r"\bm51(?:\.|$)", cleaned) or re.search(r"\bm54\.(?:16|17|50)\b", cleaned):
                     return "lumbar_spine_condition"
@@ -717,6 +772,16 @@ class ValidatorEngine:
         if field == "service_date_range":
             cleaned = str(value).strip()
             return cleaned if cleaned else None
+
+        if field == "facility" and isinstance(value, str):
+            cleaned = value.strip().lower()
+            cleaned = re.sub(r"[^a-z0-9&,' -]", " ", cleaned)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            if not cleaned:
+                return None
+            if "station number" in cleaned and cleaned.endswith("tele"):
+                return None
+            return cleaned
 
         if isinstance(value, list):
             return tuple(sorted(set(str(v).strip().lower() for v in value if v)))
@@ -1128,6 +1193,24 @@ class ValidatorEngine:
             return True
 
         return False
+
+    def authorization_values_ocr_near_duplicate(self, left, right):
+        left_clean = re.sub(r"[^A-Z0-9]", "", str(left).upper())
+        right_clean = re.sub(r"[^A-Z0-9]", "", str(right).upper())
+
+        if not left_clean or not right_clean:
+            return False
+
+        if len(left_clean) != len(right_clean):
+            return False
+
+        left_digits = re.sub(r"\D", "", left_clean)
+        right_digits = re.sub(r"\D", "", right_clean)
+        if len(left_digits) < 8 or len(right_digits) < 8:
+            return False
+
+        diff_count = sum(1 for left_char, right_char in zip(left_clean, right_clean) if left_char != right_char)
+        return diff_count == 1
 
     def is_valid_npi(self, value):
         digits = re.sub(r"\D", "", str(value))

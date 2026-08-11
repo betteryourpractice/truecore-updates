@@ -2,6 +2,29 @@ import re
 
 
 class ExtractorNormalizationMixin:
+    def normalize_plain_text(self, value):
+        text = str(value or "")
+        if not text:
+            return ""
+
+        replacements = {
+            "\ufb01": "fi",
+            "\ufb02": "fl",
+            "\u2018": "'",
+            "\u2019": "'",
+            "\u201c": '"',
+            "\u201d": '"',
+            "\u2013": "-",
+            "\u2014": "-",
+            "\u2212": "-",
+            "\xa0": " ",
+        }
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+
+        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", text)
+        return text
+
     def strip_trailing_label_suffixes(self, value):
         cleaned = str(value or "").strip(" \t\r\n-")
 
@@ -20,6 +43,7 @@ class ExtractorNormalizationMixin:
         return cleaned
 
     def normalize_facility(self, value):
+        value = self.normalize_plain_text(value)
         value = self.cut_at_stop_label(value)
         value = re.sub(
             r"^(?:facility(?: name)?|va facility|servicing facility|treating facility|requested facility|referring facility|rendering facility|medical facility|community care office|va community care office)\s*[:\-]?\s*",
@@ -28,7 +52,7 @@ class ExtractorNormalizationMixin:
             flags=re.IGNORECASE,
         )
         value = re.split(
-            r"\b(?:phone|fax|npi|address|dob|provider|diagnosis|reason|city|state|zip|location)\b",
+            r"\b(?:station number|station no\.?|telehealth|telephone|tel|phone|fax|npi|address|dob|provider|diagnosis|reason|city|state|zip|location)\b",
             value,
             maxsplit=1,
             flags=re.IGNORECASE,
@@ -123,7 +147,7 @@ class ExtractorNormalizationMixin:
         if not insurance_match:
             return None
 
-        return self.normalize_identifier(insurance_match.group(1), min_length=8)
+        return self.normalize_va_icn(insurance_match.group(1))
 
     def normalize_location(self, value):
         value = self.cut_at_stop_label(value)
@@ -371,12 +395,13 @@ class ExtractorNormalizationMixin:
         return len(normalized) < 18
 
     def normalize_reason_for_request(self, value):
+        value = self.normalize_plain_text(value)
         value = self.cut_at_stop_label(value)
         value = re.split(r"\bdisclaimer\b", value, maxsplit=1, flags=re.IGNORECASE)[0]
         if "*" in value:
             value = value.split("*", 1)[0]
         value = re.sub(
-            r"^(?:reason for request|reason for consultation|reason for consult|reason for referral|request rationale|chief complaint|history of present illness|requested service|requested procedure|reason)\s*[:\-]?\s*",
+            r"^(?:reason for request|reason for consultation|reason for consult|reason for referral|request rationale|chief complaint|history of present illness|requested service|requested procedure|type of service|service requested|reason)\s*[:\-]?\s*",
             "",
             value,
             flags=re.IGNORECASE,
@@ -392,8 +417,35 @@ class ExtractorNormalizationMixin:
         if not value or len(value) < 4:
             return None
 
-        if value.lower() in {"patient's care team", "patients care team", "care team"}:
+        lowered = value.lower()
+        if lowered in {"patient's care team", "patients care team", "care team"}:
             return None
+
+        if "official clinical order" in lowered:
+            return None
+
+        generic_values = {
+            "type of service evaluation and treatment",
+            "evaluation and treatment",
+            "evaluation treatment",
+            "consultation",
+            "pain management",
+        }
+        normalized_compact = re.sub(r"[^a-z0-9]+", " ", lowered).strip()
+        if normalized_compact in generic_values:
+            return None
+
+        if value and value[0].islower():
+            value = value[0].upper() + value[1:]
+
+        acronym_map = {
+            "seoc": "SEOC",
+            "mri": "MRI",
+            "icd": "ICD",
+            "va": "VA",
+        }
+        for raw, rendered in acronym_map.items():
+            value = re.sub(rf"\b{raw}\b", rendered, value, flags=re.IGNORECASE)
 
         return value
 
@@ -447,6 +499,31 @@ class ExtractorNormalizationMixin:
         if re.fullmatch(r"(?:19|20)\d{6}", cleaned):
             return None
         return cleaned
+
+    def normalize_va_icn(self, value):
+        cleaned = self.normalize_identifier(value, min_length=8)
+        if not cleaned:
+            return None
+
+        exact_match = re.search(r"\b(\d{10}V\d{6})\b", cleaned)
+        if exact_match:
+            return exact_match.group(1)
+
+        embedded_match = re.search(r"(\d{10}V\d{6})", cleaned)
+        if embedded_match:
+            return embedded_match.group(1)
+
+        flexible_match = re.search(r"(\d{8,12}V\d{4,8})", cleaned)
+        if flexible_match:
+            return flexible_match.group(1)
+
+        cleaned = re.split(
+            r"(?:PRIORITY|ROUTING|ROUTE|ROUTNE|PATIENT|DOB|PROVIDER|FACILITY|AUTH|CLAIM)",
+            cleaned,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        return cleaned if len(cleaned) >= 8 and re.search(r"\d", cleaned) else None
 
     def normalize_service_date_range(self, value):
         date_matches = re.finditer(
@@ -516,6 +593,7 @@ class ExtractorNormalizationMixin:
         return None
 
     def normalize_diagnosis(self, value):
+        value = self.normalize_plain_text(value)
         value = self.cut_at_stop_label(value)
         value = re.sub(
             r"^(?:episode diagnosis|primary diagnosis code|diagnosis|diagnoses|assessment|impression|clinical impression|primary|secondary)\s*[:\-]?\s*",
@@ -555,6 +633,12 @@ class ExtractorNormalizationMixin:
         if any(marker in lowered for marker in ["optum", "community care netw", "med primary", "insurance"]):
             return None
 
+        if re.match(r"^\d+\.\s*[a-z]{1,4}$", lowered):
+            return None
+
+        if any(marker in lowered for marker in ["co-morbidities", "comorbidities", "past medical history"]):
+            return None
+
         procedural_noise_markers = [
             "annul",
             "annulargram",
@@ -589,6 +673,7 @@ class ExtractorNormalizationMixin:
         return lowered
 
     def cut_at_stop_label(self, value):
+        value = self.normalize_plain_text(value)
         lower_value = value.lower()
         earliest_index = None
 
@@ -693,12 +778,22 @@ class ExtractorNormalizationMixin:
         return None
 
     def infer_facility(self, text):
-        compact = re.sub(r"[\r\n\t]+", " ", str(text or ""))
+        compact = re.sub(r"[\r\n\t]+", " ", self.normalize_plain_text(text))
         compact = re.sub(r"\s+", " ", compact).strip()
         lower_text = compact.lower()
 
         if not lower_text:
             return None
+
+        contextual_match = re.search(
+            r"\b([A-Z][A-Za-z .'\-]{2,48}\s+VA Medical Center)\b",
+            compact,
+            re.IGNORECASE,
+        )
+        if contextual_match:
+            candidate = self.normalize_facility(contextual_match.group(1))
+            if candidate:
+                return candidate
 
         if re.search(r"charlie\s+n[0o]r[vw][o0]{2}d", lower_text):
             return "Charlie Norwood VA Medical Center"

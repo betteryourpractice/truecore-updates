@@ -49,7 +49,7 @@ class ValidationIntelligenceAnalyzer:
             "label": "Diagnostic Basis",
             "fields": ("diagnosis", "icd_codes", "symptom"),
             "section_roles": {"diagnostic_basis", "clinical_support", "justification"},
-            "preferred_documents": {"clinical_notes", "lomn", "rfs", "approved_referral", "cover_sheet", "imaging_report"},
+            "preferred_documents": {"clinical_notes", "lomn", "seoc", "rfs", "approved_referral", "cover_sheet", "imaging_report"},
         },
         {
             "concept": "clinical_justification",
@@ -543,6 +543,7 @@ class ValidationIntelligenceAnalyzer:
             return 0.0
 
         base = float(observation.get("confidence") or 0.0)
+        lower_value = str(value or "").lower()
         document_type = str(observation.get("document_type") or "").strip().lower()
         primary_section_role = str(observation.get("primary_section_role") or "").strip().lower()
         section_roles = {str(role).strip().lower() for role in list(observation.get("section_roles") or []) if role}
@@ -561,6 +562,30 @@ class ValidationIntelligenceAnalyzer:
 
         if observation.get("anchor_label"):
             base += 0.03
+
+        concept = str(spec.get("concept") or "").strip().lower()
+        if concept == "request_intent":
+            normalized = " ".join(lower_value.replace(":", " ").split())
+            if normalized in {
+                "evaluation and treatment",
+                "type of service evaluation and treatment",
+                "consultation",
+                "pain management",
+            }:
+                base -= 0.5
+            if any(marker in lower_value for marker in ["single episode of care", "seoc", "authorization", "requested", "mri", "disc", "lumbar"]):
+                base += 0.12
+
+        if concept in {"diagnostic_basis", "clinical_justification"}:
+            if lower_value.strip() in {"pain", "low back pain", "back pain", "lumbar pain", "neck pain"}:
+                base -= 0.18
+            if any(marker in lower_value for marker in ["degenerative disc disease", "disc displacement", "radiculopathy", "annular tear", "herniation"]):
+                base += 0.18
+            if any(code in lower_value for code in ["m51", "m54", "g43", "m19"]):
+                base += 0.1
+
+        if concept == "routing_admin" and "station number" in lower_value:
+            base -= 0.15
 
         base += max(0.0, 0.12 - (field_index * 0.02))
         return round(base, 3)

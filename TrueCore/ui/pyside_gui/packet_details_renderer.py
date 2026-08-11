@@ -908,10 +908,12 @@ def render_build_packet_details_html_condensed(self, file, result):
     issue_palette = self.get_issue_display_palette(intel_display)
 
     score_color = "#27AE60" if score >= 90 else "#F2C94C" if score >= 70 else "#EB5757"
+    readiness_value = self.format_packet_display_value("Submission Readiness", intel_display.get("submission_readiness")) if intel_display else None
+    outlook_value = self.format_packet_display_value("Approval Outlook", intel_display.get("approval_outlook", intel_display.get("approval_probability"))) if intel_display else None
+    queue_value = self.format_packet_display_value("Workflow Queue", intel_display.get("workflow_queue")) if intel_display else None
 
     summary_rows = [
         ("Packet", os.path.basename(file)),
-        ("Score", score),
     ]
     decision_rows = []
 
@@ -937,6 +939,39 @@ def render_build_packet_details_html_condensed(self, file, result):
             issue_groups,
             fix_items,
             review_rationale,
+            margin_top=0,
+        ),
+        self.build_detail_card(
+            "Packet Snapshot",
+            self.build_metric_tiles(
+                [
+                    {
+                        "title": "Score",
+                        "value": score,
+                        "accent": score_color,
+                        "subtitle": self.format_packet_display_value("Packet Strength", intel_display.get("packet_strength")) if intel_display else "",
+                    },
+                    {
+                        "title": "Readiness",
+                        "value": readiness_value,
+                        "accent": "#57B6FF",
+                        "subtitle": self.format_packet_display_value("Next Action", intel_display.get("next_action")) if intel_display else "",
+                    },
+                    {
+                        "title": "Approval Outlook",
+                        "value": outlook_value,
+                        "accent": "#6FCF97" if score >= 80 else "#F2C94C",
+                        "subtitle": self.format_packet_display_value("Denial Risk", intel_display.get("denial_risk")) if intel_display else "",
+                    },
+                    {
+                        "title": "Workflow Queue",
+                        "value": queue_value,
+                        "accent": "#9B8CFF",
+                        "subtitle": self.format_packet_display_value("Review Priority", intel_display.get("review_priority")) if intel_display else "",
+                    },
+                ]
+            ),
+            accent_color="#57B6FF",
             margin_top=0,
         ),
         self.build_detail_card(
@@ -966,14 +1001,14 @@ def render_build_packet_details_html_condensed(self, file, result):
                 forms,
                 color="#6FCF97",
                 accent_color="#27AE60",
-                bullet="+",
+                bullet="OK -",
             ),
             self.build_bullet_section(
                 "Expected Documents",
                 intel_display.get("expected_documents", []),
                 color="#6FCF97",
                 accent_color="#27AE60",
-                bullet="+",
+                bullet="-",
             ),
             self.build_detail_card(
                 "Key Packet Fields",
@@ -996,9 +1031,9 @@ def render_build_packet_details_html_condensed(self, file, result):
             self.build_bullet_section(
                 "Issues",
                 issue_items,
-                color="#EB5757",
-                accent_color="#EB5757",
-                bullet="⚠",
+                color=issue_palette.get("color", "#EB5757"),
+                accent_color=issue_palette.get("accent", "#EB5757"),
+                bullet="&#9888;",
             ),
             self.build_bullet_section(
                 "Missing Items",
@@ -1035,7 +1070,7 @@ def render_build_packet_details_html_condensed(self, file, result):
 
     return (
         "<html><body style=\"background-color:#11161E; color:#E5E7EB; "
-        "font-family:'Segoe UI'; font-size:13px; line-height:1.45; margin:0; text-align:left;\">"
+        "font-family:'Segoe UI Variable','Segoe UI',sans-serif; font-size:13px; line-height:1.5; margin:0; padding:2px; text-align:left;\">"
         f"{rendered_sections}</body></html>"
     )
 

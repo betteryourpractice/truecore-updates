@@ -130,7 +130,7 @@ class ExtractorEngine(ExtractorNormalizationMixin):
         "name": [
             r"(?:veteran name|patient name|full name|name of veteran|member name)\s*[:\-]\s*([^\n\r]+)",
             r"\b(?:last,\s*first\s*m(?:iddle)?|patient)\s*name\s*[:\-]\s*([^\n\r]+)",
-            r"\bname\s*[:\-]\s*([A-Z][A-Za-z,\-\' ]{4,})",
+            r"(?<!office staff\s)(?<!program user\s)(?<!provider\s)(?<!clinic\s)(?<!facility\s)(?<!member\s)(?<!patient\s)(?<!veteran\s)(?<!submitting office\s)\bname\s*[:\-]\s*([A-Z][A-Za-z,\-\' ]{4,})",
         ],
         "dob": [
             r"(?:dob|d\.o\.b\.|date of birth|birth date)\s*[:\-]\s*([^\n\r]+)",
@@ -1043,6 +1043,68 @@ class ExtractorEngine(ExtractorNormalizationMixin):
 
         return False
 
+    def is_generic_request_reason_text(self, value):
+        lowered = re.sub(r"[^a-z0-9]+", " ", self.normalize_plain_text(value).lower()).strip()
+        return lowered in {
+            "evaluation and treatment",
+            "type of service evaluation and treatment",
+            "consultation",
+            "pain management",
+            "follow up",
+        }
+
+    def observation_value_priority(self, field_name, value):
+        lowered = self.normalize_plain_text(value).lower().strip()
+        if not lowered:
+            return 0
+
+        score = 0
+
+        if field_name == "diagnosis":
+            if lowered in {"pain", "low back pain", "back pain", "lumbar pain", "neck pain", "headache"}:
+                score -= 4
+            if re.search(r"\b[mgs]\d{2}(?:\.\d{1,4})?\b", lowered, re.IGNORECASE):
+                score += 3
+            if any(marker in lowered for marker in [
+                "degenerative disc disease",
+                "disc degeneration",
+                "disc displacement",
+                "radiculopathy",
+                "herniation",
+                "annular tear",
+                "spondylosis",
+            ]):
+                score += 4
+
+        elif field_name == "reason_for_request":
+            if self.is_generic_request_reason_text(lowered):
+                score -= 5
+            if any(marker in lowered for marker in [
+                "single episode of care",
+                "seoc",
+                "authorization",
+                "requested",
+                "treatment of",
+                "lumbar",
+                "disc",
+                "mri",
+                "radiculopathy",
+                "medically necessary",
+            ]):
+                score += 3
+
+        elif field_name == "facility":
+            if "station number" in lowered:
+                score -= 5
+            if lowered.startswith("va medical center"):
+                score -= 2
+            if re.search(r"\b[a-z][a-z .'\-]{2,48}\s+va medical center\b", lowered):
+                score += 4
+            elif "vamc" in lowered:
+                score += 2
+
+        return score
+
     def extract_provider_role_fallback(self, text, field_name):
         anchor_map = {
             "ordering_provider": [
@@ -1637,7 +1699,7 @@ class ExtractorEngine(ExtractorNormalizationMixin):
             return self.normalize_npi(value)
 
         if field_name == "va_icn":
-            return self.normalize_identifier(value, min_length=8)
+            return self.normalize_va_icn(value)
 
         if field_name == "claim_number":
             return self.normalize_identifier(value, min_length=4)
@@ -1718,6 +1780,17 @@ class ExtractorEngine(ExtractorNormalizationMixin):
         if self.contains_template_value_marker(raw):
             return "template placeholder text captured as live field value"
 
+        if field_name == "name":
+            if any(marker in combined for marker in [
+                "office staff name",
+                "office staff",
+                "program user",
+                "submitting office",
+                "date reviewed",
+                "office manager",
+            ]):
+                return "office-staff or admin text misread as patient name"
+
         if field_name in {"provider", "treating_provider", "followup_provider", "ordering_provider", "referring_provider"}:
             if re.search(r"\byear[- ]old\b|\bmale\b|\bfemale\b", combined):
                 return "demographic narrative misread as provider"
@@ -1756,14 +1829,22 @@ class ExtractorEngine(ExtractorNormalizationMixin):
         if field_name == "facility":
             if any(marker in combined for marker in ["fluoroscopic", "injected", "neural foramen", "spinal nerve"]):
                 return "procedure narrative leaked into facility"
+            if "station number" in combined and "va medical center" in combined:
+                return "generic VA station fragment captured instead of the real facility name"
 
         if field_name == "reason_for_request":
             if combined.strip() in {"patient's care team", "patients care team", "care team"}:
                 return "non-request care-team text captured as reason for request"
-            if "is the official clinical order" in combined:
+            if (
+                "is the official clinical order" in combined
+                or "official clinical order" in combined
+                or raw.lower().startswith("ts the official")
+            ):
                 return "instructional admin text captured as reason for request"
             if "transport mode" in combined or raw.lower().startswith("pain inj"):
                 return "procedure logistics text captured as reason for request"
+            if self.is_generic_request_reason_text(raw):
+                return "generic service-line text captured instead of the clinical request intent"
             if template_markers and "bracket_placeholder" in template_markers and self.contains_template_value_marker(raw):
                 return "template placeholder text captured as live request intent"
 
@@ -1773,6 +1854,10 @@ class ExtractorEngine(ExtractorNormalizationMixin):
                 return "section scaffolding text misread as diagnosis"
             if lowered_raw.startswith("of ") and "/" in lowered_raw:
                 return "fragmented heading text misread as diagnosis"
+            if re.match(r"^\d+\.\s*[a-z]{1,4}$", lowered_raw):
+                return "short numbered fragment misread as diagnosis"
+            if any(marker in lowered_raw for marker in ["co-morbidities", "comorbidities", "past medical history"]):
+                return "history or comorbidity text misread as diagnosis"
             if "education, training" in lowered_raw or "fitting of dme" in lowered_raw:
                 return "adjacent form instructions misread as diagnosis"
 
@@ -1908,6 +1993,16 @@ class ExtractorEngine(ExtractorNormalizationMixin):
 
     def normalize_provider(self, value):
         raw_value = str(value or "")
+        credential_suffix = None
+        credential_match = re.search(
+            r"(?:,\s*|\s+)(MD|M\.D\.|DO|D\.O\.|PA-C|PAC|PA|NP|FNP|APRN|RN|DC|DDS)\.?\s*$",
+            raw_value,
+            re.IGNORECASE,
+        )
+        if credential_match:
+            raw_credential = credential_match.group(1).replace(".", "").upper()
+            credential_suffix = "PA-C" if raw_credential in {"PAC", "PA-C"} else raw_credential
+            raw_value = raw_value[: credential_match.start()].strip(" ,-")
         if "," in raw_value:
             left, right = raw_value.split(",", 1)
             left = left.strip()
@@ -2087,6 +2182,9 @@ class ExtractorEngine(ExtractorNormalizationMixin):
 
         if len(value.split()) < 2:
             return None
+
+        if credential_suffix:
+            value = f"{value}, {credential_suffix}"
 
         return value
 
@@ -2381,7 +2479,39 @@ class ExtractorEngine(ExtractorNormalizationMixin):
         self.consolidate_clinical_minimal_request_intent(packet)
         self.consolidate_identifier_fields(packet)
         self.consolidate_provider_role_fields(packet)
+        self.consolidate_primary_packet_fields(packet)
         self.consolidate_service_date_range(packet)
+
+    def consolidate_primary_packet_fields(self, packet):
+        preferred_reason = self.select_best_observation(
+            packet,
+            "reason_for_request",
+            predicate=lambda entry: not self.is_generic_request_reason_text(entry.get("value")),
+        )
+        if not preferred_reason:
+            preferred_reason = self.select_best_observation(packet, "reason_for_request")
+        if preferred_reason:
+            self._apply_observation_to_field(packet, "reason_for_request", preferred_reason, force_history_reset=True)
+
+        preferred_diagnosis = self.select_best_observation(
+            packet,
+            "diagnosis",
+            predicate=lambda entry: self.observation_value_priority("diagnosis", entry.get("value")) > 0,
+        )
+        if not preferred_diagnosis:
+            preferred_diagnosis = self.select_best_observation(packet, "diagnosis")
+        if preferred_diagnosis:
+            self._apply_observation_to_field(packet, "diagnosis", preferred_diagnosis, force_history_reset=True)
+
+        preferred_facility = self.select_best_observation(
+            packet,
+            "facility",
+            predicate=lambda entry: self.observation_value_priority("facility", entry.get("value")) >= 0,
+        )
+        if not preferred_facility:
+            preferred_facility = self.select_best_observation(packet, "facility")
+        if preferred_facility:
+            self._apply_observation_to_field(packet, "facility", preferred_facility, force_history_reset=True)
 
     def consolidate_clinical_minimal_request_intent(self, packet):
         if packet.fields.get("reason_for_request"):
@@ -2501,6 +2631,16 @@ class ExtractorEngine(ExtractorNormalizationMixin):
                     "approved_referral": 4,
                     "unknown": 1,
                 },
+                "facility": {
+                    "approved_referral": 8,
+                    "cover_sheet": 6,
+                    "consult_request": 5,
+                    "seoc": 4,
+                    "lomn": 4,
+                    "rfs": 4,
+                    "clinical_notes": 3,
+                    "unknown": 1,
+                },
             }
             return priorities.get(field_name, {}).get(doc_type, 3 if doc_type and doc_type != "unknown" else 1)
 
@@ -2534,6 +2674,11 @@ class ExtractorEngine(ExtractorNormalizationMixin):
                     "justification": 4,
                     "clinical_support": 2,
                 },
+                "facility": {
+                    "identity_admin": 5,
+                    "routing_followup": 4,
+                    "request_scope": 2,
+                },
             }
             return priorities.get(field_name, {}).get(role, 0)
 
@@ -2541,6 +2686,7 @@ class ExtractorEngine(ExtractorNormalizationMixin):
             key=lambda entry: (
                 document_priority(entry),
                 section_priority(entry),
+                self.observation_value_priority(field_name, entry.get("value")),
                 float(entry.get("confidence") or 0.0),
                 len(str(entry.get("value") or "")),
                 1 if str(entry.get("document_type") or "").lower() != "unknown" else 0,
@@ -2552,6 +2698,13 @@ class ExtractorEngine(ExtractorNormalizationMixin):
     def _apply_observation_to_field(self, packet, target_field, observation, force_history_reset=False):
         if not observation:
             return
+
+        observation = dict(observation)
+        observed_value = observation.get("value")
+        if isinstance(observed_value, str):
+            normalized_value = self.clean_labeled_value(observed_value, target_field)
+            if normalized_value not in (None, "", [], {}):
+                observation["value"] = normalized_value
 
         packet.fields[target_field] = observation.get("value")
         packet.field_sources[target_field] = observation.get("source_file")

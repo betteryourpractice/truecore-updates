@@ -46,7 +46,7 @@ SUBMISSION_PROFILES = {
         },
         "expected_document_labels": [
             "Submission Cover Sheet",
-            "VA Form 10-10172",
+            "VA Authorization / Referral (10-10172 or 10-7080)",
             "Consultation & Treatment Request",
             "SEOC",
             "Letter of Medical Necessity",
