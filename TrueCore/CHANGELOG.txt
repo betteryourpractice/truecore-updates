@@ -880,3 +880,12 @@ CHANGES
 
 * Office Verification Audit
 
+
+
+VERSION: v5.8
+DATE: 2026-08-11
+
+CHANGES
+
+* Office analytics hardening, packet review display polish, and audit console resizing
+
