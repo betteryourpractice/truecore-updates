@@ -59,7 +59,7 @@ def _default_cases() -> list[RealPacketCase]:
                 "patient_name": "Nickoles, Billy",
                 "authorization_number": "VA0053074284",
                 "va_icn": "1016439260V811008",
-                "diagnosis": "low back pain",
+                "diagnosis": "other intervertebral disc degeneration, lumbar region (m51.36) i :",
             },
             contains_fields={
                 "reason_for_request": "pain treatment options",
